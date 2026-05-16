@@ -1082,6 +1082,15 @@ export async function dispatchRequest(
             tab: shortId,
           });
         }
+        case "events": {
+          const traceResult = tab.getTraceEvents({ since: request.since });
+          return ok(request.id, {
+            traceEvents: traceResult.items,
+            traceStatus: { recording: tab.traceRecording, eventCount: tab.traceEvents.size } satisfies TraceStatus,
+            tab: shortId,
+            cursor: traceResult.cursor,
+          });
+        }
         default:
           return fail(request.id, `Unknown trace subcommand: ${subCommand}`);
       }

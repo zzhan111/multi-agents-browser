@@ -11,7 +11,7 @@
 export const TRACE_PREFIX = "__BB_BROWSER_TRACE_8fd3__:";
 
 export const TRACE_INJECTION_SCRIPT = `
-(function() {
+(function bbInject() {
   if (window.__bbBrowserTraceInjected) return;
   window.__bbBrowserTraceInjected = true;
 
@@ -95,16 +95,44 @@ export const TRACE_INJECTION_SCRIPT = `
     console.log('__BB_BROWSER_TRACE_8fd3__:' + JSON.stringify(eventObj));
   }
 
+  // ---- Interactive element detection ----
+  var _interactiveTags = new Set(['a','button','input','textarea','select','option','label','summary','details']);
+  var _interactiveRoles = new Set(['button','link','textbox','checkbox','radio','combobox','slider','tab','menuitem','option','switch','searchbox','spinbutton']);
+  function isInteractive(el) {
+    if (!el || el === document.body || el === document.documentElement) return false;
+    if (_interactiveTags.has(el.tagName.toLowerCase())) return true;
+    var role = el.getAttribute('role');
+    if (role && _interactiveRoles.has(role)) return true;
+    if (el.getAttribute('tabindex') !== null) return true;
+    if (el.tagName === 'IMG' && el.getAttribute('usemap')) return true;
+    return false;
+  }
+  function findInteractiveTarget(el) {
+    var cur = el;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      if (isInteractive(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
   // ---- Click handler ----
+  var _lastClickKey = null, _lastClickTime = 0;
   document.addEventListener('click', function(e) {
     if (!window.__bbBrowserTraceRecording) return;
-    var target = e.target;
+    var target = findInteractiveTarget(e.target);
     if (!target) return;
     var info = extractInfo(target);
     var isCheckbox = target.tagName === 'INPUT' && (target.type || '').toLowerCase() === 'checkbox';
+    // Deduplicate: same element clicked within 300ms
+    var key = target.tagName + ':' + getXPath(target);
+    var now = Date.now();
+    if (key === _lastClickKey && now - _lastClickTime < 300) return;
+    _lastClickKey = key;
+    _lastClickTime = now;
     emit({
       type: isCheckbox ? 'check' : 'click',
-      timestamp: Date.now(),
+      timestamp: now,
       url: location.href,
       ref: getHighlightIndex(target),
       xpath: getXPath(target),
@@ -164,14 +192,20 @@ export const TRACE_INJECTION_SCRIPT = `
     });
   }, true);
 
-  // ---- Keydown handler (special keys only) ----
+  // ---- Keydown handler (special keys only, deduplicated) ----
   var _capturedKeys = new Set(['Enter','Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown','Backspace','Delete']);
+  var _lastKeyLog = null, _lastKeyTime = 0;
   document.addEventListener('keydown', function(e) {
     if (!window.__bbBrowserTraceRecording) return;
     var key = e.key, keyLog = '';
     if (_capturedKeys.has(key)) keyLog = key;
     else if ((e.ctrlKey || e.metaKey) && key.length === 1 && /[a-zA-Z0-9]/.test(key)) keyLog = (e.metaKey ? 'Meta' : 'Control') + '+' + key.toLowerCase();
     if (!keyLog) return;
+    // Deduplicate: same key within 50ms (keyboard repeat)
+    var now = Date.now();
+    if (keyLog === _lastKeyLog && now - _lastKeyTime < 50) return;
+    _lastKeyLog = keyLog;
+    _lastKeyTime = now;
     var target = e.target;
     var info = target ? extractInfo(target) : { role: '', name: '', tag: 'document' };
     emit({
@@ -207,5 +241,20 @@ export const TRACE_INJECTION_SCRIPT = `
       _scrollTimer = null;
     }, 300);
   }, { passive: true });
+
+  // ---- Inject into accessible frames (same-origin frameset/iframe support) ----
+  Array.from(document.querySelectorAll('frame, iframe')).forEach(function(el) {
+    try {
+      var fw = el.contentWindow;
+      if (fw && !fw.__bbBrowserTraceInjected) {
+        var script = fw.document.createElement('script');
+        script.textContent = '(' + bbInject.toString() + ')()';
+        (fw.document.head || fw.document.documentElement).appendChild(script);
+        script.parentNode && script.parentNode.removeChild(script);
+        // Propagate recording state
+        fw.__bbBrowserTraceRecording = window.__bbBrowserTraceRecording;
+      }
+    } catch(e) {} // Cross-origin frames are inaccessible — skip silently
+  });
 })();
 `;

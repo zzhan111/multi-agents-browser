@@ -696,7 +696,14 @@ export class CdpConnection {
 
   /** Remove trace recording flag from a page (stop recording). */
   async stopTraceInjection(targetId: string): Promise<void> {
-    await this.evaluate(targetId, "window.__bbBrowserTraceRecording = false", true);
+    await this.evaluate(
+      targetId,
+      `window.__bbBrowserTraceRecording = false;
+       Array.from(document.querySelectorAll('frame,iframe')).forEach(function(el){
+         try{ if(el.contentWindow) el.contentWindow.__bbBrowserTraceRecording=false; }catch(e){}
+       });`,
+      true,
+    );
   }
 
   /**
