@@ -677,9 +677,26 @@ export class CdpConnection {
 
   /** Inject trace event listeners into a page (start recording). */
   async startTraceInjection(targetId: string): Promise<void> {
-    // Inject DOM event listener script that uses console.log for event reporting
-    await this.evaluate(targetId, TRACE_INJECTION_SCRIPT, true);
+    // Order matters: set the recording flag BEFORE running the injection script,
+    // so that when the script walks frames and copies `__bbBrowserTraceRecording`
+    // into each same-origin frame, the value being copied is already `true`.
     await this.evaluate(targetId, "window.__bbBrowserTraceRecording = true", true);
+    await this.evaluate(targetId, TRACE_INJECTION_SCRIPT, true);
+    // Defensive: force-sync recording state into all accessible frames.
+    // Covers (a) frames whose contentWindow was unreadable during initial walk
+    // and (b) frames injected by a previous start() with recording=false.
+    await this.evaluate(
+      targetId,
+      `(function(){
+        Array.from(document.querySelectorAll('frame, iframe')).forEach(function(el){
+          try {
+            var fw = el.contentWindow;
+            if (fw) fw.__bbBrowserTraceRecording = true;
+          } catch(e) {}
+        });
+      })()`,
+      true,
+    );
     // Health check: verify the injection actually took effect (e.g. console.log
     // wasn't overridden, no CSP/sandbox blocking the script).
     const injected = await this.evaluate<boolean>(

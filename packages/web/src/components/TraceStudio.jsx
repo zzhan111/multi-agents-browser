@@ -76,8 +76,11 @@ function TraceStudio() {
           for (const event of events) {
             addTraceEvent(event);
           }
-          if (response.cursor !== undefined) {
-            lastEventCursorRef.current = response.cursor;
+          // Cursor is returned inside response.data, not at top level.
+          // Without this, polling re-fetches all events every tick and duplicates them.
+          const nextCursor = response.data.cursor;
+          if (nextCursor !== undefined) {
+            lastEventCursorRef.current = nextCursor;
           }
           // 如果后端停止了录制（例如页面导航导致），同步状态
           if (response.data.traceStatus && !response.data.traceStatus.recording) {

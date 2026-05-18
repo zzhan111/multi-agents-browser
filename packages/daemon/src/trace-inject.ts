@@ -12,8 +12,16 @@ export const TRACE_PREFIX = "__BB_BROWSER_TRACE_8fd3__:";
 
 export const TRACE_INJECTION_SCRIPT = `
 (function bbInject() {
-  if (window.__bbBrowserTraceInjected) return;
+  // Re-entrant: if the top-level was already injected, we still want to walk
+  // frames again because a Page.frameNavigated event may have spawned new ones
+  // (frameset 'mainFrame' navigates between sub-pages on portal sites).
+  var alreadyInjected = !!window.__bbBrowserTraceInjected;
   window.__bbBrowserTraceInjected = true;
+  if (alreadyInjected) {
+    // Jump straight to the frame walker at the bottom.
+    walkFrames();
+    return;
+  }
 
   // ---- Helpers ----
 
@@ -243,18 +251,33 @@ export const TRACE_INJECTION_SCRIPT = `
   }, { passive: true });
 
   // ---- Inject into accessible frames (same-origin frameset/iframe support) ----
-  Array.from(document.querySelectorAll('frame, iframe')).forEach(function(el) {
+  function injectIntoFrame(el) {
     try {
       var fw = el.contentWindow;
-      if (fw && !fw.__bbBrowserTraceInjected) {
+      if (!fw) return;
+      // Always (re)sync recording state, even if already injected.
+      // The frame may have been injected during a prior start() when
+      // recording was false, then never updated.
+      fw.__bbBrowserTraceRecording = window.__bbBrowserTraceRecording;
+      if (!fw.__bbBrowserTraceInjected) {
         var script = fw.document.createElement('script');
         script.textContent = '(' + bbInject.toString() + ')()';
         (fw.document.head || fw.document.documentElement).appendChild(script);
         script.parentNode && script.parentNode.removeChild(script);
-        // Propagate recording state
-        fw.__bbBrowserTraceRecording = window.__bbBrowserTraceRecording;
       }
     } catch(e) {} // Cross-origin frames are inaccessible — skip silently
-  });
+  }
+  function walkFrames() {
+    Array.from(document.querySelectorAll('frame, iframe')).forEach(function(el) {
+      injectIntoFrame(el);
+      // Re-inject when this frame loads new content (frameset navigation,
+      // iframe src change, etc.). Guard against multiple registrations.
+      if (!el.__bbBrowserLoadHooked) {
+        el.__bbBrowserLoadHooked = true;
+        el.addEventListener('load', function() { injectIntoFrame(el); });
+      }
+    });
+  }
+  walkFrames();
 })();
 `;
