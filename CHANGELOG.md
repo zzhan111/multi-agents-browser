@@ -10,6 +10,7 @@
 - **web/TabPanel**: 过滤 chrome://errorpage 等无效 tab ([#3](https://github.com/epiral/bb-browser/pull/3))
 - **web/store**: SET_TRACE_EVENTS 同步更新 traceEventCount ([#3](https://github.com/epiral/bb-browser/pull/3))
 - **web/vite**: 端口 3000→3004 + strictPort，防止端口漂移 ([#3](https://github.com/epiral/bb-browser/pull/3))
+- **cli/cdp-discovery**: 添加 360ChromeX 浏览器路径探测，使用本机 profile 而非新建空白 profile ([#3](https://github.com/epiral/bb-browser/pull/3))
 
 ## [0.11.6](https://github.com/epiral/bb-browser/compare/bb-browser-v0.11.5...bb-browser-v0.11.6) (2026-05-11)
 
