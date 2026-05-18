@@ -4,6 +4,7 @@
 
 ### Bug Fixes
 
+- **web/ExportDialog**: 导出使用 cssSelector 回退选择器（ref 不存在时），添加 page.goto() 导航步骤，支持 select/check/scroll 事件类型，转义字符串中的单引号 (361b9c9)
 - **daemon/trace-inject**: frameset 页面事件捕获 — 设置 recording 标志先于脚本注入，添加 frame load 监听器，脚本支持重入 (03c0cbf)
 - **web/TraceStudio**: 使用 Web Worker 定时器轮询（Chrome 对隐藏标签 setInterval 限流 ≥60s），仅在 recording false→true 时重置 cursor 防止事件重复 (c5651de)
 - **web/store**: ADD_TRACE_EVENT 按 seq 去重，SET_TRACE_EVENTS 同步 realTimeStats (c5651de)
