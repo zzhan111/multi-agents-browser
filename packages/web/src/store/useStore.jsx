@@ -46,7 +46,7 @@ function reducer(state, action) {
     case 'SET_TRACE_RECORDING':
       return { ...state, traceRecording: action.payload };
     case 'SET_TRACE_EVENTS':
-      return { ...state, traceEvents: action.payload };
+      return { ...state, traceEvents: action.payload, traceEventCount: action.payload.length };
     case 'ADD_TRACE_EVENT':
       return {
         ...state,

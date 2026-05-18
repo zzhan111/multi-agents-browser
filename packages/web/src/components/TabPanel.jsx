@@ -45,7 +45,7 @@ function TabPanel() {
         {tabs.length === 0 ? (
           <div className="empty-state">无标签页</div>
         ) : (
-          tabs.map((tab, index) => (
+          tabs.filter(tab => tab.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))).map((tab, index) => (
             <div
               key={tab.tabId}
               className={`tab-item ${tab.tabId === activeTabId ? 'active' : ''}`}

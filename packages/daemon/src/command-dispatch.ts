@@ -642,6 +642,22 @@ export async function dispatchRequest(
       });
       if (request.action === "click") {
         await mouseClick(cdp, target.id, point.x, point.y);
+        // Also trigger element.click() for React synthetic event compatibility
+        try {
+          const resolved = await cdp.sessionCommand<{ object: { objectId: string } }>(
+            target.id,
+            "DOM.resolveNode",
+            { backendNodeId },
+          );
+          if (resolved?.object?.objectId) {
+            await cdp.sessionCommand(target.id, "Runtime.callFunctionOn", {
+              objectId: resolved.object.objectId,
+              functionDeclaration: "function() { this.click(); }",
+            });
+          }
+        } catch {
+          // Non-critical — click via CDP events already fired
+        }
       }
       return ok(request.id, { tab: shortId, seq });
     }

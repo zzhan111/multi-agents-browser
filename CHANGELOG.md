@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **daemon/click**: element.click() 回退，修复 React 合成事件下 browser_click 不可靠 ([#3](https://github.com/epiral/bb-browser/pull/3))
+- **daemon/trace-inject**: scroll 阈值 50→200px，减少滚动事件过度采集 ([#3](https://github.com/epiral/bb-browser/pull/3))
+- **web/TraceStudio**: 轮询新增 tabId 参数并重置 cursor，修复录制中事件不展示 ([#3](https://github.com/epiral/bb-browser/pull/3))
+- **web/TabPanel**: 过滤 chrome://errorpage 等无效 tab ([#3](https://github.com/epiral/bb-browser/pull/3))
+- **web/store**: SET_TRACE_EVENTS 同步更新 traceEventCount ([#3](https://github.com/epiral/bb-browser/pull/3))
+- **web/vite**: 端口 3000→3004 + strictPort，防止端口漂移 ([#3](https://github.com/epiral/bb-browser/pull/3))
+
 ## [0.11.6](https://github.com/epiral/bb-browser/compare/bb-browser-v0.11.5...bb-browser-v0.11.6) (2026-05-11)
 
 

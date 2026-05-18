@@ -17,6 +17,7 @@ function TraceStudio() {
     setConnectionError,
     setTabs,
     setActiveTab,
+    activeTab,
     traceRecording,
     setTraceRecording,
     setTraceEvents,
@@ -60,10 +61,14 @@ function TraceStudio() {
   useEffect(() => {
     if (!traceRecording || !connected) return;
 
+    // 新录制开始时重置 cursor
+    lastEventCursorRef.current = null;
+
     const interval = setInterval(async () => {
       try {
         const response = await daemon.send('trace', {
           traceCommand: 'events',
+          tabId: activeTab?.tabId,
           since: lastEventCursorRef.current,
         });
         if (response.success) {
@@ -85,15 +90,16 @@ function TraceStudio() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [traceRecording, connected, setTraceRecording, addTraceEvent]);
+  }, [traceRecording, connected, activeTab, setTraceRecording, addTraceEvent]);
 
   // 加载标签页列表
   const loadTabs = async () => {
     try {
       const response = await daemon.send('tab_list');
       if (response.success && response.data.tabs) {
-        setTabs(response.data.tabs);
-        const activeTab = response.data.tabs.find(t => t.active);
+        const validTabs = response.data.tabs.filter(t => t.url && (t.url.startsWith('http://') || t.url.startsWith('https://')));
+        setTabs(validTabs);
+        const activeTab = validTabs.find(t => t.active);
         if (activeTab) {
           setActiveTab(activeTab, activeTab.tabId);
         }

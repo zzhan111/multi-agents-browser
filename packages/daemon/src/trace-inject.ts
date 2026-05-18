@@ -222,7 +222,7 @@ export const TRACE_INJECTION_SCRIPT = `
     });
   }, true);
 
-  // ---- Scroll handler (debounced 300ms) ----
+  // ---- Scroll handler (debounced 300ms, min 200px) ----
   var _scrollTimer = null, _scrollStartY = 0;
   window.addEventListener('scroll', function() {
     if (!window.__bbBrowserTraceRecording) return;
@@ -230,7 +230,7 @@ export const TRACE_INJECTION_SCRIPT = `
     else clearTimeout(_scrollTimer);
     _scrollTimer = setTimeout(function() {
       var deltaY = window.scrollY - _scrollStartY;
-      if (Math.abs(deltaY) < 50) { _scrollTimer = null; return; }
+      if (Math.abs(deltaY) < 200) { _scrollTimer = null; return; }
       emit({
         type: 'scroll',
         timestamp: Date.now(),
