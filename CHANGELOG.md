@@ -4,11 +4,14 @@
 
 ### Bug Fixes
 
+- **daemon/trace-inject**: frameset 页面事件捕获 — 设置 recording 标志先于脚本注入，添加 frame load 监听器，脚本支持重入 (03c0cbf)
+- **web/TraceStudio**: 使用 Web Worker 定时器轮询（Chrome 对隐藏标签 setInterval 限流 ≥60s），仅在 recording false→true 时重置 cursor 防止事件重复 (c5651de)
+- **web/store**: ADD_TRACE_EVENT 按 seq 去重，SET_TRACE_EVENTS 同步 realTimeStats (c5651de)
+- **web/TraceTimeline**: 使用 event.seq 作为 React key 替代 index，稳定 DOM diff (c5651de)
 - **daemon/click**: element.click() 回退，修复 React 合成事件下 browser_click 不可靠 ([#3](https://github.com/epiral/bb-browser/pull/3))
 - **daemon/trace-inject**: scroll 阈值 50→200px，减少滚动事件过度采集 ([#3](https://github.com/epiral/bb-browser/pull/3))
 - **web/TraceStudio**: 轮询新增 tabId 参数并重置 cursor，修复录制中事件不展示 ([#3](https://github.com/epiral/bb-browser/pull/3))
 - **web/TabPanel**: 过滤 chrome://errorpage 等无效 tab ([#3](https://github.com/epiral/bb-browser/pull/3))
-- **web/store**: SET_TRACE_EVENTS 同步更新 traceEventCount ([#3](https://github.com/epiral/bb-browser/pull/3))
 - **web/vite**: 端口 3000→3004 + strictPort，防止端口漂移 ([#3](https://github.com/epiral/bb-browser/pull/3))
 - **cli/cdp-discovery**: 添加 360ChromeX 浏览器路径探测，使用本机 profile 而非新建空白 profile ([#3](https://github.com/epiral/bb-browser/pull/3))
 
