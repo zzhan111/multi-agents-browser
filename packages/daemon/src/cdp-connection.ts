@@ -341,10 +341,16 @@ export class CdpConnection {
       return;
     }
 
-    // Trace: re-inject event listeners after navigation
+    // Trace: re-inject event listeners after navigation + record main-frame nav
     if (method === "Page.frameNavigated") {
       if (tab.traceRecording) {
+        const frame = params.frame as JsonObject | undefined;
+        const isMainFrame = !!frame && !frame.parentId;
+        const newUrl = typeof frame?.url === "string" ? frame.url : "";
         this.evaluate(targetId, TRACE_INJECTION_SCRIPT, true).catch(() => {});
+        if (isMainFrame && newUrl && !newUrl.startsWith("chrome-error://")) {
+          tab.addTraceNavigation(newUrl);
+        }
       }
       return;
     }
@@ -420,7 +426,7 @@ export class CdpConnection {
             pixels?: number; checked?: boolean;
             elementRole?: string; elementName?: string; elementTag?: string;
           };
-          const allowedTypes = new Set(["click", "fill", "select", "press", "scroll", "check"]);
+          const allowedTypes = new Set(["click", "fill", "select", "press", "scroll", "check", "navigation"]);
           if (!parsed || typeof parsed.type !== "string" || !allowedTypes.has(parsed.type)) {
             return;
           }
@@ -428,22 +434,26 @@ export class CdpConnection {
           const pickStr = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
           const pickNum = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
           const pickBool = (v: unknown): boolean | undefined => (typeof v === "boolean" ? v : undefined);
-          tab.addTraceEvent({
-            type: parsed.type as TraceEvent["type"],
-            timestamp: typeof parsed.timestamp === "number" ? parsed.timestamp : Date.now(),
-            url: pickStr(parsed.url) ?? "",
-            ref: pickNum(parsed.ref),
-            xpath: pickStr(parsed.xpath),
-            cssSelector: pickStr(parsed.cssSelector),
-            value: pickStr(parsed.value),
-            key: pickStr(parsed.key),
-            direction,
-            pixels: pickNum(parsed.pixels),
-            checked: pickBool(parsed.checked),
-            elementRole: pickStr(parsed.elementRole),
-            elementName: pickStr(parsed.elementName),
-            elementTag: pickStr(parsed.elementTag),
-          });
+          if (parsed.type === "navigation") {
+            tab.addTraceNavigation(pickStr(parsed.url) ?? "");
+          } else {
+            tab.addTraceEvent({
+              type: parsed.type as TraceEvent["type"],
+              timestamp: typeof parsed.timestamp === "number" ? parsed.timestamp : Date.now(),
+              url: pickStr(parsed.url) ?? "",
+              ref: pickNum(parsed.ref),
+              xpath: pickStr(parsed.xpath),
+              cssSelector: pickStr(parsed.cssSelector),
+              value: pickStr(parsed.value),
+              key: pickStr(parsed.key),
+              direction,
+              pixels: pickNum(parsed.pixels),
+              checked: pickBool(parsed.checked),
+              elementRole: pickStr(parsed.elementRole),
+              elementName: pickStr(parsed.elementName),
+              elementTag: pickStr(parsed.elementTag),
+            });
+          }
           return; // Don't add to regular console messages
         } catch {
           // Parse failed — fall through to regular console handler

@@ -5,25 +5,52 @@
 import { useStore } from '../store/useStore';
 import { useState } from 'react';
 
-/** Escape single quotes for embedding in JS/Python strings. */
-function esc(str) {
-  if (!str) return '';
-  return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+/**
+ * Quote a value as a JS/Python string literal. Uses JSON.stringify so all
+ * special chars (newline, tab, unicode, backslash, quotes) are handled.
+ */
+function q(str) {
+  return JSON.stringify(str ?? '');
 }
 
 /**
- * Return the best available CSS selector for a trace event.
- * Priority: ref attribute > cssSelector > xpath (wrapped in comment).
+ * Pick the locator for a trace event under the chosen selector mode.
+ * Returns `{ value, kind }` where kind is 'css' | 'xpath' | null.
+ * Modes:
+ *   - auto:  ref → css → xpath (default, matches bb-browser priority)
+ *   - css:   cssSelector → xpath (portable, no bb-browser attr dependency)
+ *   - xpath: xpath only (most stable across DOM changes)
  */
-function bestSelector(event) {
-  if (event.ref) return `[ref="${event.ref}"]`;
-  if (event.cssSelector) return event.cssSelector;
+function pickSelector(event, mode) {
+  if (mode === 'xpath') {
+    if (event.xpath) return { value: event.xpath, kind: 'xpath' };
+    return null;
+  }
+  if (mode === 'css') {
+    if (event.cssSelector) return { value: event.cssSelector, kind: 'css' };
+    if (event.xpath) return { value: event.xpath, kind: 'xpath' };
+    return null;
+  }
+  // auto
+  if (event.ref !== undefined && event.ref !== null) {
+    return { value: `[data-highlight-index="${event.ref}"]`, kind: 'css' };
+  }
+  if (event.cssSelector) return { value: event.cssSelector, kind: 'css' };
+  if (event.xpath) return { value: event.xpath, kind: 'xpath' };
   return null;
+}
+
+/** Playwright locator string: xpath selectors get an explicit prefix. */
+function playwrightLocator(sel) {
+  if (sel.kind === 'xpath') return `xpath=${sel.value}`;
+  return sel.value;
 }
 
 function ExportDialog() {
   const { showExporter, setShowExporter, traceEvents, activeTab } = useStore();
   const [exportFormat, setExportFormat] = useState('javascript');
+  const [selectorMode, setSelectorMode] = useState('auto');
+  const [addWaits, setAddWaits] = useState(true);
   const [exportedCode, setExportedCode] = useState('');
 
   if (!showExporter) return null;
@@ -49,30 +76,61 @@ function ExportDialog() {
     }
   };
 
+  /**
+   * Drop the first navigation event when it matches activeTab.url so we don't
+   * emit `page.goto(X)` twice (the codegen always opens with that URL).
+   */
+  const normalizedEvents = () => {
+    const initialUrl = activeTab?.url || '';
+    const events = traceEvents.slice();
+    if (
+      initialUrl &&
+      events.length > 0 &&
+      events[0].type === 'navigation' &&
+      events[0].url === initialUrl
+    ) {
+      events.shift();
+    }
+    return events;
+  };
+
   const generateJavaScript = () => {
+    const events = normalizedEvents();
     let code = '// 自动生成的录制脚本\n';
     code += `// URL: ${activeTab?.url || 'N/A'}\n`;
-    code += `// 生成时间: ${new Date().toLocaleString()}\n\n`;
+    code += `// 生成时间: ${new Date().toLocaleString()}\n`;
+    code += `// 选择器模式: ${selectorMode}\n\n`;
     code += 'async function run() {\n';
 
-    // Navigation: always start with the recorded page URL
     if (activeTab?.url) {
-      code += `  await page.goto('${esc(activeTab.url)}');\n`;
+      code += `  await page.goto(${q(activeTab.url)});\n`;
     }
 
-    traceEvents.forEach((event, index) => {
+    events.forEach((event, index) => {
       code += `  // 步骤 ${index + 1}: ${event.type}\n`;
-      const sel = bestSelector(event);
-      if (event.type === 'click' && sel) {
-        code += `  await page.click('${esc(sel)}');\n`;
-      } else if (event.type === 'fill' && sel && event.value) {
-        code += `  await page.fill('${esc(sel)}', '${esc(event.value)}');\n`;
-      } else if (event.type === 'select' && sel && event.value) {
-        code += `  await page.selectOption('${esc(sel)}', '${esc(event.value)}');\n`;
-      } else if (event.type === 'check' && sel) {
-        code += `  await page.check('${esc(sel)}');\n`;
+
+      if (event.type === 'navigation') {
+        if (event.url) code += `  await page.goto(${q(event.url)});\n`;
+        return;
+      }
+
+      const sel = pickSelector(event, selectorMode);
+      const locator = sel ? playwrightLocator(sel) : null;
+
+      if (event.type === 'click' && locator) {
+        if (addWaits) code += `  await page.waitForSelector(${q(locator)});\n`;
+        code += `  await page.click(${q(locator)});\n`;
+      } else if (event.type === 'fill' && locator && event.value) {
+        if (addWaits) code += `  await page.waitForSelector(${q(locator)});\n`;
+        code += `  await page.fill(${q(locator)}, ${q(event.value)});\n`;
+      } else if (event.type === 'select' && locator && event.value) {
+        if (addWaits) code += `  await page.waitForSelector(${q(locator)});\n`;
+        code += `  await page.selectOption(${q(locator)}, ${q(event.value)});\n`;
+      } else if (event.type === 'check' && locator) {
+        if (addWaits) code += `  await page.waitForSelector(${q(locator)});\n`;
+        code += `  await page.check(${q(locator)});\n`;
       } else if (event.type === 'press' && event.key) {
-        code += `  await page.keyboard.press('${esc(event.key)}');\n`;
+        code += `  await page.keyboard.press(${q(event.key)});\n`;
       } else if (event.type === 'scroll') {
         const dir = event.direction || 'down';
         const px = event.pixels || 300;
@@ -85,28 +143,41 @@ function ExportDialog() {
   };
 
   const generatePlaywright = () => {
+    const events = normalizedEvents();
     let code = '// Playwright 测试脚本\n';
+    code += `// 选择器模式: ${selectorMode}\n`;
     code += `import { test, expect } from '@playwright/test';\n\n`;
     code += `test('录制测试', async ({ page }) => {\n`;
 
-    // Navigation
     if (activeTab?.url) {
-      code += `  await page.goto('${esc(activeTab.url)}');\n`;
+      code += `  await page.goto(${q(activeTab.url)});\n`;
     }
 
-    traceEvents.forEach((event, index) => {
+    events.forEach((event) => {
       code += `  // ${event.type}\n`;
-      const sel = bestSelector(event);
-      if (event.type === 'click' && sel) {
-        code += `  await page.locator('${esc(sel)}').click();\n`;
-      } else if (event.type === 'fill' && sel && event.value) {
-        code += `  await page.locator('${esc(sel)}').fill('${esc(event.value)}');\n`;
-      } else if (event.type === 'select' && sel && event.value) {
-        code += `  await page.locator('${esc(sel)}').selectOption('${esc(event.value)}');\n`;
-      } else if (event.type === 'check' && sel) {
-        code += `  await page.locator('${esc(sel)}').check();\n`;
+
+      if (event.type === 'navigation') {
+        if (event.url) code += `  await page.goto(${q(event.url)});\n`;
+        return;
+      }
+
+      const sel = pickSelector(event, selectorMode);
+      const locator = sel ? playwrightLocator(sel) : null;
+
+      if (event.type === 'click' && locator) {
+        if (addWaits) code += `  await page.locator(${q(locator)}).waitFor();\n`;
+        code += `  await page.locator(${q(locator)}).click();\n`;
+      } else if (event.type === 'fill' && locator && event.value) {
+        if (addWaits) code += `  await page.locator(${q(locator)}).waitFor();\n`;
+        code += `  await page.locator(${q(locator)}).fill(${q(event.value)});\n`;
+      } else if (event.type === 'select' && locator && event.value) {
+        if (addWaits) code += `  await page.locator(${q(locator)}).waitFor();\n`;
+        code += `  await page.locator(${q(locator)}).selectOption(${q(event.value)});\n`;
+      } else if (event.type === 'check' && locator) {
+        if (addWaits) code += `  await page.locator(${q(locator)}).waitFor();\n`;
+        code += `  await page.locator(${q(locator)}).check();\n`;
       } else if (event.type === 'press' && event.key) {
-        code += `  await page.keyboard.press('${esc(event.key)}');\n`;
+        code += `  await page.keyboard.press(${q(event.key)});\n`;
       } else if (event.type === 'scroll') {
         const dir = event.direction || 'down';
         const px = event.pixels || 300;
@@ -119,7 +190,9 @@ function ExportDialog() {
   };
 
   const generatePython = () => {
+    const events = normalizedEvents();
     let code = '# Selenium Python 脚本\n';
+    code += `# 选择器模式: ${selectorMode}\n`;
     code += `from selenium import webdriver\n`;
     code += `from selenium.webdriver.common.by import By\n`;
     code += `from selenium.webdriver.common.keys import Keys\n`;
@@ -128,24 +201,40 @@ function ExportDialog() {
     code += `driver = webdriver.Chrome()\n`;
     code += `wait = WebDriverWait(driver, 10)\n\n`;
 
-    // Navigation
     if (activeTab?.url) {
-      code += `driver.get('${esc(activeTab.url)}')\n\n`;
+      code += `driver.get(${q(activeTab.url)})\n\n`;
     }
 
-    traceEvents.forEach((event, index) => {
-      const sel = bestSelector(event);
+    events.forEach((event) => {
+      if (event.type === 'navigation') {
+        if (event.url) code += `driver.get(${q(event.url)})\n`;
+        return;
+      }
+
+      const sel = pickSelector(event, selectorMode);
+      if (!sel && event.type !== 'press' && event.type !== 'scroll') return;
+      const by = sel?.kind === 'xpath' ? 'By.XPATH' : 'By.CSS_SELECTOR';
+
+      const waitFor = (loc) =>
+        addWaits
+          ? `wait.until(EC.presence_of_element_located((${by}, ${q(loc)})))\n`
+          : '';
+
       if (event.type === 'click' && sel) {
-        code += `driver.find_element(By.CSS_SELECTOR, '${esc(sel)}').click()\n`;
+        code += waitFor(sel.value);
+        code += `driver.find_element(${by}, ${q(sel.value)}).click()\n`;
       } else if (event.type === 'fill' && sel && event.value) {
-        code += `el = driver.find_element(By.CSS_SELECTOR, '${esc(sel)}')\n`;
+        code += waitFor(sel.value);
+        code += `el = driver.find_element(${by}, ${q(sel.value)})\n`;
         code += `el.clear()\n`;
-        code += `el.send_keys('${esc(event.value)}')\n`;
+        code += `el.send_keys(${q(event.value)})\n`;
       } else if (event.type === 'select' && sel && event.value) {
         code += `from selenium.webdriver.support.ui import Select\n`;
-        code += `Select(driver.find_element(By.CSS_SELECTOR, '${esc(sel)}')).select_by_value('${esc(event.value)}')\n`;
+        code += waitFor(sel.value);
+        code += `Select(driver.find_element(${by}, ${q(sel.value)})).select_by_value(${q(event.value)})\n`;
       } else if (event.type === 'check' && sel) {
-        code += `el = driver.find_element(By.CSS_SELECTOR, '${esc(sel)}')\n`;
+        code += waitFor(sel.value);
+        code += `el = driver.find_element(${by}, ${q(sel.value)})\n`;
         code += `if not el.is_selected(): el.click()\n`;
       } else if (event.type === 'press' && event.key) {
         code += `from selenium.webdriver.common.action_chains import ActionChains\n`;
@@ -154,7 +243,7 @@ function ExportDialog() {
         const dir = event.direction || 'down';
         const px = event.pixels || 300;
         const y = dir === 'up' ? -px : px;
-        code += `driver.execute_script('window.scrollBy(0, ${y})')\n`;
+        code += `driver.execute_script(${q(`window.scrollBy(0, ${y})`)})\n`;
       }
     });
 
@@ -231,6 +320,48 @@ function ExportDialog() {
                 onChange={(e) => setExportFormat(e.target.value)}
               />
               Python
+            </label>
+          </div>
+
+          <div className="export-options" style={{ marginTop: 8 }}>
+            <span style={{ marginRight: 8, opacity: 0.7 }}>选择器:</span>
+            <label title="ref (bb-browser) → CSS → XPath">
+              <input
+                type="radio"
+                value="auto"
+                checked={selectorMode === 'auto'}
+                onChange={(e) => setSelectorMode(e.target.value)}
+              />
+              Auto
+            </label>
+            <label title="CSS 选择器，便于在标准 Playwright/Selenium 环境运行">
+              <input
+                type="radio"
+                value="css"
+                checked={selectorMode === 'css'}
+                onChange={(e) => setSelectorMode(e.target.value)}
+              />
+              CSS
+            </label>
+            <label title="XPath，跨 DOM 变化更稳定">
+              <input
+                type="radio"
+                value="xpath"
+                checked={selectorMode === 'xpath'}
+                onChange={(e) => setSelectorMode(e.target.value)}
+              />
+              XPath
+            </label>
+            <label
+              style={{ marginLeft: 16 }}
+              title="在每个动作前插入 waitForSelector / WebDriverWait"
+            >
+              <input
+                type="checkbox"
+                checked={addWaits}
+                onChange={(e) => setAddWaits(e.target.checked)}
+              />
+              智能等待
             </label>
           </div>
 

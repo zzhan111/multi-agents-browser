@@ -250,6 +250,20 @@ export const TRACE_INJECTION_SCRIPT = `
     }, 300);
   }, { passive: true });
 
+  // ---- Navigation handler (SPA history: popstate + hashchange) ----
+  // Captures back/forward and hash changes inside an SPA. Full-document
+  // navigations are reported by the daemon via Page.frameNavigated instead.
+  var _lastNavUrl = location.href;
+  function emitNav() {
+    if (!window.__bbBrowserTraceRecording) return;
+    var url = location.href;
+    if (url === _lastNavUrl) return;
+    _lastNavUrl = url;
+    emit({ type: 'navigation', timestamp: Date.now(), url: url });
+  }
+  window.addEventListener('popstate', emitNav);
+  window.addEventListener('hashchange', emitNav);
+
   // ---- Inject into accessible frames (same-origin frameset/iframe support) ----
   function injectIntoFrame(el) {
     try {
