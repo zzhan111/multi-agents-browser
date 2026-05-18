@@ -72,7 +72,7 @@ function TraceTimeline() {
         ) : (
           traceEvents.map((event, index) => (
             <div
-              key={index}
+              key={event.seq ?? `idx-${index}`}
               className={`timeline-event ${selectedEventIndex === index ? 'selected' : ''}`}
               onClick={() => handleEventClick(event, index)}
             >

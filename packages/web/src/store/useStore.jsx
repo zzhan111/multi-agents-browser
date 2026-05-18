@@ -45,22 +45,47 @@ function reducer(state, action) {
       return { ...state, activeTab: action.payload.tab, activeTabId: action.payload.tabId };
     case 'SET_TRACE_RECORDING':
       return { ...state, traceRecording: action.payload };
-    case 'SET_TRACE_EVENTS':
-      return { ...state, traceEvents: action.payload, traceEventCount: action.payload.length };
-    case 'ADD_TRACE_EVENT':
+    case 'SET_TRACE_EVENTS': {
+      // Used by handleStop to replace the in-memory event list with the
+      // authoritative one from the daemon. Sync realTimeStats too so the
+      // monitor count doesn't stay stuck at a previous (possibly inflated)
+      // value once recording stops.
+      const list = action.payload;
+      const last = list[list.length - 1];
       return {
         ...state,
-        traceEvents: [...state.traceEvents, action.payload],
+        traceEvents: list,
+        traceEventCount: list.length,
+        realTimeStats: {
+          ...state.realTimeStats,
+          eventCount: list.length,
+          lastEventType: last?.type ?? null,
+          currentUrl: last?.url ?? state.realTimeStats.currentUrl,
+        },
+      };
+    }
+    case 'ADD_TRACE_EVENT': {
+      const incoming = action.payload;
+      // Dedup by seq: defends against double-add caused by StrictMode
+      // re-mount, polling effect re-mount (cursor reset), or any retry path.
+      // Every event from the daemon carries a monotonically increasing seq.
+      if (incoming?.seq !== undefined && state.traceEvents.some((e) => e.seq === incoming.seq)) {
+        return state;
+      }
+      return {
+        ...state,
+        traceEvents: [...state.traceEvents, incoming],
         traceEventCount: state.traceEventCount + 1,
         lastUpdated: Date.now(),
         realTimeStats: {
           ...state.realTimeStats,
           eventCount: state.realTimeStats.eventCount + 1,
-          lastEventType: action.payload.type,
+          lastEventType: incoming.type,
           lastEventTime: Date.now(),
-          currentUrl: action.payload.url,
+          currentUrl: incoming.url,
         },
       };
+    }
     case 'CLEAR_TRACE_EVENTS':
       return {
         ...state,

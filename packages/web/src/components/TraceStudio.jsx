@@ -57,42 +57,82 @@ function TraceStudio() {
     };
   }, [setConnected, setConnecting, setConnectionError, setTabs]);
 
-  // 录制中：轮询增量 trace 事件
+  // Reset cursor only when recording flips false→true (a real new session),
+  // not every time the polling effect re-mounts (StrictMode, activeTab ref
+  // change, etc.). Re-mount resets used to make the next poll fetch the full
+  // event history and duplicate everything into the store.
+  const wasRecordingRef = useRef(false);
+  useEffect(() => {
+    if (traceRecording && !wasRecordingRef.current) {
+      lastEventCursorRef.current = null;
+    }
+    wasRecordingRef.current = traceRecording;
+  }, [traceRecording]);
+
+  // Recording poll. Uses a Web Worker timer because Chrome throttles main-thread
+  // setInterval to >=60s once the tab is hidden — and the user almost always
+  // switches away from TraceStudio to the page being recorded. Worker timers
+  // are not throttled the same way, so events keep flowing live.
   useEffect(() => {
     if (!traceRecording || !connected) return;
 
-    // 新录制开始时重置 cursor
-    lastEventCursorRef.current = null;
+    const workerSource = `
+      let id = null;
+      self.onmessage = (e) => {
+        if (e.data === 'start' && id === null) {
+          id = setInterval(() => self.postMessage('tick'), 1000);
+        } else if (e.data === 'stop' && id !== null) {
+          clearInterval(id); id = null;
+        }
+      };
+    `;
+    const worker = new Worker(
+      URL.createObjectURL(new Blob([workerSource], { type: 'application/javascript' })),
+    );
 
-    const interval = setInterval(async () => {
+    let cancelled = false;
+    let pollInFlight = false;
+    const pollOnce = async () => {
+      if (cancelled || pollInFlight) return;
+      pollInFlight = true;
       try {
         const response = await daemon.send('trace', {
           traceCommand: 'events',
           tabId: activeTab?.tabId,
           since: lastEventCursorRef.current,
         });
+        if (cancelled) return;
         if (response.success) {
           const events = response.data.traceEvents || [];
           for (const event of events) {
             addTraceEvent(event);
           }
-          // Cursor is returned inside response.data, not at top level.
-          // Without this, polling re-fetches all events every tick and duplicates them.
           const nextCursor = response.data.cursor;
           if (nextCursor !== undefined) {
             lastEventCursorRef.current = nextCursor;
           }
-          // 如果后端停止了录制（例如页面导航导致），同步状态
           if (response.data.traceStatus && !response.data.traceStatus.recording) {
             setTraceRecording(false);
           }
         }
       } catch (err) {
         console.error('Failed to poll trace events:', err);
+      } finally {
+        pollInFlight = false;
       }
-    }, 1000);
+    };
 
-    return () => clearInterval(interval);
+    worker.onmessage = pollOnce;
+    worker.postMessage('start');
+    // Fire one poll immediately so the user sees their first event without
+    // waiting for the first 1s tick.
+    pollOnce();
+
+    return () => {
+      cancelled = true;
+      worker.postMessage('stop');
+      worker.terminate();
+    };
   }, [traceRecording, connected, activeTab, setTraceRecording, addTraceEvent]);
 
   // 加载标签页列表
