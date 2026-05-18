@@ -1,38 +1,44 @@
 # CLAUDE.md
 
-## Trace Export — 待改进项
+## Trace Export — 已完成改进（2026-05-18）
 
-### P1: 导航事件录制
+以下原 roadmap 项已全部实现，记录于此供历史回溯。当前如需新增改进，请在文末"后续待改进项"追加。
 
-录制开始时使用 `activeTab.url` 作为 `page.goto()` 的 URL，但不感知页面内的 frameset/frame 内导航。
+### ✅ P1: 导航事件录制
 
-**改进方案**：trace-inject.ts 中监听 `popstate` / `hashchange`，daemon 通过 `Page.frameNavigated` CDP 事件记录导航，生成的脚本中插入 `page.goto()` 或 `page.frame().goto()`。
+- `trace-inject.ts` 监听 `popstate` 和 `hashchange`，捕获 SPA 内导航
+- `cdp-connection.ts` 在 `Page.frameNavigated`（仅主框架）时发出 `navigation` trace 事件
+- `tab-state.ts` 的 `addTraceNavigation` 按 URL 去重，避免 CDP redirect 链产生重复
+- 导出脚本中渲染为 `page.goto(url)`；与 `activeTab.url` 相同的首条 navigation 会被跳过避免双重 goto
 
-### P1: 选择器可移植性
+### ✅ P1: 选择器可移植性
 
-当前导出的选择器优先级：`ref` > `cssSelector` > `xpath`。其中 `ref` 是 bb-browser 自定义属性（`data-highlight-index`），导出的脚本无法脱离 bb-browser 环境运行。
+ExportDialog 提供三个模式：
+- **Auto**：`ref` → `cssSelector` → `xpath`（保留 bb-browser ref 优先级）
+- **CSS**：`cssSelector` → `xpath`，便于在标准 Playwright/Selenium 环境运行
+- **XPath**：仅用 `xpath`，跨 DOM 变化更稳定
 
-**改进方案**：
-- 提供"选择器模式"选项：bb-browser / CSS / XPath
-- 默认使用 CSS 选择器（已通过 cssSelector fallback 部分实现）
-- 可选 XPath 模式用于更稳定的定位
+JS/Playwright 在 XPath 模式下使用 `xpath=...` 前缀；Python 切换到 `By.XPATH`。
 
-### P2: 步骤间等待机制
+### ✅ P2: 步骤间等待机制
 
-导出的脚本中无 `waitForTimeout` 或 `waitForSelector`，异步渲染的页面 replay 会失败。
+ExportDialog 新增"智能等待"开关（默认开启）：
+- JS / Playwright：在 click/fill/select/check 前插入 `page.waitForSelector(sel)` 或 `locator(sel).waitFor()`
+- Python：插入 `wait.until(EC.presence_of_element_located((by, sel)))`
 
-**改进方案**：
-- 在 click 之前插入 `page.waitForSelector(selector)` 
-- 或提供"智能等待"选项：检测页面空闲后继续
+### ✅ P2: 字符串转义
 
-### P2: 字符串转义不完整
+`esc()` 替换为 `q(str)` → 返回 `JSON.stringify(str)`，自动处理换行、制表符、Unicode、引号、反斜杠。生成的字符串字面量从单引号迁移到双引号。
 
-当前只转义了单引号和反斜杠，未处理换行符、`\n`、Unicode 等。
+### ✅ P3: Ring Buffer 上限
 
-**改进方案**：使用 JSON.stringify 生成字符串值，自动处理所有特殊字符。
+`TRACE_CAPACITY` 通过 `BB_TRACE_CAPACITY` 环境变量配置（默认 1000，最小 100）。缓冲首次写满时打印一次性 warning 到 daemon stderr：
+```
+[bb-browser] trace buffer full for tab <shortId> (cap=1000); oldest events will be discarded. Set BB_TRACE_CAPACITY to raise the limit.
+```
 
-### P3: Ring Buffer 上限
+---
 
-daemon 的 TraceRingBuffer 容量为 1000 事件，长录制会静默丢失旧数据。
+## 后续待改进项
 
-**改进方案**：可配置容量，或在接近上限时提示用户。
+（暂无。在此追加新的 roadmap 条目。）
