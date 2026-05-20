@@ -123,6 +123,43 @@
 }
 ```
 
+### 2.5 Web UI 中的命令记录 — 数据源澄清
+
+控制面板中有两个不同来源的"动作记录"：
+
+| 维度 | MCP Commands | Trace Events |
+|------|-------------|--------------|
+| **触发者** | AI Agent (通过 MCP 协议) | 人类用户 (鼠标/键盘操作) 或 agent 调用 browser_eval |
+| **数据源** | daemon HTTP POST /command | CDP Runtime.consoleAPICalled + DOM 事件注入 |
+| **记录内容** | `click ref=3`, `fill ref=5 "hello"`, `open https://...` | `click` (xpath, cssSelector), `fill` (value), `scroll` (direction, pixels) |
+| **采集方式** | daemon 端直接记录 (无需注入) | 需注入 trace-inject.ts 到页面 |
+| **启动条件** | 始终记录 (只要 daemon 在运行) | 需手动 Start Recording (注入脚本有开销) |
+| **典型用途** | 调试 agent 行为、审计、回放 | 录制浏览器操作 → 导出为 Playwright/Selenium 脚本 |
+
+**设计决策**:
+
+```
+┌─── Web UI "Activity" 面板 ───────────────────────┐
+│                                                    │
+│  📊 Live Feed (始终可见)                           │
+│  12:30:05  agent → click      ref=3  tab=fb18     │ ← MCP command log
+│  12:30:06  agent → fill       ref=5  "search..."  │
+│  12:30:08  agent → snapshot   tab=fb18            │
+│  12:30:10  agent → open       url=https://...     │
+│                                                    │
+│  ── 切换到 "Trace" 标签页 ──                        │
+│                                                    │
+│  🎬 Trace Events (仅录制期间)                      │ ← DOM trace events
+│  12:30:05  🖱️ click   button  "Submit"            │
+│  12:30:06  ⌨️ fill    input   "search..."         │
+│  12:30:08  📜 scroll  down    300px               │
+│                                                    │
+│  [导出为 Playwright]  [导出为 Python]              │
+└────────────────────────────────────────────────────┘
+```
+
+**融合而非重叠**: MCP command log 和 trace events 是两个独立的数据管道，在 UI 中以标签页切换呈现。MCP commands 始终记录（零开销），trace events 需手动开启录制（有注入开销但有完整的元素定位信息）。
+
 ---
 
 ## 3. 多场景设计
@@ -258,6 +295,83 @@ daemon 实例 2: --cdp-port 19827   → Chrome B (测试/沙盒)
   }
 }
 ```
+
+### 3.7 WSL / 跨系统场景
+
+WSL (Windows Subsystem for Linux) 是重要场景：用户在 WSL 中运行 AI agent (Claude Code, Cursor, etc.)，通过 MCP 操控 Windows 侧的 Chrome。
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Windows                                                 │
+│  ┌──────────────────────────────────────────────┐        │
+│  │  Chrome (360ChromeX)     Daemon               │        │
+│  │  CDP: 127.0.0.1:19825    HTTP: 0.0.0.0:19826 │        │
+│  └──────────────────────────────────────────────┘        │
+│                          ▲                               │
+│                          │                               │
+│  ┌───────────────────────┴──────────────────────────┐    │
+│  │  Windows IP: 192.168.1.x  (物理网卡)             │    │
+│  │  WSL Host:  172.x.x.x     (WSL 虚拟网络)         │    │
+│  │  WSL Host:  hostname.local (mDNS, Win11 22H2+)  │    │
+│  └──────────────────────────────────────────────────┘    │
+│                          │                               │
+├──────────────────────────┼───────────────────────────────┤
+│  WSL2 (Linux VM)         │                               │
+│                          ▼                               │
+│  ┌──────────────────────────────────────────────┐        │
+│  │  AI Agent (Claude Code / CLI)                 │        │
+│  │  MCP client → http://172.x.x.x:19826         │        │
+│  │  或: http://$(hostname).local:19826          │        │
+│  └──────────────────────────────────────────────┘        │
+└─────────────────────────────────────────────────────────┘
+```
+
+**网络路径**:
+
+| WSL 版本 | Windows → WSL | WSL → Windows | 推荐方案 |
+|---------|---------------|---------------|---------|
+| **WSL2** | 各自独立 IP (NAT) | `$(ip route show default \| awk '{print $3}')` 或 `hostname.local` | `hostname.local` (Win11) 或自动探测 Windows IP |
+| **WSL1** | 共享 localhost | `localhost` 直接可达 | `127.0.0.1` 直接工作 |
+
+**设计方案**:
+
+```
+方案 A: mDNS 自动发现 (Win11 22H2+)
+
+  WSL agent 中:  daemonHost = "$(hostname).local"
+  原理: Windows 默认开启 mDNS 响应，WSL2 可解析 hostname.local → Windows IP
+
+方案 B: WSL 侧自动探测
+
+  bb-browser 提供 wsl-probe 脚本, WSL 内运行:
+    $ bb-browser wsl-probe
+    Detected Windows host: 172.25.16.1
+    Daemon endpoint: http://172.25.16.1:19826
+    Config written to ~/.bb-browser/wsl.json
+
+  wsl-probe 实现:
+    1. 读 /etc/resolv.conf → nameserver IP (即 Windows 在 WSL 虚拟网卡上的地址)
+    2. 对此 IP 做端口扫描 (19824-19830) 找 daemon
+    3. 验证 GET /ping → 获取 token
+    4. 写入 WSL 侧配置
+
+方案 C: 托盘自动广播
+
+  daemon 检测到 WSL 存在时 (读 /proc/sys/fs/binfmt_misc/WSLInterop 或检查 WSL_DISTRO_NAME):
+    - 自动 bind 0.0.0.0 (而非仅 127.0.0.1)
+    - 显示 Windows 内网 IP 和 WSL 虚拟 IP 供复制
+    - CLI 启动时打印:
+      🔗 WSL detected!
+         From WSL:  http://172.25.16.1:19826
+         Token:     0d50a5e30930a9f71eb531e6dade5e32
+```
+
+**推荐实现路径**: Phase 1 默认 bind 0.0.0.0 + 启动时打印 WSL 可达地址，Phase 2 实现 `wsl-probe` 自动配置工具。
+
+**安全注意**: WSL2 场景下 daemon 必须 bind 0.0.0.0。这会暴露端口到局域网（如果 Windows 防火墙允许）。因此需强制：
+- Token 不为空
+- 默认添加 Windows 防火墙入站规则阻止 19824-19830
+- 仅允许本地子网 (WSL 虚拟网卡网段 `172.16.0.0/12` + 内网 `192.168.0.0/16`)
 
 ---
 
@@ -564,10 +678,15 @@ P0 项:
   [ ] 安装器 (NSIS / MSI)
 ```
 
-### Phase 2: 管理能力 (2 周)
+### Phase 2: 管理能力 + TraceStudio 融合 (2 周)
 
 ```
-  [ ] Web UI 控制面板
+  [ ] Dashboard 框架 (标签页路由: Overview | Tabs | Trace | Network | Logs)
+  [ ] Overview 页面 (状态面板 + MCP 命令记录)
+  [ ] Trace 页面 (迁移现有 TraceStudio 组件)
+  [ ] Network 页面 (实时网络请求查看)
+  [ ] Logs 页面 (daemon 日志查看器)
+  [ ] Daemon serve /ui 端点
   [ ] 故障诊断一键导出
   [ ] 通知系统
   [ ] 开机自启
@@ -597,7 +716,151 @@ P0 项:
 
 ---
 
-## 7. 技术选型
+## 7. TraceStudio 与 Web UI 融合计划
+
+### 7.1 现状
+
+已有两套 Web 资源：
+
+| 维度 | TraceStudio SPA (packages/web/) | 新设计控制面板 |
+|------|-----|------|
+| **定位** | 录制浏览器操作 → 导出自动化脚本 | 实时监控 daemon + 管理 daemon |
+| **入口** | `vite dev` / 独立静态页面 | daemon 内嵌 `/ui` 端点 |
+| **框架** | React + Vite | 未定 |
+| **核心功能** | 连接 daemon → 选 tab → 录制 → 查看事件 → 导出代码 | 状态面板 + 命令历史 + 标签管理 + 网络/日志查看 |
+| **与 daemon 通信** | HTTP REST (同新设计) | HTTP REST |
+| **部署方式** | vite build → dist 静态文件 | daemon serve 静态文件 |
+
+### 7.2 目标架构
+
+**融合为一个统一 Dashboard**，daemon 内嵌 serve，单一入口涵盖所有功能：
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  bb-browser Dashboard              🟢 Connected   ⚙️     │
+├─────────────────────────────────────────────────────────┤
+│  📊 Overview  │  🗂️ Tabs  │  🎬 Trace  │  📡 Network  │  📋 Logs  │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  [当前标签页内容 = Overview]                             │
+│                                                         │
+│  ┌──────────────────┬──────────────────────────────────┐│
+│  │  Status           │  Recent MCP Commands             ││
+│  │  Uptime: 2h 15m  │  12:30 snapshot                 ││
+│  │  Chrome: v130     │  12:31 click ref=3              ││
+│  │  Tabs: 6          │  12:31 fill ref=5 "hello"       ││
+│  ├──────────────────┼──────────────────────────────────┤│
+│  │  CPU/Mem Gauge    │  Token: 0d50... ⧉              ││
+│  │  2% · 78MB        │  Port: 19826                    ││
+│  └──────────────────┴──────────────────────────────────┘│
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+
+切换到 Trace 标签页:
+
+┌─────────────────────────────────────────────────────────┐
+│  bb-browser Dashboard              🟢 Connected   ⚙️     │
+├─────────────────────────────────────────────────────────┤
+│  📊 Overview  │  🗂️ Tabs  │  🎬 Trace*  │  📡 Network  │  📋 Logs  │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  [Target Tab: fb18 (github.com) ▼]                      │
+│  [● Start Recording]  [Export ▼]                        │
+│  Selector mode: Auto | CSS | XPath         Smart Wait ☑ │
+│                                                         │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │  #1  🖱️ click   button  "Submit"           00:01   ││
+│  │  #2  ⌨️ fill    input   "search..."        00:05   ││
+│  │  #3  📜 scroll  down    300px              00:08   ││
+│  │  #4  🔗 navi    url     /results           00:10   ││
+│  └─────────────────────────────────────────────────────┘│
+│                                                         │
+│  📈 Recording... 4 events  │  Last: navigation          │
+│                                                         │
+│  Export: [JavaScript] [Playwright] [Python (Selenium)]  │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 7.3 融合策略
+
+**保留所有现有 TraceStudio 功能，嵌入新 Dashboard 的标签页中：**
+
+| 现有组件 | 融合方式 |
+|---------|---------|
+| `App.jsx` | 重写为 Dashboard 根组件，添加标签页路由 |
+| `TraceStudio.jsx` | → `pages/TracePage.jsx` (作为 Trace 标签页内容) |
+| `ConnectionPanel.jsx` | → 移到顶部全局状态栏 |
+| `TabPanel.jsx` | → 在 Overview 和 Trace 两个标签页中复用 |
+| `TraceControls.jsx` | 保留在 TracePage 中 |
+| `TraceTimeline.jsx` | 保留在 TracePage 中 |
+| `TraceEventDetail.jsx` | 保留 (弹窗，与标签页无关) |
+| `RealtimeMonitor.jsx` | 保留在 TracePage 中 |
+| `ExportDialog.jsx` | 保留在 TracePage 中 |
+| `useStore.jsx` | 扩展：新增 overview / audit / log 相关 state |
+| `api/daemon.js` | 扩展：新增 `getOverview()`, `getLogs()`, `getAudit()` 方法 |
+
+### 7.4 Daemon 端变更
+
+Daemon 需新增几个端点 (服务 `/ui` 页面 + 提供数据)：
+
+```
+新增 HTTP 端点:
+
+GET /ui                → 返回静态 Dashboard HTML (内嵌所有 JS/CSS)
+GET /ui/assets/*       → 静态资源 (JS bundle, CSS)
+
+GET /api/overview      → { uptime, cpu, memory, chromeVersion, tabCount, activeMCPClients }
+GET /api/commands?limit=100  → 最近 N 条 MCP 命令记录
+GET /api/logs?level=warn&limit=50  → 日志查询
+GET /api/audit?since=2026-05-20  → 审计日志 (共享模式)
+```
+
+`/ui` 页面在 daemon 启动时自动 serve，无需用户额外配置。静态文件打包在 daemon 分发中（或通过单独的 npm 包）。
+
+### 7.5 技术方案对比
+
+| 方案 | 优点 | 缺点 | 推荐 |
+|------|------|------|------|
+| **A: 保留 React SPA** | 现有代码复用，高质量 UI 组件 | 需 vite build → daemon 内嵌静态文件 | ✅ |
+| **B: 纯 HTML 服务端渲染** | 零 JS 框架，快 | 交互体验差，不适合 Trace 时间线等复杂 UI | ❌ |
+| **C: HTMX + 轻量 JS** | 小而轻 | Trace 录制交互逻辑复杂，不适用 | ❌ |
+
+**推荐方案 A**。现有 TraceStudio 已经是一套成熟的 React 应用，将其重构为多标签页 Dashboard 是最快路径。
+
+### 7.6 融合实现步骤 (Phase 2 内)
+
+```
+Week 1:
+  [ ] App.jsx 重写：标签页路由 (Overview | Tabs | Trace | Network | Logs)
+  [ ] Overview 页面：daemon 状态 + MCP 命令记录
+  [ ] ConnectionPanel 提升到全局 header (所有标签页可见)
+  [ ] TabPanel 改为全局侧边栏 (可折叠)
+
+Week 2:
+  [ ] Network 页面：实时网络请求查看
+  [ ] Logs 页面：daemon 日志查看器
+  [ ] Daemon 端新增 /api/overview, /api/commands, /api/logs
+  [ ] vite build → daemon 启动时 serve /ui 端点
+  [ ] 托管打开入口: 托盘左键 → 浏览器打开 http://127.0.0.1:PORT/ui
+```
+
+### 7.7 不丢失的现有功能
+
+TraceStudio 现有功能 100% 保留：
+
+- ✅ 连接 daemon → 提升到全局 header
+- ✅ 选择 tab → 全局侧边栏
+- ✅ Start/Stop 录制 → 保留在 TracePage
+- ✅ 实时事件查看 → 保留在 TracePage
+- ✅ 事件详情弹窗 → 保留
+- ✅ 导出 (JS/Playwright/Python) → 保留在 TracePage
+- ✅ 选择器模式 (Auto/CSS/XPath) → 保留
+- ✅ 智能等待开关 → 保留
+- ✅ 实时状态监控 → 保留在 TracePage
+
+---
+
+## 8. 技术选型
 
 | 组件 | 方案 | 理由 |
 |------|------|------|
