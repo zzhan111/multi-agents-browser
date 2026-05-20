@@ -1,0 +1,50 @@
+{
+  "productName": "bb-browser Tray",
+  "version": "0.0.1",
+  "identifier": "com.bb-browser.tray",
+  "build": {
+    "beforeDevCommand": "echo dev",
+    "beforeBuildCommand": "echo build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "bb-browser Popup",
+        "width": 360,
+        "height": 320,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "skipTaskbar": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "msi",
+      "nsis"
+    ],
+    "msiInstallerPath": null,
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true
+    }
+  },
+  "windows": [
+    {
+      "title": "bb-browser Tray",
+      "width": 800,
+      "height": 600,
+      "resizable": true,
+      "label": "main"
+    }
+  ]
+}
