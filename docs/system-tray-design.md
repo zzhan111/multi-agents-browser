@@ -1,872 +1,734 @@
 # bb-browser System Tray Daemon — 详细设计
 
-## 1. 产品定位
-
-将 bb-browser daemon 从「命令行黑盒」演进为 「Windows 系统级 AI 浏览器代理服务」,
-提供可见、可控、可自愈的管理体验。
-
-目标用户:
-- AI 应用开发者: 日常使用 MCP 工具开发 agent
-- 团队共享: 多人复用同一台 Chrome 实例
-- CI/CD 场景: 无人值守的服务端 agent
-- 普通用户: 使用 AI 桌面工具时需要浏览器能力
+> **范围**：MVP 1–3，按"五层 UI 分工"组织。
+>
+> - **MVP 1**：托盘图标 + 弹窗 + 右键菜单 + Toast + 多端口控制 + 自愈
+> - **MVP 2**：控制面板（Tauri 窗口）+ TraceStudio 迁移 + 三层数据源 UI
+> - **MVP 3**：人类干预录制 + 中文注释导出
+>
+> 暂不做的特性（团队共享、远程、CI/CD 指标、WSL、Watchdog 进程、4 级沙箱 等）见 [system-tray-future.md](system-tray-future.md)。
 
 ---
 
-## 2. 可用性设计
+## 1. 产品定位与设计哲学
 
-### 2.1 零配置启动 (Zero-Config)
+### 1.1 产品定位
 
-```
-用户安装完成
-  └─ 自动发现浏览器 (优先级链)
-       ├─ HKCU\...\ChromeHTML (注册表)
-       ├─ Edge / Brave / 360ChromeX 回退
-       └─ 找到: 启动 → 托盘图标变绿
-           未找到: 引导下载 Chrome / 指向已有安装
-  └─ 自动探测端口
-       ├─ daemon 端口: 19824 → 19826 → 19828 → ... (跳奇数防冲突)
-       └─ CDP 端口: 连接已有 → 启动新实例 19825 → 19827 → ...
-```
+把 bb-browser daemon 从「CLI 黑盒」演进为 **「Windows 系统级 AI 浏览器代理服务」** — 可见、可控、可自愈。
 
-### 2.2 状态可见性
+**MVP 目标用户**：单机单用户的 AI 应用开发者（用 Claude Code / Cursor / Cline 等 MCP 客户端开发 agent）。
 
-托盘图标状态机:
+### 1.2 托盘设计哲学（核心，所有设计取舍的基准）
 
-```
-🟢 绿色    daemon 运行 + CDP 已连接 + MCP 客户端已连接
-🔵 蓝色    daemon 运行 + CDP 已连接 (无 MCP 客户端)
-🟡 黄色    daemon 运行 + CDP 重连中
-🔴 红色    daemon 运行 + CDP 断开 (超过 30s)
-⚫ 灰色    daemon 未运行
-```
+**3 秒哲学**：用户按下托盘 → 完成核心操作 ≤ 3 步、≤ 3 秒。任何破坏这条的设计（启动动画、引导步骤、Tab 切换、确认对话框）需要单独论证。
 
-右键菜单层级:
+**Tray-centric 而非 Form-centric**：托盘图标是主控制器；弹窗和控制面板都只是它"在需要时召唤出来的临时面板"，而不是把一个大窗口最小化进托盘。
 
-```
-左键点击: 打开控制面板 (Web UI)
+**克制的弹出层 + 高密度信息 + 即时操作**：
+- 弹窗宽度 320–420px、高度 ≤ 屏幕 60%
+- 视觉轻盈（Desktop Acrylic 半透明）
+- 键盘友好（Esc 关闭、Tab 切焦点、所有列表上下选）
+- 无确认对话框 — 乐观执行 + Toast 撤销
 
-右键菜单:
-├─ 状态摘要
-│   ├─ Chrome: 已连接 (v1.x) · 标签页: 6
-│   ├─ MCP: 2 客户端已连接
-│   └─ 运行时间: 2h 15m
-├─ [分隔线]
-├─ 启动 / 停止 / 重启 daemon
-├─ 打开日志目录
-├─ 故障诊断 (一键导出诊断报告)
-├─ [分隔线]
-├─ 设置...
-│   ├─ 开机自启 ☑
-│   ├─ 通知开关 ☑
-│   ├─ 端口配置...
-│   └─ 浏览器配置...
-├─ 关于
-└─ 退出 (同时停止 daemon 或仅关闭托盘)
-```
+**参考标杆**（截图建议拉到 Figma 做对照）：
 
-### 2.3 控制面板 (Web UI)
+| 类别 | 参考 | 取法 |
+|------|------|------|
+| 高密度列表 + 默认聚焦搜索 | 1Password / Bitwarden | Body 列表样式 |
+| 状态开关 + 节点列表 + 设置入口 | Tailscale / Cloudflare WARP | Header 状态展示、三段式布局 |
+| 图标即状态 | Stats / iStat Menus | 托盘图标承载实时状态而不仅是 logo |
+| 现代化右键菜单 | ShareX / Snipaste | 分组分隔线、快捷键标注 |
+| Fluent Design 原生感 | Windows 11 快速设置 | Acrylic、圆角 8px、控件间距 8/12/16 |
 
-运行在 daemon 的一个内部 HTTP 端点 (`/ui`), 托盘左键打开浏览器:
+---
 
-```
-┌─────────────────────────────────────────────────┐
-│  bb-browser Daemon                    ⚙️ [设置]  │
-├─────────────────────────────────────────────────┤
-│  Status: ● Connected  |  Uptime: 2h 15m         │
-│  Chrome: v130.0  |  6 tabs                      │
-│  MCP: 0 clients                                 │
-├───────────────────┬─────────────────────────────┤
-│  📊 Activity       │  📋 Recent Commands        │
-│  ██▆▁▂▃█▅ (30m)   │  12:30 snapshot           │
-│  0.2 cmd/s avg     │  12:31 click ref=3         │
-│                    │  12:31 fill ref=5 "hello"  │
-│                    │  12:32 open url             │
-├───────────────────┴─────────────────────────────┤
-│  🗂️ Tabs                          📡 Network   │
-│  ┌─────────┬──────┬─────┐   Requests: 152       │
-│  │ ID      │ URL  │ #   │   Errors:   0         │
-│  │ 41b4    │ ...  │ 42  │   Logs:    12         │
-│  │ fb18    │ ...  │ 88  │                       │
-│  └─────────┴──────┴─────┘                       │
-└─────────────────────────────────────────────────┘
-```
+## 2. 五层 UI 分工
 
-功能:
-- 实时状态面板 (CPU/内存/请求速率)
-- 标签页管理 (关闭/刷新/截图预览)
-- 网络请求查看 (增量)
-- 命令执行历史 (最近 500 条)
-- 日志查看器 (实时，支持过滤)
+bb-browser 的全部 UI 分布在 **5 个层级**，每层有严格的职责边界。设计时优先问"这功能应该在哪一层"，再问"怎么做"。
 
-### 2.4 故障自愈矩阵
+| 层 | 容器 | 用途 | MVP | 内容举例 | 不放什么 |
+|:--:|------|------|:---:|---------|---------|
+| **1** | 托盘图标 | 状态指示 | 1 | 3 色状态、ToolTip | 任何交互逻辑 |
+| **2** | 托盘弹窗 (左键) | **3 秒高频操作** | 1 | 状态摘要、端口/Token、最近命令、打开控制面板 | Trace 录制、完整日志、长列表 |
+| **3** | 右键菜单 | **低频运维** | 1 | 重启 daemon、打开日志、设置、退出 | 高频操作、需展示数据的功能 |
+| **4** | 控制面板 (Tauri 窗口) | **深度交互** | 2 | Trace 录制、日志查看、完整命令历史 | 一眼可懂的小操作 |
+| **5** | Toast 通知 | **异步事件提醒** | 1 | 端口回退、daemon 重启、CDP 断开 | 持续状态（用图标传达） |
 
-| 故障类型 | 检测方式 | 自愈策略 | 通知 |
-|---------|---------|---------|------|
-| daemon 进程崩溃 | PID 消失 + 心跳超时 5s | 自动重启 (3次/5分钟窗口) | 托盘气泡 |
-| CDP Websocket 断开 | ws.on("close") | 指数退避重连 (1s→2s→4s→...→30s max) | 图标变黄 |
-| Chrome 进程退出 | CDP 不可达 | 尝试重启 Chrome → 通知用户 | 托盘气泡 |
-| 端口被占用 | EADDRINUSE / EACCES | 自动递增端口 (跳过+1 留 CDP) | 气泡 + 更新 config |
-| 内存超限 | process.memoryUsage() > 512MB | 优雅重启 (排水 → 重启) | 仅日志 |
-| Cmd 队列堆积 | 未处理命令 > 100 | 警告 → 超阈值拒绝 (503) | 图标闪烁 |
+**分层决策表**：
 
-自愈状态记录:
+| 用户需求 | 应该在哪层？ | 理由 |
+|---------|-------------|------|
+| "daemon 状态怎么样？" | 层 1 图标 | 瞥一眼即可 |
+| "现在用哪个端口？" | 层 2 弹窗 | 信息密度足够，3 秒可见 |
+| "复制 Token 给 MCP 客户端配置" | 层 2 弹窗 | 高频且需文字 |
+| "刚才 agent 做了什么？" | 层 2 弹窗（最近 3 条） + 层 4 完整列表 | 弹窗给摘要、控制面板给详情 |
+| "重启 daemon" | 层 3 右键 + 层 2 弹窗 Footer | 低频但重要 — 两个入口都给 |
+| "录制一段 Trace" | 层 4 控制面板 | 操作复杂、超 3 秒 |
+| "改端口号" | 层 3 右键 → 设置 | 低频，专用窗口 |
+| "端口被占用了" | 层 5 Toast | 异步事件、可点击跳转 |
 
-```json
-// ~/.bb-browser/recovery.json
-{
-  "lastCrash": "2026-05-20T12:30:00Z",
-  "restartCount": 2,
-  "restartWindow": "2026-05-20T12:25:00Z/2026-05-20T12:35:00Z",
-  "backoffLevel": 2,
-  "degradedServices": ["network-capture"]
-}
-```
+---
 
-### 2.5 Web UI 中的命令记录 — 数据源澄清
+## 3. 托盘图标设计（层 1）
 
-控制面板中有两个不同来源的"动作记录"：
+### 3.1 状态机 — 3 色
 
-| 维度 | MCP Commands | Trace Events |
-|------|-------------|--------------|
-| **触发者** | AI Agent (通过 MCP 协议) | 人类用户 (鼠标/键盘操作) 或 agent 调用 browser_eval |
-| **数据源** | daemon HTTP POST /command | CDP Runtime.consoleAPICalled + DOM 事件注入 |
-| **记录内容** | `click ref=3`, `fill ref=5 "hello"`, `open https://...` | `click` (xpath, cssSelector), `fill` (value), `scroll` (direction, pixels) |
-| **采集方式** | daemon 端直接记录 (无需注入) | 需注入 trace-inject.ts 到页面 |
-| **启动条件** | 始终记录 (只要 daemon 在运行) | 需手动 Start Recording (注入脚本有开销) |
-| **典型用途** | 调试 agent 行为、审计、回放 | 录制浏览器操作 → 导出为 Playwright/Selenium 脚本 |
+| 颜色 | 含义 | 触发条件 |
+|:---:|------|---------|
+| 🟢 绿 | 一切正常 | daemon 运行 + CDP 已连接 |
+| 🟡 黄 | 重连中 | CDP 断开 < 30s，正在重试 |
+| 🔴 红 | 故障 | daemon 未运行 / CDP 长时间断开 |
 
-**设计决策**:
+**砍掉 5 色方案的理由**：MVP 是单人单机，蓝色"daemon 运行但无 MCP 客户端"对用户毫无意义。
+
+### 3.2 视觉规范
+
+- **尺寸**：16×16 / 20×20 / 24×24 (DPI 自适应)
+- **风格**：单色 + 高对比、无渐变、无细节（16px 下会糊）
+- **主题**：暗任务栏 / 亮任务栏 **双套图标**，OS 自动选择
+- **状态轴**：颜色 + 形状双轴（不仅靠颜色），照顾色弱用户
+
+### 3.3 ToolTip
+
+格式：`bb-browser · {状态文字} · {端口}`
+示例：
+- `bb-browser · 已连接 · :19826`
+- `bb-browser · 重连中 · :19826`
+- `bb-browser · 未运行`
+
+---
+
+## 4. 托盘弹窗设计（层 2）— **MVP 1 重头**
+
+### 4.1 触发与关闭
+
+| 动作 | 行为 |
+|------|------|
+| 单击左键 | 打开弹窗 |
+| 中键 | 切换 daemon 启动/停止（核心快捷动作） |
+| 双击 | 打开控制面板（MVP 2 后启用） |
+| Esc | 关闭 |
+| 点击弹窗外部 | 关闭 (light-dismiss) |
+| 失焦 | 关闭 |
+
+### 4.2 三段式布局
 
 ```
-┌─── Web UI "Activity" 面板 ───────────────────────┐
+┌─ 托盘弹窗  360 × ~320px  ─────────────────────────┐
+│  🟢 bb-browser · 已连接                  ⚙   ✕    │ ← Header (48px)
+├───────────────────────────────────────────────────┤
+│                                                   │
+│  Chrome v130 · 6 tabs · 2h 15m                    │
+│                                                   │
+│  ────────────────────────────────────────────     │
+│                                                   │
+│  端口    daemon  19826              [复制]        │
+│          CDP     19827              [复制]        │
+│                                                   │
+│  Token   0d50a5e3…                  [复制]        │
+│                                                   │
+│  ────────────────────────────────────────────     │
+│                                                   │
+│  最近命令                                          │
+│  · snapshot                              now      │
+│  · click ref=3                           2s       │
+│  · fill ref=5 "hello"                    5s       │
+│  ──                                                │
+│  查看全部 12 条 →                                  │
+│                                                   │
+├───────────────────────────────────────────────────┤
+│  [ 打开控制面板 ]              [ 重启 ]  [ 退出 ]  │ ← Footer (44px)
+└───────────────────────────────────────────────────┘
+```
+
+**为什么是这个布局**：
+
+- **Header 状态色** — 与托盘图标颜色对应，"瞥一眼即懂"
+- **第一段 Chrome 信息** — 用户最关心"我连的是哪个浏览器"
+- **第二段端口 + Token** — MCP 客户端配置的全部所需，**每一行配[复制]按钮**（一键，零摩擦）
+- **第三段最近命令** — 仅 3 条，看完整去控制面板；这是"瞥一眼最近 agent 在干嘛"的入口
+- **Footer 主操作**：打开控制面板（核心入口）+ 重启 + 退出
+
+### 4.3 视觉与定位
+
+| 维度 | 规范 |
+|------|------|
+| 宽度 | 360px |
+| 高度 | 320px（内容多时内部滚动，不撑窗口） |
+| 圆角 | 外框 8px、按钮/卡片 4px |
+| 间距 | 8 / 12 / 16 三档 |
+| 背景 | Desktop Acrylic（全应用统一，见 §13） |
+| 字号 | 标题 14 / 正文 12 / 提示 11 |
+| 位置 | 检测任务栏位置，贴边弹出 + 8–12px 间距 |
+| 动画 | 150–200ms easeOutCubic，Y 轴位移 + 透明度过渡 |
+| 主题 | 跟随系统暗/亮 |
+| 减动画偏好 | 检测 `SPI_GETCLIENTAREAANIMATION` 关闭动画 |
+
+### 4.4 键盘与无障碍
+
+- 默认聚焦"打开控制面板"按钮 — 按回车即触发主路径
+- Tab 顺序：复制按钮 → 列表项 → Footer 按钮
+- 所有控件 ≥ 32×32px
+- 所有控件设 `AutomationProperties.Name`，支持 Narrator
+- 列表项支持上下键选择 + Enter 确认（如 Enter 复制 Token）
+
+### 4.5 状态特殊化
+
+| daemon 状态 | 弹窗呈现差异 |
+|-----------|------------|
+| 🟢 已连接 | 全部信息正常展示（上图） |
+| 🟡 重连中 | Header 显示"CDP 重连中 · 第 2 次"+ 进度旋转图标 |
+| 🔴 未运行 | 全部信息灰显 + Body 顶部大按钮 `[启动 daemon]` |
+| 🔴 端口冲突 | Body 顶部红色横条："19824 被占用 → 已改用 19826 [详情]" |
+
+**绝不出现的内容**：
+- "确定要重启吗？" → 直接重启 + Toast"已重启，3 秒前 [撤销]"
+- "无法连接 Error 0x80004005" → 翻译为 "无法连接到 Chrome [重试] [查看日志]"
+- 任何旋转/弹跳的庆祝动画 — 托盘程序追求冷静专业
+
+---
+
+## 5. 右键菜单设计（层 3）
+
+### 5.1 菜单结构（≤ 2 层）
+
+```
+状态: Chrome v130 · 6 tabs · :19826                  (灰显，仅展示)
+────
+重启 daemon                                Ctrl+R
+启动 daemon (未运行时显示)
+停止 daemon (运行时显示)
+────
+打开日志文件夹                             Ctrl+L
+故障诊断 → 导出诊断报告                    (M2+)
+────
+设置 ▸
+  开机自启 ☑
+  端口配置...
+  浏览器路径...
+  通知开关 ☑
+────
+关于 bb-browser
+退出                                       Ctrl+Q
+```
+
+### 5.2 设计原则
+
+- **不超过 2 层**：所有设置项一目了然
+- **快捷键标注**：每个常用项右侧浅灰显示快捷键（参考 PowerToys Run 体例）
+- **状态行灰显**：顶部状态行只展示不可点，提供与弹窗一致的状态感
+- **动作分组**：用空行/分隔线分四组（状态 / daemon 控制 / 日志诊断 / 设置 / 关于退出）
+
+### 5.3 为什么右键和弹窗有重叠（重启 / 退出）
+
+刻意。Windows 用户有两套肌肉记忆：
+- 老用户习惯右键菜单
+- 新用户期待左键面板
+
+两边都给入口，是降低学习成本而非冗余。
+
+---
+
+## 6. Toast 通知设计（层 5）
+
+### 6.1 通知场景与文案
+
+| 场景 | 文案 | 操作 |
+|------|------|------|
+| 端口冲突自动回退 | `daemon 改用端口 19826（19824 被占用）` | `[详情]` |
+| daemon 自动重启 | `daemon 已自动重启（第 1 次）` | `[查看日志]` |
+| CDP 断开超过 30s | `Chrome 调试连接已断开 30 秒` | `[重连]` `[查看 Chrome]` |
+| 反复崩溃停止重启 | `daemon 5 分钟内崩溃 3 次，已暂停自动重启` | `[查看日志]` `[手动启动]` |
+| 长操作完成（M2+） | `Trace 导出完成 → ~/Downloads/trace.spec.js` | `[打开]` `[复制路径]` |
+
+### 6.2 通知规范
+
+- **时长**：4 秒自动消失（错误类 8 秒）
+- **乐观执行 + 撤销**：所有"破坏性"操作（重启、清日志）走 Toast 撤销范式，不弹确认框
+- **不打断**：不抢焦点、不发声（除非用户开了通知声）
+- **错误必须说人话 + 给操作**：永远不是"Error 0x80004005"
+- **可静音**：右键菜单 → 设置 → 通知开关
+
+---
+
+## 7. 控制面板设计（层 4）— **MVP 2 才上线**
+
+### 7.1 定位与边界
+
+- **独立 Tauri 窗口**（Acrylic 背景，与托盘弹窗设计语言统一）
+- 不与托盘弹窗内容重复；专做 **"超 3 秒、需要深度交互"** 的事
+- 默认不开机自动弹出；通过托盘左键 Footer / 右键菜单进入
+
+### 7.2 Tab 结构
+
+| Tab | MVP 2 包含 | 后续扩展 |
+|------|-----------|---------|
+| 📊 Overview | 状态摘要、当前端口/Token、最近 50 条 MCP 命令、CPU/内存简单显示 | — |
+| 🎬 Trace | 整体迁移 TraceStudio（见 §11） | MVP 3 加干预录制 UI |
+| 📋 Logs | daemon 日志实时滚动 + 级别过滤 + 关键字搜索 | — |
+
+**砍掉的 Tab**：
+- Tabs 详细管理 → 用浏览器自己的标签页就行
+- Network 详细查看 → 推迟到 future
+- 完整配置编辑 GUI → 直接打开 daemon.json 文件就行
+
+### 7.3 与托盘弹窗的内容分工
+
+| 数据 | 托盘弹窗 | 控制面板 |
+|------|---------|---------|
+| daemon 状态 | ✅ 一行摘要 | ✅ 详细（含 CPU/内存） |
+| 端口 + Token | ✅ 主展示，一键复制 | ✅ 含修改入口 |
+| 最近 MCP 命令 | ✅ 3 条 | ✅ 50 条 + 过滤 |
+| Trace 录制 | ❌ | ✅ 唯一入口 |
+| 日志查看 | ❌（仅"打开日志"按钮） | ✅ 实时滚动 + 搜索 |
+
+---
+
+## 8. 多端口控制（MVP 1 P0）
+
+bb-browser 同时管理 **两个端口**（直接对应 #217）：
+
+| 端口 | 默认 | 用途 |
+|------|:---:|------|
+| **daemon HTTP** | 19824（偶数） | MCP 客户端连接、控制面板访问 |
+| **CDP Debug** | 19825（奇数） | daemon 连接 Chrome |
+
+### 8.1 启动探测
+
+```
+启动
+ ├─ 浏览器发现：HKCU\…\ChromeHTML → Edge / Brave / 360ChromeX 回退
+ ├─ 端口探测（两条独立探测链）
+ │    daemon: 19824 → 19826 → 19828 → …  (偶数)
+ │    CDP:    19825 → 19827 → 19829 → …  (奇数)
+ ├─ 持久化 ~/.bb-browser/daemon.json
+ │    { "daemonPort": ..., "cdpPort": ..., "token": "...", "schemaVersion": 1 }
+ └─ 多渠道可见性广播（§8.2）
+```
+
+### 8.2 多端口可见性闭环
+
+端口换了必须**显式告诉用户**，否则等于换了个新黑盒（#217 的真实痛点）：
+
+| 渠道 | 内容 |
+|------|------|
+| 🔔 Toast 通知 | `daemon 改用端口 19826（19824 被占用）` |
+| 🎯 托盘 ToolTip | `bb-browser · 已连接 · :19826` |
+| 📋 弹窗 Body | 端口行恒显，一键复制 |
+| 🖥 控制面板 Overview | 顶部端口卡片（可点击修改） |
+| 💻 CLI | `bb-browser status` 打印两个端口 |
+| 📝 stdout 启动横幅 | 启动时打印 |
+
+### 8.3 手动指定
+
+控制面板"端口配置" → 输入数字 → 保存 → 提示"将在重启后生效" → 点击重启。
+冲突时拒绝保存并提示具体冲突源（如可能，用 `netstat -ano` 查占用进程）。
+
+---
+
+## 9. 自愈机制（MVP 1）
+
+### 9.1 故障矩阵（精简到 3 类）
+
+| 故障 | 检测 | 自愈 | 通知 |
+|------|------|------|------|
+| daemon 崩溃 | Tauri 主进程发现子进程退出 / 心跳超时 | 立即重启，5 分钟窗口内最多 3 次 | Toast |
+| CDP 断开 | `ws.on('close')` | 固定 5s × 6 次（共 30s） | 图标黄 → 红 + Toast |
+| 端口被占 | EADDRINUSE | §8.1 自动回退 | Toast |
+
+**砍掉的**：内存超限自动重启、Cmd 队列堆积警告、recovery.json 持久化（见 future §3.3 / §4.2）
+
+### 9.2 Supervisor（Tauri Rust 主进程）
+
+不引入独立 Watchdog 进程（见 future §3.1 不做的理由）：
+
+```
+Tauri 主进程 (Rust)
+  ├─ Tray icon / 菜单 / 弹窗 / 控制面板 (webview)
+  └─ spawn daemon (Node 子进程)
+       ├─ 心跳: 5s 一次 GET /status
+       ├─ 失败 / 子进程退出 → 重启
+       └─ 5 分钟内 ≥ 3 次失败 → 停止重启 + Toast 通知
+```
+
+### 9.3 优雅关闭（3 阶段）
+
+```
+1. 停止接收新命令（POST /shutdown → 后续请求 503）
+2. 等待 in-flight 命令完成（总超时 30s）
+3. 关 WebSocket + process.exit(0)
+```
+
+---
+
+## 10. 命令记录三层数据源（数据模型层，MVP 1 标记 / MVP 2 应用）
+
+> **MVP 1 只做数据模型标记**（trace-inject 加 `origin` 字段，~30 行）。
+> **MVP 2 在控制面板 Trace tab 应用** 三层过滤 UI。
+> **MVP 3 加人类干预分组**（见 §11）。
+
+### 10.1 三层来源澄清
+
+bb-browser 中存在 **三类不同来源** 的"动作记录"，先前版本只分 2 类（把 ② ③ 混在一起）。
+
+| 来源 | 触发者 | 触发路径 | 采集点 | `event.isTrusted` |
+|------|--------|---------|--------|:---:|
+| **① MCP Commands** | AI Agent | Agent → MCP → daemon HTTP → CDP | daemon HTTP 入口拦截 | — |
+| **② Trace: User** | 真人用户 | 鼠标/键盘 → 浏览器 → 原生 DOM 事件 | trace-inject.ts DOM 监听器 | `true` |
+| **③ Trace: Agent** | AI Agent | Agent → MCP → CDP `Input.dispatch*` → 合成 DOM 事件 | trace-inject.ts DOM 监听器（被动） | `false` |
+
+### 10.2 关键观察
+
+- ① 和 ②/③ 是两条独立数据管道（① 零开销始终记录；②/③ 需 Start Recording）
+- ② 和 ③ 共用同一个 DOM 监听器；浏览器不区分真实和合成事件
+- 当前 [trace-inject.ts:129](packages/daemon/src/trace-inject.ts:129)–251 未检查 `event.isTrusted`，所以 ② 和 ③ **完全混淆**
+- 副作用：agent 调 `browser_click` 被**双重记录**（① + ③）
+
+### 10.3 MVP 1 修复（Wave 1，~30 行）
+
+trace-inject 每个 `emit()` 增加：
+
+```js
+emit({ ..., origin: e.isTrusted ? 'user' : 'agent' });
+```
+
+daemon trace event 类型加 `origin?: 'user' | 'agent'`。
+**仅数据层标记，UI 应用推到 MVP 2。**
+
+### 10.4 MVP 2 UI 应用（控制面板 Trace tab 内）
+
+```
+┌─── Trace Timeline ─────────────────────────────────┐
+│  Filter:  [● All]  [○ User]  [○ Agent]  [○ MCP]   │
 │                                                    │
-│  📊 Live Feed (始终可见)                           │
-│  12:30:05  agent → click      ref=3  tab=fb18     │ ← MCP command log
-│  12:30:06  agent → fill       ref=5  "search..."  │
-│  12:30:08  agent → snapshot   tab=fb18            │
-│  12:30:10  agent → open       url=https://...     │
-│                                                    │
-│  ── 切换到 "Trace" 标签页 ──                        │
-│                                                    │
-│  🎬 Trace Events (仅录制期间)                      │ ← DOM trace events
-│  12:30:05  🖱️ click   button  "Submit"            │
-│  12:30:06  ⌨️ fill    input   "search..."         │
-│  12:30:08  📜 scroll  down    300px               │
-│                                                    │
-│  [导出为 Playwright]  [导出为 Python]              │
+│  12:30:05  ①  [MCP]    agent → click ref=3       │
+│  12:30:05  ③  [TRACE]  🤖 click button "Submit"  │
+│  12:30:12  ②  [TRACE]  👤 fill input "hello"     │
 └────────────────────────────────────────────────────┘
 ```
 
-**融合而非重叠**: MCP command log 和 trace events 是两个独立的数据管道，在 UI 中以标签页切换呈现。MCP commands 始终记录（零开销），trace events 需手动开启录制（有注入开销但有完整的元素定位信息）。
+---
+
+## 11. 人类干预录制 + 中文注释导出（MVP 3）
+
+> 推迟到 MVP 3 的原因：MVP 2 先把 TraceStudio 原样迁移到控制面板，确保现有功能不丢失。干预录制是增强能力，需要分组算法 + 类型识别 + 导出器扩展，整块约 120 行代码 + 测试，单独成阶段更稳。
+
+### 11.1 设计意图
+
+真实自动化场景，**agent + human 协作录制**是常态：
+- agent 无法处理登录（密码、2FA、CAPTCHA、SSO） → 人类必须介入
+- agent 卡在 cookie 同意 / GDPR 弹窗 → 人类一键关闭
+- agent 需要人类先翻到页面深处 → 人类翻页
+
+Start Recording 必须**同时**记录两个角色，导出时给 human 段加醒目中文注释。
+
+### 11.2 数据模型扩展
+
+```ts
+type TraceEvent = {
+  // ...现有字段...
+  origin: 'user' | 'agent';                  // ← MVP 1 已加
+  // —— 干预分组（仅 user 事件携带，MVP 3 新增）——
+  interventionId?: string;
+  interventionType?: 'login' | 'otp' | 'captcha' | 'paging' | 'dismiss-popup' | 'misc';
+  interventionLabel?: string;                // 中文标签
+};
+```
+
+### 11.3 干预段识别
+
+```
+新建组: 前一事件为 agent，当前为 user / 距前一 user 事件 > 30s
+延续组: 前一事件为 user 且间隔 ≤ 30s
+关组:   下一事件切回 agent / 30s 内无新事件
+```
+
+### 11.4 类型识别启发式
+
+按优先级匹配，第一个命中即取（`login` + `otp` 可叠加为"人类登录 + 2FA"）：
+
+| 优先级 | 类型 | 触发条件 | 中文标签 |
+|:---:|------|---------|---------|
+| 1 | `login` | 段内有 fill 到 `input[type=password]` 或字段名含 `password` | **人类登录** |
+| 2 | `otp` | 段内 fill 值匹配 `^\d{4,8}$` 或字段名含 `otp\|code\|verify\|2fa\|sms` | **人类输入验证码** |
+| 3 | `captcha` | url/selector 命中 `recaptcha\|hcaptcha\|cloudflare-challenge` | **人类完成 CAPTCHA** |
+| 4 | `dismiss-popup` | 段 ≤ 2 步且按钮文本匹配 `accept\|agree\|close\|cancel\|ok\|同意\|关闭\|确定` | **人类关闭弹窗** |
+| 5 | `paging` | scroll 占段内 > 60% | **人类翻页** |
+| 6 | `misc` | 兜底 | **人类干预** |
+
+### 11.5 凭据脱敏（在 trace-inject 端就替换）
+
+| 字段特征 | 替换值 |
+|---------|--------|
+| `input[type=password]` | `<MASKED_PASSWORD>` |
+| name/id 含 `otp\|code\|verify\|2fa\|sms` | `<MASKED_OTP>` |
+| 值为 4-8 位纯数字且前序 5s 内有 password 操作 | `<MASKED_OTP>` |
+| name/id 含 `creditcard\|cvv\|cvc\|card-number` | `<MASKED_CARD>` |
+
+### 11.6 导出格式（Playwright 示例）
+
+```js
+test('GitHub 创建 PR', async ({ page }) => {
+  // ⚙️ Agent 动作
+  await page.goto('https://github.com');
+  await page.click('a[data-test="sign-in"]');
+
+  // ════════════════════════════════════════════════════
+  // 👤 人类登录 + 2FA  (8.3s, 5 步)
+  //   ⚠️  凭据已脱敏，回放需替换为环境变量
+  //   ⚠️  2FA 验证码无法硬编码，需运行时获取
+  // ════════════════════════════════════════════════════
+  await page.fill('input#login', 'alice');
+  await page.fill('input#password', '<MASKED_PASSWORD>');     // → process.env.GH_PASS
+  await page.click('button[type="submit"]');
+  await page.fill('input#otp', '<MASKED_OTP>');               // → await fetchOTP()
+  await page.click('button[type="submit"]');
+  // ════════════════════════════════════════════════════
+
+  // ⚙️ Agent 动作
+  await page.click('a.new-pr');
+});
+```
+
+Python / Selenium 走同样格式（`#` 注释 + 同样的分隔条）。
+
+### 11.7 ExportDialog 新增 5 个开关
+
+| 选项 | 默认 | 说明 |
+|------|:---:|------|
+| Include user events | ☑ | 导出 ② |
+| Include agent events | ☑ | 导出 ③ |
+| Mark interventions with comments | ☑ | 加分隔条 + 中文标签 |
+| Mask credentials | ☑ | 应用 §11.5 脱敏；**关闭需二次确认** |
+| Group consecutive same-origin | ☑ | 连续 ≥3 个 agent 操作折叠注释 |
+
+### 11.8 控制面板时间线（人类干预为可折叠卡片）
+
+```
+⚙️  agent  click  a "Sign in"
+┏━━ 👤 人类登录 + 2FA  (8.3s, 5 步)  ━━━━━━━━ [▼] ┓
+┃  fill input#login 'alice'                       ┃
+┃  fill input#password ********                   ┃
+┃  ...                                            ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+⚙️  agent  click  a "New PR"
+```
+
+类型标签上色：登录=红 · CAPTCHA=橙 · 翻页=蓝 · misc=灰。默认折叠，hover 展开。
 
 ---
 
-## 3. 多场景设计
+## 12. TraceStudio 融合（MVP 2 主线）
 
-### 3.1 场景矩阵
+### 12.1 现状与目标
 
-| 场景 | 特点 | 设计要点 |
-|------|------|---------|
-| **个人开发者** | 单机单用户，自己用 Chrome | 零配置，自动发现，单实例 |
-| **团队工作站** | 共享 Chrome 实例，多 MCP 客户端 | 多 token 管理，速率限制，访问日志 |
-| **CI/CD Runner** | 无头运行，无人值守 | CLI 管理，健康检查端点，结构化日志 |
-| **远程开发** | 通过 SSH/隧道连接 | 可选绑定 0.0.0.0，TLS 支持 |
-| **多浏览器并存** | 同时连接多个浏览器 | 多 daemon 实例隔离，端口池管理 |
+| 维度 | TraceStudio SPA | 控制面板 Trace tab |
+|------|----|------|
+| **定位** | 录制操作 → 导出脚本 | 同上 + 集成到 Dashboard |
+| **入口** | `vite dev` 独立页面 | Tauri 控制面板内嵌 |
+| **框架** | React + Vite | 同源复用 |
 
-### 3.2 个人开发者模式 (默认)
+### 12.2 组件融合方式
 
-```
-特性:
-- 自动发现 > 自动启动 Chrome > 自动启动 daemon
-- 单 auth token，随机生成
-- bind 127.0.0.1（仅本地）
-- 通知开启 (托盘气泡)
-- 开机自启可选择
-```
+| 现有组件 | 处理 |
+|---------|------|
+| `App.jsx` | 重写为 Dashboard 根组件 + 标签页路由 |
+| `TraceStudio.jsx` | → `pages/TracePage.jsx` |
+| `ConnectionPanel.jsx` | 提升到全局 header |
+| `TabPanel.jsx` | 在 Overview / Trace 复用 |
+| `TraceControls / TraceTimeline / TraceEventDetail / RealtimeMonitor / ExportDialog` | 保留在 TracePage 内 |
+| `useStore.jsx` | 扩展 overview / logs 相关 state |
+| `api/daemon.js` | 新增 `getOverview()`, `getLogs()` |
 
-### 3.3 团队工作站模式
-
-多个人共用同一台机器上的 Chrome:
+### 12.3 Daemon 端新增 HTTP 端点
 
 ```
-bb-browser daemon start --shared
-
-特性:
-- 多 token 管理 (每个团队成员一个，可吊销)
-- Token 访问权限分级:
-    readonly:  snapshot, get, network 读取
-    interact:  以上 + click, fill, type, scroll
-    admin:     以上 + open, close tab, trace
-- 速率限制: 每 token 10 req/s (防止一个客户端耗尽)
-- 访问审计日志:
-    [2026-05-20 12:30:15] token:3fa1 user:bob action:click ref=5 tab=fb18
-- 并发控制: 同一 ref 不允许并发操作 (command 队列排队)
-- 时间片: 每天 08:00-22:00 可访问 (可选)
+GET /api/overview        → { uptime, ports, chromeVersion, tabCount, activeMCPClients }
+GET /api/commands?limit  → 最近 N 条 MCP 命令
+GET /api/logs?level&limit→ 日志查询
 ```
 
-配置示例:
+### 12.4 100% 保留的 TraceStudio 功能
 
-```json
-{
-  "mode": "shared",
-  "tokens": [
-    {
-      "id": "user-alice",
-      "token": "sha256...",
-      "level": "admin",
-      "rateLimit": 20
-    },
-    {
-      "id": "user-bob", 
-      "token": "sha256...",
-      "level": "interact",
-      "rateLimit": 10
-    }
-  ],
-  "globalRateLimit": 50,
-  "accessHours": ["08:00", "22:00"],
-  "auditLogPath": "~/.bb-browser/audit.log"
-}
-```
-
-### 3.4 CI/CD / 无头模式
-
-```
-bb-browser daemon start --headless
-
-特性:
-- 不创建托盘图标
-- 不发送系统通知
-- 日志输出到 stdout (JSON 格式，可被 log collector 采集)
-- 健康检查端点: GET /health → { "ok": true, "cdpConnected": true }
-- 优雅关闭: POST /shutdown 等待 in-flight 命令完成 (最多 30s)
-- 指标暴露: Prometheus /metrics 端点:
-    bb_daemon_commands_total{status="success"} 1523
-    bb_daemon_commands_duration_seconds{quantile="0.5"} 0.12
-    bb_daemon_commands_duration_seconds{quantile="0.95"} 0.85
-    bb_daemon_cdp_connected 1
-    bb_daemon_tabs_count 6
-    bb_daemon_memory_bytes 78643200
-```
-
-### 3.5 远程开发模式
-
-```
-bb-browser daemon start --host 0.0.0.0 --tls
-
-特性:
-- bind 0.0.0.0 而非 127.0.0.1
-- TLS 支持 (自签名证书自动生成 + 用户可替换)
-    ~/.bb-browser/certs/
-    ├── cert.pem
-    └── key.pem
-- IP 白名单 (可选): --allow-ips "10.0.0.0/8,192.168.1.100"
-- 强制 auth token (禁止空 token)
-- 连接限制: 最多 5 个并发 MCP 客户端
-- 警告提示: 启动时明确告知 "Daemon is accessible from network!"
-```
-
-### 3.6 多浏览器实例
-
-支持同一个 daemon 管理多个 Chrome 实例:
-
-```
-daemon 实例 1: --cdp-port 19825   → Chrome A (日常工作)
-daemon 实例 2: --cdp-port 19827   → Chrome B (测试/沙盒)
-
-托盘显示:
-  🟢 bb-browser × 2
-    ├─ 实例 1 (port 19824) — Chrome A · 6 tabs
-    └─ 实例 2 (port 19826) — Chrome B · 3 tabs
-```
-
-端口池管理:
-
-```json
-{
-  "portPool": {
-    "daemonRange": [19824, 19924],
-    "cdpRange": [19825, 19925],
-    "allocated": {
-      "daemon": [19824, 19826],
-      "cdp": [19825, 19827]
-    }
-  }
-}
-```
-
-### 3.7 WSL / 跨系统场景
-
-WSL (Windows Subsystem for Linux) 是重要场景：用户在 WSL 中运行 AI agent (Claude Code, Cursor, etc.)，通过 MCP 操控 Windows 侧的 Chrome。
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Windows                                                 │
-│  ┌──────────────────────────────────────────────┐        │
-│  │  Chrome (360ChromeX)     Daemon               │        │
-│  │  CDP: 127.0.0.1:19825    HTTP: 0.0.0.0:19826 │        │
-│  └──────────────────────────────────────────────┘        │
-│                          ▲                               │
-│                          │                               │
-│  ┌───────────────────────┴──────────────────────────┐    │
-│  │  Windows IP: 192.168.1.x  (物理网卡)             │    │
-│  │  WSL Host:  172.x.x.x     (WSL 虚拟网络)         │    │
-│  │  WSL Host:  hostname.local (mDNS, Win11 22H2+)  │    │
-│  └──────────────────────────────────────────────────┘    │
-│                          │                               │
-├──────────────────────────┼───────────────────────────────┤
-│  WSL2 (Linux VM)         │                               │
-│                          ▼                               │
-│  ┌──────────────────────────────────────────────┐        │
-│  │  AI Agent (Claude Code / CLI)                 │        │
-│  │  MCP client → http://172.x.x.x:19826         │        │
-│  │  或: http://$(hostname).local:19826          │        │
-│  └──────────────────────────────────────────────┘        │
-└─────────────────────────────────────────────────────────┘
-```
-
-**网络路径**:
-
-| WSL 版本 | Windows → WSL | WSL → Windows | 推荐方案 |
-|---------|---------------|---------------|---------|
-| **WSL2** | 各自独立 IP (NAT) | `$(ip route show default \| awk '{print $3}')` 或 `hostname.local` | `hostname.local` (Win11) 或自动探测 Windows IP |
-| **WSL1** | 共享 localhost | `localhost` 直接可达 | `127.0.0.1` 直接工作 |
-
-**设计方案**:
-
-```
-方案 A: mDNS 自动发现 (Win11 22H2+)
-
-  WSL agent 中:  daemonHost = "$(hostname).local"
-  原理: Windows 默认开启 mDNS 响应，WSL2 可解析 hostname.local → Windows IP
-
-方案 B: WSL 侧自动探测
-
-  bb-browser 提供 wsl-probe 脚本, WSL 内运行:
-    $ bb-browser wsl-probe
-    Detected Windows host: 172.25.16.1
-    Daemon endpoint: http://172.25.16.1:19826
-    Config written to ~/.bb-browser/wsl.json
-
-  wsl-probe 实现:
-    1. 读 /etc/resolv.conf → nameserver IP (即 Windows 在 WSL 虚拟网卡上的地址)
-    2. 对此 IP 做端口扫描 (19824-19830) 找 daemon
-    3. 验证 GET /ping → 获取 token
-    4. 写入 WSL 侧配置
-
-方案 C: 托盘自动广播
-
-  daemon 检测到 WSL 存在时 (读 /proc/sys/fs/binfmt_misc/WSLInterop 或检查 WSL_DISTRO_NAME):
-    - 自动 bind 0.0.0.0 (而非仅 127.0.0.1)
-    - 显示 Windows 内网 IP 和 WSL 虚拟 IP 供复制
-    - CLI 启动时打印:
-      🔗 WSL detected!
-         From WSL:  http://172.25.16.1:19826
-         Token:     0d50a5e30930a9f71eb531e6dade5e32
-```
-
-**推荐实现路径**: Phase 1 默认 bind 0.0.0.0 + 启动时打印 WSL 可达地址，Phase 2 实现 `wsl-probe` 自动配置工具。
-
-**安全注意**: WSL2 场景下 daemon 必须 bind 0.0.0.0。这会暴露端口到局域网（如果 Windows 防火墙允许）。因此需强制：
-- Token 不为空
-- 默认添加 Windows 防火墙入站规则阻止 19824-19830
-- 仅允许本地子网 (WSL 虚拟网卡网段 `172.16.0.0/12` + 内网 `192.168.0.0/16`)
+✅ 连接 daemon · 选 tab · Start/Stop 录制 · 实时事件查看 · 事件详情弹窗 · 导出（JS/Playwright/Python）· 选择器模式 · 智能等待开关 · 实时状态监控。**全部不丢**，只是搬位置。
 
 ---
 
-## 4. 安全性设计
+## 13. 技术选型
 
-### 4.1 威胁模型
-
-```
-威胁 1: 本地恶意进程 → 通过 HTTP 操控浏览器
-威胁 2: 网络邻居 → 扫描到绑定 0.0.0.0 的端口
-威胁 3: XSS/注入 → 通过 browser_eval 执行恶意 JS
-威胁 4: Token 泄露 → token 被截图/日志/版本控制泄露
-威胁 5: 权限滥用 → 用户安装的 agent 插件超出预期行为
-```
-
-### 4.2 防护层次
-
-```
-Layer 1: 网络隔离
-  ├─ 默认 127.0.0.1 (仅本地)
-  ├─ --host 0.0.0.0 时强制 token + 显示警告
-  └─ Windows Firewall 规则: 自动添加拦截入站 19824
-
-Layer 2: 认证令牌
-  ├─ Bearer token (随机 32-char hex)
-  ├─ Token 存储在 daemon.json (perms 0600)
-  ├─ Token 有效期: 可配置 (默认无限，CI 模式可设 24h)
-  ├─ Token 轮换: POST /token/rotate → 旧 token 有 5min 优雅期
-  └─ Token 吊销: POST /token/revoke (多 token 模式)
-
-Layer 3: 命令权限
-  ├─ browser_eval: 默认禁用，需显式 --allow-eval
-  ├─ browser_open: URL 白名单 (可选)
-  │     ~/.bb-browser/url-whitelist.json
-  │     ["https://*.github.com", "http://localhost:*"]
-  ├─ file:// 和 chrome:// 协议: 默认拦截
-  └─ 敏感路径: 禁止访问 ~/.ssh, ~/.aws, ~/.bb-browser
-
-Layer 4: 审计日志
-  ├─ 每条命令记录: 时间戳, token-id, 命令名, 参数摘要, 结果
-  ├─ 异常检测: 同一 token 5 分钟内 > 100 条 browser_eval → 报警
-  └─ 日志轮转: 7 天保留, 压缩归档
-```
-
-### 4.3 Token 生命周期
-
-```
-创建 ──→ 使用 ──→ 轮换 ──→ 吊销
-         │                │
-         └─ 过期 ────────→ 吊销
-         │
-         └─ 异常检测 ──→ 临时冻结 (15min) ──→ 自动解冻 或 吊销
-```
-
-### 4.4 browser_eval 沙箱
-
-`browser_eval` 是最危险的命令 — 可在用户浏览器中执行任意 JS。防护:
-
-```
-Level 0 (off):     禁止 browser_eval (CI/共享模式的默认)
-Level 1 (limited): 仅允许在允许列表中的域名执行 eval
-                   执行结果限制 10KB 输出
-                   超时 5 秒自动终止
-Level 2 (audit):   允许但记录完整脚本内容和结果
-                   超过 1KB 的结果截断
-Level 3 (full):    无限制 (仅个人开发者，--allow-eval)
-```
-
-### 4.5 配置文件安全
-
-```
-~/.bb-browser/
-├── daemon.json          (0600) — token, 密钥信息
-├── config.json          (0644) — 用户配置
-├── audit.log            (0600) — 审计日志
-└── browser/
-    └── cdp-port         (0644) — 仅端口号
-
-规则:
-- 任何包含 token 的文件必须 0600
-- 进程启动时检查关键文件权限 → 过宽则自动修复 + 告警
-- 诊断报告导出时自动脱敏 token
-```
-
----
-
-## 5. 稳定性设计
-
-### 5.1 架构分层
-
-```
-┌──────────────────────────────────────────┐
-│            Tray UI Process               │  ← 托盘进程 (独立，不崩影响 daemon)
-│  - 托盘图标 / 菜单                       │
-│  - 通知管理                              │
-│  - 自动更新检查                          │
-├──────────────────────────────────────────┤
-│            Watchdog Process              │  ← 看门狗 (独立)
-│  - 监控 daemon 心跳                      │
-│  - 自愈决策 (重启/告警/降级)             │
-│  - 内存/CPU 监控                         │
-├──────────────────────────────────────────┤
-│            Daemon Process                │  ← 核心 (可被 watch dog 重启)
-│  - HTTP server                           │
-│  - CDP connection                        │
-│  - Command router                        │
-│  - Tab / Network / Console state mgr     │
-├──────────────────────────────────────────┤
-│            Chrome Process                │  ← 第三方 (非托管)
-│  - 用户浏览器                            │
-│  - CDP debug server                      │
-└──────────────────────────────────────────┘
-```
-
-**进程隔离原则**: 托盘崩溃不影响 daemon, daemon 崩溃不影响 Chrome。
-
-### 5.2 守护本尊 (Watchdog)
-
-```typescript
-// watchdog.ts — 独立进程
-class Watchdog {
-  private restartCount = 0;
-  private maxRestarts = 5;        // 5 分钟窗口内最多重启 5 次
-  private windowMs = 5 * 60_000;
-  private healthCheckMs = 5_000;  // 每 5 秒发一次心跳
-
-  async monitor(daemonPid: number) {
-    // 1. Heartbeat 检测
-    setInterval(async () => {
-      try {
-        const resp = await fetch(`http://127.0.0.1:${port}/status`);
-        if (!resp.ok) throw new Error("unhealthy");
-      } catch {
-        await this.handleDaemonDown();
-      }
-    }, this.healthCheckMs);
-
-    // 2. 进程存活检测
-    setInterval(() => {
-      if (!isProcessAlive(daemonPid)) {
-        this.handleDaemonDown();
-      }
-    }, 1000);
-  }
-
-  private async handleDaemonDown() {
-    // 限流: 窗口内超过 maxRestarts 次 → 放弃重启，通知用户
-    if (this.exceededRestartLimit()) {
-      notify("bb-browser daemon 反复崩溃，已暂停自动重启，请检查日志");
-      return;
-    }
-    // 排水: 等待 Chrome in-flight 操作完成
-    await this.drain();
-    // 重启
-    this.restartCount++;
-    this.spawnDaemon();
-    notify(`daemon 已自动重启 (第 ${this.restartCount} 次)`);
-  }
-}
-```
-
-### 5.3 优雅关闭 (Graceful Shutdown)
-
-```
-阶段 1: 停止接收新命令
-  └─ POST /shutdown 立即返回 503 给新请求
-
-阶段 2: 等待 in-flight 命令完成
-  └─ 超时策略: 每条命令 < 30s
-      多 tab 并发: 等待所有完成或过期
-      总超时: 30s (可配置)
-
-阶段 3: 断开 CDP
-  └─ ws.close(1000, "daemon shutting down")
-
-阶段 4: 保存状态
-  └─ 序列化未完成的 trace
-  └─ 清理临时文件
-
-阶段 5: 退出进程
-  └─ process.exit(0)
-```
-
-### 5.4 退化策略 (Graceful Degradation)
-
-当部分组件故障时，保持核心功能可用:
-
-```
-优先级 (从高到低):
-
-P0 (必须存活):
-  HTTP server        — 无此则完全不可用
-  CDP connection     — 无此则所有浏览器操作不可用
-  故障行为: 503 响应，托盘变红
-
-P1 (重要，可短暂降级):
-  Network capture    — 超出 buffer 时暂停，恢复后继续
-  Console capture    — 同上
-  Trace recording    — buffer 满时 drop 最旧事件
-    
-P2 (非关键，可关闭):
-  Web UI             — 内部错误不影响 MCP 协议
-  系统通知           — 失败不影响功能
-  指标导出           — 跳过不健康周期
-```
-
-### 5.5 内存管理
-
-```
-Ring Buffer 配置 (已实现):
-  BB_TRACE_CAPACITY = 1000 (默认) / 最小 100
-
-新增:
-  BB_NETWORK_BUFFER  = 500  (每 tab 网络请求 buffer)
-  BB_CONSOLE_BUFFER  = 200  (每 tab 控制台消息 buffer)
-  BB_ERROR_BUFFER    = 50   (每 tab JS 错误 buffer)
-
-内存保护:
-  - process.memoryUsage() 每 30 秒检查一次
-  - > 256MB → 警告日志
-  - > 512MB → 清理最旧 buffer 数据 + 通知
-  - > 1GB   → 强制重启 (排水 → 重启)
-  
-Buffer 清理策略:
-  - 优先清理 network (最大)
-  - 其次 console
-  - 保留 errors (诊断关键)
-  - 通知 MCP 客户端: "buffers trimmed" 事件
-```
-
-### 5.6 错误分类与处理
-
-```typescript
-enum ErrorSeverity {
-  FATAL,    // 进程退出 (端口绑定失败, OOM)
-  CRITICAL, // CDP 断开, 长时间不可用
-  WARNING,  // 单个命令失败, buffer 满
-  INFO,     // 可恢复的错误 (重试成功)
-}
-
-class ErrorHandler {
-  handle(error: Error, context: CommandContext) {
-    const severity = this.classify(error);
-    
-    switch (severity) {
-      case FATAL:
-        this.log.fatal(error);
-        this.watchdog.notifyFatal();
-        process.exit(1);
-        
-      case CRITICAL:
-        this.log.error(error);
-        this.metrics.increment("daemon.errors.critical");
-        break;
-        
-      case WARNING:
-        this.log.warn(error, context);
-        return { status: "error", code: this.toHttpCode(error) };
-        
-      case INFO:
-        this.log.info(error);
-        break;
-    }
-  }
-}
-```
-
-### 5.7 日志系统
-
-```
-日志输出:
-  ~/.bb-browser/logs/
-  ├── daemon.log          — daemon 主日志 (JSON 格式)
-  ├── daemon.log.1        — 轮转归档
-  ├── daemon.log.2
-  ├── tray.log            — 托盘进程日志
-  ├── audit.log           — 审计日志 (共享模式)
-  └── diagnostics/        — 诊断报告 (按时间戳)
-
-格式 (daemon.log):
-  {"ts":"2026-05-20T12:30:00.123Z","level":"INFO","msg":"CDP connected","tabs":6,"pid":1234}
-
-策略:
-  - 单文件 10MB → 轮转 → 保留 5 个历史文件
-  - 保留 7 天 (超过自动删除)
-  - CI 模式: 输出到 stdout (JSON Lines)
-```
-
----
-
-## 6. 实现路线图
-
-### Phase 1: 最小可行托盘 (MVP — 2 周)
-
-```
-目标: 替代命令行启动，提供基本可见性
-
-P0 项:
-  [x] 托盘图标 + 状态颜色
-  [x] 启动/停止 daemon
-  [x] 端口冲突自动回退 (fix #217)
-  [x] daemon 崩溃自动重启 (watchdog)
-  [x] daemon stderr 捕获 + 日志文件
-  [ ] 安装器 (NSIS / MSI)
-```
-
-### Phase 2: 管理能力 + TraceStudio 融合 (2 周)
-
-```
-  [ ] Dashboard 框架 (标签页路由: Overview | Tabs | Trace | Network | Logs)
-  [ ] Overview 页面 (状态面板 + MCP 命令记录)
-  [ ] Trace 页面 (迁移现有 TraceStudio 组件)
-  [ ] Network 页面 (实时网络请求查看)
-  [ ] Logs 页面 (daemon 日志查看器)
-  [ ] Daemon serve /ui 端点
-  [ ] 故障诊断一键导出
-  [ ] 通知系统
-  [ ] 开机自启
-  [ ] 配置持久化 UI
-```
-
-### Phase 3: 多场景 + 安全 (2 周)
-
-```
-  [ ] 团队共享模式 (多 token, 速率限制)
-  [ ] 审计日志
-  [ ] URL 白名单
-  [ ] browser_eval 分级控制
-  [ ] CI/无头模式
-  [ ] 远程开发 (TLS, IP 白名单)
-```
-
-### Phase 4: 稳定性增强 (2 周)
-
-```
-  [ ] 优雅关闭
-  [ ] 退化策略
-  [ ] 内存保护
-  [ ] Prometheus 指标
-  [ ] 压测 + 性能调优
-```
-
----
-
-## 7. TraceStudio 与 Web UI 融合计划
-
-### 7.1 现状
-
-已有两套 Web 资源：
-
-| 维度 | TraceStudio SPA (packages/web/) | 新设计控制面板 |
-|------|-----|------|
-| **定位** | 录制浏览器操作 → 导出自动化脚本 | 实时监控 daemon + 管理 daemon |
-| **入口** | `vite dev` / 独立静态页面 | daemon 内嵌 `/ui` 端点 |
-| **框架** | React + Vite | 未定 |
-| **核心功能** | 连接 daemon → 选 tab → 录制 → 查看事件 → 导出代码 | 状态面板 + 命令历史 + 标签管理 + 网络/日志查看 |
-| **与 daemon 通信** | HTTP REST (同新设计) | HTTP REST |
-| **部署方式** | vite build → dist 静态文件 | daemon serve 静态文件 |
-
-### 7.2 目标架构
-
-**融合为一个统一 Dashboard**，daemon 内嵌 serve，单一入口涵盖所有功能：
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  bb-browser Dashboard              🟢 Connected   ⚙️     │
-├─────────────────────────────────────────────────────────┤
-│  📊 Overview  │  🗂️ Tabs  │  🎬 Trace  │  📡 Network  │  📋 Logs  │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  [当前标签页内容 = Overview]                             │
-│                                                         │
-│  ┌──────────────────┬──────────────────────────────────┐│
-│  │  Status           │  Recent MCP Commands             ││
-│  │  Uptime: 2h 15m  │  12:30 snapshot                 ││
-│  │  Chrome: v130     │  12:31 click ref=3              ││
-│  │  Tabs: 6          │  12:31 fill ref=5 "hello"       ││
-│  ├──────────────────┼──────────────────────────────────┤│
-│  │  CPU/Mem Gauge    │  Token: 0d50... ⧉              ││
-│  │  2% · 78MB        │  Port: 19826                    ││
-│  └──────────────────┴──────────────────────────────────┘│
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-
-切换到 Trace 标签页:
-
-┌─────────────────────────────────────────────────────────┐
-│  bb-browser Dashboard              🟢 Connected   ⚙️     │
-├─────────────────────────────────────────────────────────┤
-│  📊 Overview  │  🗂️ Tabs  │  🎬 Trace*  │  📡 Network  │  📋 Logs  │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  [Target Tab: fb18 (github.com) ▼]                      │
-│  [● Start Recording]  [Export ▼]                        │
-│  Selector mode: Auto | CSS | XPath         Smart Wait ☑ │
-│                                                         │
-│  ┌─────────────────────────────────────────────────────┐│
-│  │  #1  🖱️ click   button  "Submit"           00:01   ││
-│  │  #2  ⌨️ fill    input   "search..."        00:05   ││
-│  │  #3  📜 scroll  down    300px              00:08   ││
-│  │  #4  🔗 navi    url     /results           00:10   ││
-│  └─────────────────────────────────────────────────────┘│
-│                                                         │
-│  📈 Recording... 4 events  │  Last: navigation          │
-│                                                         │
-│  Export: [JavaScript] [Playwright] [Python (Selenium)]  │
-└─────────────────────────────────────────────────────────┘
-```
-
-### 7.3 融合策略
-
-**保留所有现有 TraceStudio 功能，嵌入新 Dashboard 的标签页中：**
-
-| 现有组件 | 融合方式 |
-|---------|---------|
-| `App.jsx` | 重写为 Dashboard 根组件，添加标签页路由 |
-| `TraceStudio.jsx` | → `pages/TracePage.jsx` (作为 Trace 标签页内容) |
-| `ConnectionPanel.jsx` | → 移到顶部全局状态栏 |
-| `TabPanel.jsx` | → 在 Overview 和 Trace 两个标签页中复用 |
-| `TraceControls.jsx` | 保留在 TracePage 中 |
-| `TraceTimeline.jsx` | 保留在 TracePage 中 |
-| `TraceEventDetail.jsx` | 保留 (弹窗，与标签页无关) |
-| `RealtimeMonitor.jsx` | 保留在 TracePage 中 |
-| `ExportDialog.jsx` | 保留在 TracePage 中 |
-| `useStore.jsx` | 扩展：新增 overview / audit / log 相关 state |
-| `api/daemon.js` | 扩展：新增 `getOverview()`, `getLogs()`, `getAudit()` 方法 |
-
-### 7.4 Daemon 端变更
-
-Daemon 需新增几个端点 (服务 `/ui` 页面 + 提供数据)：
-
-```
-新增 HTTP 端点:
-
-GET /ui                → 返回静态 Dashboard HTML (内嵌所有 JS/CSS)
-GET /ui/assets/*       → 静态资源 (JS bundle, CSS)
-
-GET /api/overview      → { uptime, cpu, memory, chromeVersion, tabCount, activeMCPClients }
-GET /api/commands?limit=100  → 最近 N 条 MCP 命令记录
-GET /api/logs?level=warn&limit=50  → 日志查询
-GET /api/audit?since=2026-05-20  → 审计日志 (共享模式)
-```
-
-`/ui` 页面在 daemon 启动时自动 serve，无需用户额外配置。静态文件打包在 daemon 分发中（或通过单独的 npm 包）。
-
-### 7.5 技术方案对比
-
-| 方案 | 优点 | 缺点 | 推荐 |
-|------|------|------|------|
-| **A: 保留 React SPA** | 现有代码复用，高质量 UI 组件 | 需 vite build → daemon 内嵌静态文件 | ✅ |
-| **B: 纯 HTML 服务端渲染** | 零 JS 框架，快 | 交互体验差，不适合 Trace 时间线等复杂 UI | ❌ |
-| **C: HTMX + 轻量 JS** | 小而轻 | Trace 录制交互逻辑复杂，不适用 | ❌ |
-
-**推荐方案 A**。现有 TraceStudio 已经是一套成熟的 React 应用，将其重构为多标签页 Dashboard 是最快路径。
-
-### 7.6 融合实现步骤 (Phase 2 内)
-
-```
-Week 1:
-  [ ] App.jsx 重写：标签页路由 (Overview | Tabs | Trace | Network | Logs)
-  [ ] Overview 页面：daemon 状态 + MCP 命令记录
-  [ ] ConnectionPanel 提升到全局 header (所有标签页可见)
-  [ ] TabPanel 改为全局侧边栏 (可折叠)
-
-Week 2:
-  [ ] Network 页面：实时网络请求查看
-  [ ] Logs 页面：daemon 日志查看器
-  [ ] Daemon 端新增 /api/overview, /api/commands, /api/logs
-  [ ] vite build → daemon 启动时 serve /ui 端点
-  [ ] 托管打开入口: 托盘左键 → 浏览器打开 http://127.0.0.1:PORT/ui
-```
-
-### 7.7 不丢失的现有功能
-
-TraceStudio 现有功能 100% 保留：
-
-- ✅ 连接 daemon → 提升到全局 header
-- ✅ 选择 tab → 全局侧边栏
-- ✅ Start/Stop 录制 → 保留在 TracePage
-- ✅ 实时事件查看 → 保留在 TracePage
-- ✅ 事件详情弹窗 → 保留
-- ✅ 导出 (JS/Playwright/Python) → 保留在 TracePage
-- ✅ 选择器模式 (Auto/CSS/XPath) → 保留
-- ✅ 智能等待开关 → 保留
-- ✅ 实时状态监控 → 保留在 TracePage
-
----
-
-## 8. 技术选型
+**结论：Tauri v2** 作为桌面壳 + 托盘 + supervisor。
 
 | 组件 | 方案 | 理由 |
 |------|------|------|
-| 托盘 UI | Electron (systray) 或 tauri | 跨平台潜力，Web UI 复用 |
-| Web UI | 内置静态页面 (daemon serve) | 零依赖，随 daemon 启动 |
-| 安装器 | NSIS | 轻量，Windows 原生 |
-| 守护/看门狗 | Node.js child_process | 同语言，无额外依赖 |
-| 指标收集 | 手动实现 (prom-client) | 轻量 |
-| TLS | Node.js 内置 https | 零外部依赖 |
+| 桌面壳 + 托盘 + 弹窗 | **Tauri v2** | 包 ~3MB（Electron ~80MB）；Rust 主进程直接 supervise daemon；原生 Acrylic 支持 |
+| 控制面板内容 | React（复用 TraceStudio）→ `vite build` → Tauri 内嵌 | 复用 ~10 个组件 |
+| daemon ↔ UI | UI → HTTP REST → daemon | 无需新 IPC |
+| 安装器 | Tauri 自带（MSI / NSIS / .deb / .dmg） | 跨平台一站式 |
+
+**统一设计语言：Desktop Acrylic**
+
+托盘弹窗和控制面板**都用 Desktop Acrylic**。不混用 Mica，理由：
+
+| 维度 | 全 Acrylic | Mica + Acrylic 混用 |
+|------|:---------:|:------------------:|
+| 视觉一致性 | ✅ 全局统一的"半透明毛玻璃"语言 | ❌ 弹窗与主窗口质感不同 |
+| 系统兼容 | ✅ Windows 10 1903+ 均支持 | ⚠️ Mica 需 Windows 11 |
+| 工具型应用调性 | ✅ Acrylic 更轻盈、临时感强 | Mica 偏"内容型应用"调性 |
+| 用户辨识 | ✅ 半透明感成为产品视觉资产 | 多套材质削弱辨识 |
+
+虽然 Microsoft 官方建议 Mica 用于持久窗口、Acrylic 用于瞬态弹层，但 bb-browser 是工具型应用，**统一 Acrylic 优先于遵循官方默认**。
+
+Tauri 设置：
+```rust
+// 所有窗口（托盘弹窗 + 控制面板）
+window.set_effects(WindowEffects {
+    effects: vec![Effect::Acrylic],
+    state: Some(EffectState::Active),
+    ..Default::default()
+})?;
+```
+
+注意：
+- Win10 < 1903 / 系统关闭"透明效果"时，Acrylic 自动降级为纯色背景（无需额外代码）
+- 用户开启"减少动画 / 透明" → 降级为不透明背景色，遵循系统偏好
+
+**性能目标**：Tauri 主进程空闲 < 80MB；daemon Node 子进程 < 60MB。超出意味着用户在任务管理器看到会卸载。
+
+---
+
+## 14. 设计执行阶段
+
+### 14.0 Phase 1 启动前已确认的决策
+
+| # | 决策 | 选项 | 后果 |
+|:-:|------|------|------|
+| 1 | **平台范围** | Windows-only | macOS/Linux 推迟到 M4+；Tauri 跨平台底盘保留但不主动测试 |
+| 2 | **仓库结构** | 新增 `packages/tray-app` (Tauri/Rust 包)，spawn 现有 `packages/daemon` 作为 Node 子进程 | 现有 daemon 代码零改动；pnpm workspace 加 Rust 包；CI 增加 Rust toolchain |
+| 3 | **CLI 入口去留** | 保留 `bb-browser daemon start` 等 CLI 命令 | 托盘是 superset 而非替代；CI/SSH/headless 场景继续可用；packages/cli 不动 |
+| 4 | **设计资源** | 用户先用 AI 生成草图，由实施者做最终调整 | 实施时由实施者基于本文档 §3.2 / §4.3 / §13 的规范，调整 AI 草图为最终 SVG + 适配暗/亮主题 |
+
+剩余可在实施中决定的事项（建议默认值见 §14.1 末尾）。
+
+### MVP 1 — 托盘骨架 + 多端口 + 自愈（3 周）
+
+**目标**：用户卸掉所有快捷方式，仅靠托盘就能完成日常使用。
+
+**产物清单**：
+
+| 类别 | 项 | 验收 |
+|------|----|------|
+| **托盘图标** | 3 色 + 暗/亮主题双套 + ToolTip | 切系统主题图标自动切换；色弱用户能区分状态 |
+| **托盘弹窗** | 三段式 360px + Acrylic + light-dismiss | 按图标到完成"复制 Token"≤ 3 秒；Esc / 外部点击 / 失焦均关闭 |
+| **右键菜单** | ≤ 2 层 + 快捷键标注 | 全部菜单项可见、所有快捷键可用 |
+| **Toast 通知** | 5 类场景 + 撤销/重试操作 | 错误必须说人话；不打断焦点 |
+| **多端口控制** | daemon + CDP 双端口探测/回退 | 占用 19824 模拟测试，自动切到 19826，6 处可见性渠道全部更新 |
+| **Tauri Supervisor** | spawn daemon + 心跳 + 限流重启 | kill -9 daemon，3 秒内自动重启；5 分钟 3 次后停止重启 |
+| **优雅关闭** | 3 阶段 | 关闭过程中新请求返回 503；in-flight 命令完成或 30s 超时退出 |
+| **三层来源 Wave 1** | trace-inject 加 origin 字段 + 扩展脱敏 | 录制 trace 中 user/agent 事件可通过 origin 字段区分；OTP 字段被脱敏 |
+| **日志** | 单文件 daemon.log + 10MB 轮转 + 7 天清理 | 右键"打开日志文件夹"能直接进入 |
+
+**MVP 1 不做**：
+- 控制面板正式 UI（只占位"即将上线"）
+- Trace 任何改动（仅数据层 origin 标记）
+- Logs / Overview Tab UI（仅写日志文件，看通过右键菜单打开文件夹）
+
+**验收 KPI**：
+- 装机 → 看到托盘绿点 ≤ 30 秒
+- 托盘 → 复制 Token ≤ 3 秒
+- daemon 崩溃 → 自动恢复 ≤ 10 秒
+- 端口冲突 → Toast 通知 + 弹窗显示新端口 ≤ 2 秒
+
+**实施中可决定的事项（建议默认值）**：
+
+| 事项 | 默认值 | 何时可改 |
+|------|-------|---------|
+| WebView2 依赖 | Tauri 安装器内嵌 bootstrapper（用户离线也能装） | 安装包大小敏感时切换为运行时下载 |
+| 端口自动递增上限 | 10 次（19824→19842）；全部失败 → Toast 提示手动指定 | 用户反馈 10 次不够时调高 |
+| 中键托盘动作 | 切换 daemon 启停（符合 Tailscale / Stats 肌肉记忆） | 测试发现误触多则改为禁用 |
+| packages/web 命运 | MVP 1 期间保持可独立 `vite dev`，用户升级前可继续用 | MVP 2 整合后移除独立运行入口 |
+| i18n | 中文 only；文案常量集中 `tray-app/src/i18n/zh.ts`，便于将来抽英文 | M3+ 有海外用户时加 |
+| Token 配置兼容 | 旧 `daemon.json` 缺 `schemaVersion` 时按 v1 解释 + 自动补字段 | 字段含义有破坏性变更时强制迁移 |
+| 日志位置 | `~/.bb-browser/logs/daemon.log` 单文件，Tauri 主进程日志同文件前缀 `[tray]` | 双方日志量级悬殊时再拆 |
+| fix/cdp-v0.8.0 分支 | 先 rebase / merge 到 main 再开 Phase 1 工作 | 该分支已 stale 则在 Phase 1 中重做相关代码 |
+
+---
+
+### MVP 2 — 控制面板 + TraceStudio 迁移（3 周）
+
+**目标**：把现有 TraceStudio 完整搬到控制面板，三个 Tab 全部可用。
+
+**产物清单**：
+
+| 类别 | 项 | 验收 |
+|------|----|------|
+| **控制面板窗口** | Tauri 独立窗口 + Acrylic 背景 + 标签页路由 | 启动 < 500ms；切 Tab 无卡顿；Acrylic 与托盘弹窗视觉一致 |
+| **Overview Tab** | 状态摘要 / 端口 + Token / 最近 50 条 MCP 命令 | 与托盘弹窗内容呼应、不重复 |
+| **Trace Tab** | 整体迁移 TraceStudio | 现有 9 项功能 100% 可用（§12.4） |
+| **三层来源 UI 应用** | Trace tab 加 Filter 来源切换 | All / User / Agent / MCP 四种筛选 |
+| **Logs Tab** | 实时滚动 + 级别过滤 + 关键字搜索 | 1000 条日志加载 < 200ms |
+| **Daemon 新端点** | /api/overview / /api/commands / /api/logs | 端点存在 + 返回正确 schema |
+| **开机自启** | 注册表 HKCU\…\Run + 设置界面开关 | 重启系统后托盘自动出现 |
+| **Tauri 安装器** | MSI 打包 + 卸载干净 | 安装包 < 10MB；卸载残留检查（见 §15.1） |
+
+**MVP 2 不做**：
+- 人类干预录制 / 类型识别 / 中文注释（MVP 3）
+- ExportDialog 新增开关（MVP 3）
+- TraceTimeline 干预折叠卡片（MVP 3）
+
+**验收 KPI**：
+- 托盘左键 → 控制面板出现 ≤ 1 秒
+- 现有 TraceStudio 用户切到 MVP 2 → 无功能丢失
+- daemon 重启后日志连续可见
+
+---
+
+### MVP 3 — 人类干预录制与导出（3 周）
+
+**目标**：登录、2FA 等人类介入步骤在 Trace 中被自动识别、标记、并在导出脚本中加中文注释。
+
+**产物清单**：
+
+| 类别 | 项 | 验收 |
+|------|----|------|
+| **干预分组算法** | `intervention-grouper.ts`：连续 user 事件分组 | 100 个事件测试覆盖：相邻 user 合并 / agent 切断 / 30s 间隔切断 |
+| **类型识别启发式** | `intervention-classifier.ts`：6 类 + 叠加规则 | 测试用例：登录 / 2FA / CAPTCHA / 弹窗 / 翻页 / 兜底 各 ≥ 2 个 |
+| **trace 事件类型扩展** | 加 interventionId / Type / Label | 序列化往返不丢字段 |
+| **导出器扩展** | JS / Playwright / Python 三套中文注释模板 | 真实 GitHub 登录 trace → 导出脚本人工可读 |
+| **ExportDialog 新增** | 5 个开关（§11.7） | 关闭脱敏需弹二次确认 |
+| **TraceTimeline 折叠卡片** | 干预段按类型上色 + 默认折叠 | hover 展开 / 点击收起 |
+| **文档** | README + trace 指南 | 含登录 + 2FA 示例截图 |
+
+**验收 KPI**：
+- 录制一次"打开 GitHub → 人工登录 → agent 发 PR" → 导出脚本能直接读懂哪段是人哪段是 agent
+- 凭据脱敏默认开启 + 关闭需二次确认
+
+---
+
+### M4+ — 见 future.md
+
+MVP 1–3 结束时扫一遍 future.md 的"触发实现条件"。
+
+---
+
+## 15. 待补设计（占位，下迭代填充）
+
+### 15.1 卸载流程
+
+目标：托盘菜单"卸载并清理"或安装器 uninstall 在 30s 内完成清理。
+清单：HKCU 自启项、`~/.bb-browser/`、防火墙规则、临时 user data dir。
+保留：用户导出的 trace 脚本、浏览器书签/cookie。
+顺序：通知 MCP 客户端 → 优雅关闭 daemon → 退托盘 → 删文件 → 清注册表。
+
+### 15.2 配置迁移
+
+`~/.bb-browser/` 加 `schemaVersion` 字段；启动时检测旧版本 → 一次性迁移 + 备份原文件到 `backup-YYYYMMDD/`。降级（schema 比当前新）→ 警告但不修改。
+
+### 15.3 首次启动引导（Onboarding）
+
+目标：安装后 30s 内看到"Chrome 已连接"。
+步骤：欢迎页 → 浏览器检测（找不到给"下载 Chrome"和"手动指定"两个出口）→ 显示 Token 和"复制 MCP 配置"按钮 → 针对 Claude Code / Cursor / Cline / Continue 各一份配置模板 → 完成页。
+兜底：CDP 端口被占、Chrome 已运行但没开 `--remote-debugging-port`、防火墙阻断。
+
+### 15.4 故障诊断报告导出
+
+托盘右键 → 故障诊断 → 自动 zip：daemon.log + daemon.json（脱敏 Token）+ 系统信息 + 最近 Toast 历史 → 保存到 Desktop。
