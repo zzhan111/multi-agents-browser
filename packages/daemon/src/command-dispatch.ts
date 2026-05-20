@@ -510,8 +510,28 @@ export async function dispatchRequest(
   // Resolve target from request.tabId (supports short IDs)
   const tabRef = request.tabId;
 
-  // tab_new must work even when there are no existing tabs,
-  // so handle it before ensurePageTarget().
+  // tab_new and tab_list must work even when there are no existing tabs (or
+  // when all open tabs are non-page targets), so handle them before
+  // ensurePageTarget() which would throw "No page target found".
+  if (request.action === "tab_list") {
+    const targets = (await cdp.getTargets()).filter((t) => t.type === "page");
+    const tabs = targets.map((t, index) => {
+      const tState = cdp.tabManager.getTab(t.id);
+      return {
+        index,
+        url: t.url,
+        title: t.title,
+        active: t.id === cdp.currentTargetId || (!cdp.currentTargetId && index === 0),
+        tabId: t.id,
+        tab: tState?.shortId ?? t.id.slice(-4).toLowerCase(),
+      };
+    });
+    return ok(request.id, {
+      tabs,
+      activeIndex: tabs.findIndex((t) => t.active),
+    });
+  }
+
   if (request.action === "tab_new") {
     const url = request.url ?? "about:blank";
     const created = await cdp.browserCommand<{ targetId: string }>(
@@ -791,26 +811,7 @@ export async function dispatchRequest(
     // -----------------------------------------------------------------------
     // Tab management
     // -----------------------------------------------------------------------
-    case "tab_list": {
-      const targets = (await cdp.getTargets()).filter((t) => t.type === "page");
-      const tabs = targets.map((t, index) => {
-        const tState = cdp.tabManager.getTab(t.id);
-        return {
-          index,
-          url: t.url,
-          title: t.title,
-          active: t.id === cdp.currentTargetId || (!cdp.currentTargetId && index === 0),
-          tabId: t.id,
-          tab: tState?.shortId ?? t.id.slice(-4).toLowerCase(),
-        };
-      });
-      return ok(request.id, {
-        tabs,
-        activeIndex: tabs.findIndex((t) => t.active),
-      });
-    }
-
-    // tab_new is handled before ensurePageTarget() above
+    // tab_list and tab_new are handled before ensurePageTarget() above.
 
     case "tab_select": {
       const targets = (await cdp.getTargets()).filter((t) => t.type === "page");

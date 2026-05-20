@@ -135,16 +135,23 @@ function TraceStudio() {
     };
   }, [traceRecording, connected, activeTab, setTraceRecording, addTraceEvent]);
 
-  // 加载标签页列表
+  // 加载标签页列表 — 保存全部 page 类型标签（包括 chrome://），
+  // TabPanel 负责显示时区分可录制和不可录制页面。
+  // 自动激活首个 http/https 标签作为默认录制目标。
   const loadTabs = async () => {
     try {
       const response = await daemon.send('tab_list');
       if (response.success && response.data.tabs) {
-        const validTabs = response.data.tabs.filter(t => t.url && (t.url.startsWith('http://') || t.url.startsWith('https://')));
-        setTabs(validTabs);
-        const activeTab = validTabs.find(t => t.active);
-        if (activeTab) {
-          setActiveTab(activeTab, activeTab.tabId);
+        const allTabs = response.data.tabs;
+        setTabs(allTabs);
+        // 优先激活 daemon 标记的 active 标签；若它不可录制则回退到第一个 http/https 标签
+        const markedActive = allTabs.find(t => t.active);
+        const recordable = (t) => t.url && (t.url.startsWith('http://') || t.url.startsWith('https://'));
+        const target = (markedActive && recordable(markedActive))
+          ? markedActive
+          : allTabs.find(recordable);
+        if (target) {
+          setActiveTab(target, target.tabId);
         }
       }
     } catch (err) {

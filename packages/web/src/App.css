@@ -358,6 +358,15 @@ body {
   background: var(--color-primary);
 }
 
+.tab-item--disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.tab-item--disabled:hover {
+  background: transparent;
+}
+
 .tab-icon {
   font-size: 20px;
   min-width: 32px;

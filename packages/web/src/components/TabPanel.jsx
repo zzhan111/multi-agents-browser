@@ -2,12 +2,17 @@
  * 标签页管理面板
  */
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useStore } from '../store/useStore';
 import { daemon } from '../api/daemon';
 
+/** Returns true for tabs the Trace engine can record (http/https pages). */
+function isRecordable(tab) {
+  return tab.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'));
+}
+
 function TabPanel() {
-  const { tabs, activeTab, activeTabId, setTabs, setActiveTab } = useStore();
+  const { tabs, activeTabId, setTabs, setActiveTab } = useStore();
   const [refreshing, setRefreshing] = useState(false);
 
   const handleRefresh = async () => {
@@ -25,6 +30,7 @@ function TabPanel() {
   };
 
   const handleSelectTab = (tab) => {
+    if (!isRecordable(tab)) return; // 非 http/https 页不可选为录制目标
     setActiveTab(tab, tab.tabId);
   };
 
@@ -43,24 +49,32 @@ function TabPanel() {
       </div>
       <div className="tab-list">
         {tabs.length === 0 ? (
-          <div className="empty-state">无标签页</div>
+          <div className="empty-state">无标签页（点击 ↻ 刷新）</div>
         ) : (
-          tabs.filter(tab => tab.url && (tab.url.startsWith('http://') || tab.url.startsWith('https://'))).map((tab, index) => (
-            <div
-              key={tab.tabId}
-              className={`tab-item ${tab.tabId === activeTabId ? 'active' : ''}`}
-              onClick={() => handleSelectTab(tab)}
-            >
-              <div className="tab-icon">🌐</div>
-              <div className="tab-info">
-                <div className="tab-title">{tab.title || tab.url}</div>
-                <div className="tab-url">{tab.url}</div>
+          tabs.map((tab) => {
+            const recordable = isRecordable(tab);
+            return (
+              <div
+                key={tab.tabId}
+                className={[
+                  'tab-item',
+                  tab.tabId === activeTabId ? 'active' : '',
+                  !recordable ? 'tab-item--disabled' : '',
+                ].filter(Boolean).join(' ')}
+                onClick={() => handleSelectTab(tab)}
+                title={!recordable ? '此页面不支持录制（仅 http/https）' : tab.url}
+              >
+                <div className="tab-icon">{recordable ? '🌐' : '🔒'}</div>
+                <div className="tab-info">
+                  <div className="tab-title">{tab.title || tab.url}</div>
+                  <div className="tab-url">{tab.url}</div>
+                </div>
+                {tab.tabId === activeTabId && (
+                  <div className="tab-active-indicator">●</div>
+                )}
               </div>
-              {tab.tabId === activeTabId && (
-                <div className="tab-active-indicator">●</div>
-              )}
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>
