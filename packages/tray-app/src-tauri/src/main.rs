@@ -3,6 +3,12 @@
 
 #[cfg(feature = "tauri-app")]
 mod app;
+#[cfg(feature = "tauri-app")]
+mod commands;
+#[cfg(feature = "tauri-app")]
+mod daemon_runner;
+#[cfg(feature = "tauri-app")]
+mod notifier;
 
 #[cfg(feature = "tauri-app")]
 fn main() {

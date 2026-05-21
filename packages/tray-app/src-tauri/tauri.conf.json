@@ -9,7 +9,25 @@
     "frontendDist": "../src"
   },
   "app": {
-    "windows": [],
+    "windows": [
+      {
+        "label": "popup",
+        "title": "bb-browser",
+        "url": "index.html",
+        "width": 360,
+        "height": 360,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
+        "shadow": true,
+        "minWidth": 360,
+        "maxWidth": 360
+      }
+    ],
     "trayIcon": {
       "id": "main-tray",
       "iconPath": "icons/tray-red.png",
