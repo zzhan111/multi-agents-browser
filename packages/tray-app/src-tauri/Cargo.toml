@@ -25,14 +25,31 @@ serde_json = "1.0"
 # crate must not import any tauri::* items.
 [dependencies.tauri]
 version = "2.0"
-default-features = false
-features = ["tray-icon"]
+features = ["tray-icon", "image-png", "image-ico"]
+optional = true
+
+[dependencies.tauri-plugin-notification]
+version = "2.0"
+optional = true
+
+[dependencies.tauri-plugin-clipboard-manager]
+version = "2.0"
+optional = true
+
+[dependencies.tauri-plugin-opener]
+version = "2.0"
 optional = true
 
 [features]
 default = []
 # Enable to build the actual Tauri binary. Tests don't need it.
-tauri-app = ["dep:tauri"]
+tauri-app = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-notification",
+    "dep:tauri-plugin-clipboard-manager",
+    "dep:tauri-plugin-opener",
+]
 
 [dev-dependencies]
 tempfile = "3"
