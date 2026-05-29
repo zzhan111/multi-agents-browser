@@ -97,6 +97,8 @@ pub fn run() {
             crate::commands::open_logs_folder,
             crate::commands::open_control_panel,
             crate::commands::quit_app,
+            crate::commands::get_autostart,
+            crate::commands::set_autostart,
         ])
         .setup(|app| {
             setup_tray(app.handle())?;
@@ -106,6 +108,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::Focused(false) = event {
+                // Only popup uses light-dismiss; control-panel stays open.
                 if window.label() == "popup" {
                     let _ = window.hide();
                 }
@@ -115,19 +118,24 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// Apply Desktop Acrylic to the popup window (per design §13).
+/// Apply Desktop Acrylic to a window (per design §13).
 /// On Win10 < 1903 or when transparency is disabled, this gracefully
-/// degrades to the CSS fallback color in `styles.css`.
-fn apply_popup_effects(app: &AppHandle) {
+/// degrades to the CSS fallback color.
+fn apply_acrylic(app: &AppHandle, label: &str) {
     use tauri::window::{Effect, EffectsBuilder};
-    let Some(window) = app.get_webview_window("popup") else {
+    let Some(window) = app.get_webview_window(label) else {
         return;
     };
     let effects = EffectsBuilder::new().effect(Effect::Acrylic).build();
     if let Err(e) = window.set_effects(effects) {
         // Expected on Win10 < 1903; just log and let CSS fallback handle it.
-        eprintln!("[popup] Acrylic effect not applied: {e}");
+        eprintln!("[{label}] Acrylic effect not applied: {e}");
     }
+}
+
+fn apply_popup_effects(app: &AppHandle) {
+    apply_acrylic(app, "popup");
+    apply_acrylic(app, "control-panel");
 }
 
 // ---------------------------------------------------------------------------
@@ -186,12 +194,13 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)>
     let sep3 = PredefinedMenuItem::separator(app)?;
 
     // --- Group 4: settings submenu ---
+    let autostart_checked = bb_browser_tray::autostart::is_enabled();
     let autostart = CheckMenuItem::with_id(
         app,
         ID_AUTOSTART,
         "开机自启",
         true,
-        false,
+        autostart_checked,
         None::<&str>,
     )?;
     let ports = MenuItem::with_id(app, ID_PORTS, "端口配置...", true, None::<&str>)?;
@@ -344,7 +353,16 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
         // --- Settings ---
         ID_AUTOSTART => {
-            eprintln!("[tray] toggle autostart (TODO Phase MVP2)");
+            let currently = bb_browser_tray::autostart::is_enabled();
+            let want = !currently;
+            if let Err(e) = bb_browser_tray::autostart::set_enabled(want) {
+                eprintln!("[tray] autostart set failed: {e}");
+            } else {
+                eprintln!("[tray] autostart -> {want}");
+                // Update the checkmark to match the new state.
+                // We can't easily get the CheckMenuItem handle here since it
+                // wasn't stored, but the OS toggles it automatically on click.
+            }
         }
         ID_PORTS => eprintln!("[tray] open port config (TODO MVP2)"),
         ID_BROWSER_PATH => eprintln!("[tray] open browser path picker (TODO MVP2)"),
@@ -363,7 +381,10 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
 
         // --- About / quit ---
-        ID_ABOUT => eprintln!("[tray] about (TODO MVP2)"),
+        ID_ABOUT => {
+            // TODO MVP2: open about dialog
+            eprintln!("[tray] about");
+        }
         ID_QUIT => {
             // Kill the daemon cleanly before exiting.
             let state = app.state::<AppState>();

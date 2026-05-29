@@ -5,9 +5,12 @@
   "description": "Windows system tray daemon UI for bb-browser",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
-    "build:debug": "tauri build --debug"
+    "panel:dev":   "cd src-panel && npm run dev",
+    "panel:build": "cd src-panel && npm run build",
+    "dev":         "tauri dev",
+    "build":       "npm run panel:build",
+    "tauri:build": "npm run panel:build && tauri build",
+    "build:debug": "npm run panel:build && tauri build --debug"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0"

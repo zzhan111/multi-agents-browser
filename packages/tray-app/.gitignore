@@ -5,6 +5,9 @@ src-tauri/target/
 node_modules/
 dist/
 
+# Vite panel build output (regenerated from src-panel/)
+src/assets/
+
 # IDE
 .vscode/
 .idea/

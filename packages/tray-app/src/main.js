@@ -102,9 +102,13 @@ document.getElementById("closeBtn").addEventListener("click", () => {
   currentWindow.hide();
 });
 
-document.getElementById("settingsBtn").addEventListener("click", () => {
-  // TODO: open control panel when implemented (Phase MVP 2)
-  showToast("控制面板暂未上线 (MVP 2)");
+document.getElementById("settingsBtn").addEventListener("click", async () => {
+  try {
+    await invoke("open_control_panel");
+  } catch (e) {
+    console.error("[popup] open_control_panel failed:", e);
+    showToast("无法打开控制面板");
+  }
 });
 
 // Copy buttons — use [data-copy-target] = element id whose textContent
@@ -146,8 +150,12 @@ function labelFor(id) {
 }
 
 document.getElementById("openPanelBtn").addEventListener("click", async () => {
-  await invoke("open_control_panel");
-  showToast("控制面板暂未上线 (MVP 2)");
+  try {
+    await invoke("open_control_panel");
+  } catch (e) {
+    console.error("[popup] open_control_panel failed:", e);
+    showToast("无法打开控制面板");
+  }
 });
 
 document.getElementById("restartBtn").addEventListener("click", async () => {

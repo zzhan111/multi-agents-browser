@@ -10,7 +10,7 @@ use bb_browser_tray::supervisor::Event;
 use bb_browser_tray::tray_state::TrayColor;
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{Manager, State};
 
 /// One recent command for the popup's "最近命令" list.
 #[derive(Serialize, Clone)]
@@ -111,11 +111,15 @@ pub fn open_logs_folder(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Open the control panel window (Phase 2 / MVP 2 — not yet implemented).
+/// Open (or focus) the control panel window.
 #[tauri::command]
-pub fn open_control_panel(_app: tauri::AppHandle) -> Result<(), String> {
-    // Stub for now. MVP 2 will spawn a dedicated control-panel window.
-    Err("控制面板暂未上线 (MVP 2)".to_string())
+pub fn open_control_panel(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(win) = app.get_webview_window("control-panel") else {
+        return Err("控制面板窗口未注册".to_string());
+    };
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Quit the application (cleanly killing the daemon first).
@@ -123,6 +127,18 @@ pub fn open_control_panel(_app: tauri::AppHandle) -> Result<(), String> {
 pub fn quit_app(app: tauri::AppHandle, state: State<'_, AppState>) {
     state.runner.kill();
     app.exit(0);
+}
+
+/// Read current autostart state.
+#[tauri::command]
+pub fn get_autostart() -> bool {
+    bb_browser_tray::autostart::is_enabled()
+}
+
+/// Enable or disable autostart.
+#[tauri::command]
+pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    bb_browser_tray::autostart::set_enabled(enabled)
 }
 
 // ---------------------------------------------------------------------------

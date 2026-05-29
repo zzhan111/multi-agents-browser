@@ -42,3 +42,42 @@ ExportDialog 新增"智能等待"开关（默认开启）：
 ## 后续待改进项
 
 （暂无。在此追加新的 roadmap 条目。）
+
+---
+
+## MVP 2 实施记录（2026-05-28）
+
+### ✅ Phase A — Daemon 新 HTTP 端点
+
+- `packages/daemon/src/command-history.ts` — 200-entry ring buffer，记录每条 MCP 命令
+- `packages/daemon/src/http-server.ts` 新增 `GET /api/overview`、`GET /api/commands`、`GET /api/logs`
+- `packages/daemon/src/cdp-connection.ts` 新增 `chromeVersion` 字段
+- `packages/daemon/src/index.ts` 接入 `CommandHistory` + `installLogInterceptor`
+
+### ✅ Phase B — Tauri 控制面板窗口基础
+
+- `tauri.conf.json` 注册 `control-panel` 窗口（960×680，Acrylic，默认隐藏）
+- `commands.rs` `open_control_panel` 真实 show/focus 实现
+- `app.rs` Acrylic 覆盖 popup + control-panel 双窗口
+- popup `main.js` 按钮接通 `invoke("open_control_panel")`
+
+### ✅ Phase C — React+Vite 控制面板前端 + TraceStudio 迁移
+
+- `src-panel/` 新 Vite+React 项目；`build.outDir=../src, emptyOutDir:false`
+- `Dashboard.jsx` — TitleBar + TabBar + 三 Tab 路由
+- `api/daemon.js` 复用 web 版 + 新增 `getOverview() / getCommands() / getLogs()`
+- `store/useStore.jsx` 扩展 overview / commands / logs state
+- 7 个 TraceStudio 组件完整迁移（import 路径修正）
+
+### ✅ Phase D — 三个 Tab 内容
+
+- `TracePage.jsx` — TraceStudio 完整迁移（9 项功能 100% 保留）
+- `OverviewPage.jsx` — 5s 轮询；端口/Token 一键复制；最近 50 条命令
+- `LogsPage.jsx` — 3s 轮询；级别过滤；关键字高亮搜索；自动滚动
+
+### ✅ Phase E — 开机自启 + 安装器
+
+- `src/autostart.rs` — `winreg` 读写 `HKCU\...\Run`；非 Windows 平台 stub
+- `commands.rs` 新增 `get_autostart` / `set_autostart` Tauri 命令
+- `app.rs` 菜单 autostart 处理器接通注册表；初始 checkmark 从注册表读取
+- `tauri.conf.json` `targets` 增加 `"msi"`；NSIS 改 `installMode: "currentUser"`

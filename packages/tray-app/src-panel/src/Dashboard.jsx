@@ -1,0 +1,82 @@
+/**
+ * Dashboard — 控制面板根组件
+ *
+ * 三段式布局：
+ *   TitleBar (40px) — 拖拽区 + 状态指示 + 关闭按钮
+ *   TabBar   (40px) — Overview / Trace / Logs 切换
+ *   Content  (flex) — 当前 Tab 内容
+ */
+
+import { useState, useEffect } from 'react';
+import { useStore } from './store/useStore.jsx';
+import { daemon } from './api/daemon.js';
+
+import OverviewPage from './pages/OverviewPage.jsx';
+import TracePage from './pages/TracePage.jsx';
+import LogsPage from './pages/LogsPage.jsx';
+
+import styles from './Dashboard.module.css';
+
+const TABS = [
+  { id: 'overview', label: '📊 Overview' },
+  { id: 'trace',    label: '🎬 Trace' },
+  { id: 'logs',     label: '📋 Logs' },
+];
+
+export default function Dashboard() {
+  const [activeTab, setActiveTab] = useState('overview');
+  const { connected } = useStore();
+
+  // Auto-connect to daemon on mount
+  useEffect(() => {
+    daemon.connect().catch((err) => {
+      console.error('[panel] daemon connect failed:', err);
+    });
+    return () => daemon.disconnect();
+  }, []);
+
+  const closeWindow = () => {
+    if (window.__TAURI__?.window) {
+      window.__TAURI__.window.getCurrentWindow().hide();
+    }
+  };
+
+  return (
+    <div className={styles.root}>
+      {/* ── Title bar (draggable) ── */}
+      <div className={styles.titlebar} data-tauri-drag-region>
+        <div className={styles.titlebarLeft}>
+          <span
+            className={styles.statusDot}
+            data-color={connected ? 'green' : 'red'}
+            title={connected ? '已连接' : '未连接'}
+          />
+          <span className={styles.titlebarTitle}>bb-browser 控制面板</span>
+        </div>
+        <button className={styles.closeBtn} onClick={closeWindow} title="关闭 (Esc)">
+          ✕
+        </button>
+      </div>
+
+      {/* ── Tab bar ── */}
+      <div className={styles.tabbar}>
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            className={`${styles.tabBtn} ${activeTab === tab.id ? styles.tabBtnActive : ''}`}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Content ── */}
+      <div className={styles.content}>
+        {activeTab === 'overview' && <OverviewPage />}
+        {activeTab === 'trace'    && <TracePage />}
+        {activeTab === 'logs'     && <LogsPage />}
+      </div>
+    </div>
+  );
+}

@@ -16,12 +16,15 @@ import type { Request } from "@bb-browser/shared";
 import { COMMAND_TIMEOUT, DAEMON_PORT } from "@bb-browser/shared";
 import { CdpConnection } from "./cdp-connection.js";
 import { dispatchRequest } from "./command-dispatch.js";
+import type { CommandHistory } from "./command-history.js";
 
 export interface HttpServerOptions {
   host?: string;
   port?: number;
+  cdpPort?: number;
   token?: string;
   cdp: CdpConnection;
+  history?: CommandHistory;
   onShutdown?: () => void;
 }
 
@@ -29,16 +32,20 @@ export class HttpServer {
   private server: Server | null = null;
   private readonly host: string;
   private readonly port: number;
+  private readonly cdpPort: number;
   private readonly token: string | null;
   private readonly cdp: CdpConnection;
+  private readonly history: CommandHistory | null;
   private readonly onShutdown?: () => void;
   private startTime = 0;
 
   constructor(options: HttpServerOptions) {
     this.host = options.host ?? "127.0.0.1";
     this.port = options.port ?? DAEMON_PORT;
+    this.cdpPort = options.cdpPort ?? 0;
     this.token = options.token ?? null;
     this.cdp = options.cdp;
+    this.history = options.history ?? null;
     this.onShutdown = options.onShutdown;
   }
 
@@ -118,6 +125,12 @@ export class HttpServer {
       this.handleStatus(req, res);
     } else if (req.method === "POST" && url === "/shutdown") {
       this.handleShutdown(req, res);
+    } else if (req.method === "GET" && url.startsWith("/api/overview")) {
+      this.handleOverview(res);
+    } else if (req.method === "GET" && url.startsWith("/api/commands")) {
+      this.handleCommands(url, res);
+    } else if (req.method === "GET" && url.startsWith("/api/logs")) {
+      this.handleLogs(url, res);
     } else {
       this.sendJson(res, 404, { error: "Not found" });
     }
@@ -159,11 +172,18 @@ export class HttpServer {
       const timeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("Command timeout")), COMMAND_TIMEOUT),
       );
-      const response = await Promise.race([
-        dispatchRequest(this.cdp, request),
-        timeout,
-      ]);
-      this.sendJson(res, 200, response);
+      const finish = this.history?.record(request.action ?? "unknown", request);
+      try {
+        const response = await Promise.race([
+          dispatchRequest(this.cdp, request),
+          timeout,
+        ]);
+        finish?.();
+        this.sendJson(res, 200, response);
+      } catch (err2) {
+        finish?.(false);
+        throw err2;
+      }
     } catch (error) {
       this.sendJson(res, 400, {
         success: false,
@@ -194,6 +214,43 @@ export class HttpServer {
       currentTargetId: this.cdp.currentTargetId,
       tabs,
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // GET /api/overview
+  // ---------------------------------------------------------------------------
+
+  private handleOverview(res: ServerResponse): void {
+    const tabs = this.cdp.tabManager.allTabs();
+    this.sendJson(res, 200, {
+      uptime: this.uptime,
+      daemonPort: this.port,
+      cdpPort: this.cdpPort,
+      cdpConnected: this.cdp.connected,
+      tabCount: tabs.length,
+      chromeVersion: this.cdp.chromeVersion ?? null,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // GET /api/commands?limit=50
+  // ---------------------------------------------------------------------------
+
+  private handleCommands(url: string, res: ServerResponse): void {
+    const limit = parseIntParam(url, "limit", 50);
+    const records = this.history ? this.history.recent(limit) : [];
+    this.sendJson(res, 200, { commands: records });
+  }
+
+  // ---------------------------------------------------------------------------
+  // GET /api/logs?level=&limit=200
+  // ---------------------------------------------------------------------------
+
+  private handleLogs(url: string, res: ServerResponse): void {
+    const limit = parseIntParam(url, "limit", 200);
+    const level = parseStringParam(url, "level", "");
+    const logs = logStore.recent(limit, level);
+    this.sendJson(res, 200, { logs });
   }
 
   // ---------------------------------------------------------------------------
@@ -231,4 +288,79 @@ export class HttpServer {
     });
     res.end(body);
   }
+}
+
+// ---------------------------------------------------------------------------
+// URL query-string helpers
+// ---------------------------------------------------------------------------
+
+function parseIntParam(url: string, name: string, def: number): number {
+  const m = new RegExp(`[?&]${name}=(\\d+)`).exec(url);
+  if (!m) return def;
+  const v = parseInt(m[1], 10);
+  return Number.isFinite(v) && v > 0 ? v : def;
+}
+
+function parseStringParam(url: string, name: string, def: string): string {
+  const m = new RegExp(`[?&]${name}=([^&]*)`).exec(url);
+  return m ? decodeURIComponent(m[1]) : def;
+}
+
+// ---------------------------------------------------------------------------
+// In-process log store (singleton)
+//
+// Captures lines written to stderr via a lightweight interceptor so the
+// /api/logs endpoint can serve them without touching the filesystem.
+// ---------------------------------------------------------------------------
+
+export interface LogEntry {
+  ts: number;
+  level: "info" | "warn" | "error" | "debug";
+  msg: string;
+}
+
+import { RingBuffer } from "./ring-buffer.js";
+
+class LogStore {
+  private readonly buf = new RingBuffer<LogEntry>(1000);
+
+  push(entry: LogEntry): void {
+    this.buf.push(entry);
+  }
+
+  recent(limit: number, level: string): LogEntry[] {
+    const all = this.buf.toArray();
+    const filtered = level
+      ? all.filter((e) => e.level === level)
+      : all;
+    return filtered.slice(-limit).reverse();
+  }
+}
+
+export const logStore = new LogStore();
+
+/**
+ * Call once at daemon startup to intercept `console.error` (which the daemon
+ * uses for all operational logging) and feed entries into `logStore`.
+ *
+ * Original write still goes to stderr so nothing is lost.
+ */
+export function installLogInterceptor(): void {
+  const origError = console.error.bind(console);
+  console.error = (...args: unknown[]) => {
+    const msg = args.map((a) => (typeof a === "string" ? a : String(a))).join(" ");
+    const trimmed = msg.trimEnd();
+    if (trimmed) {
+      logStore.push({ ts: Date.now(), level: detectLevel(trimmed), msg: trimmed });
+    }
+    origError(...args);
+  };
+}
+
+function detectLevel(msg: string): LogEntry["level"] {
+  const lower = msg.toLowerCase();
+  if (lower.includes("error") || lower.includes("fatal")) return "error";
+  if (lower.includes("warn")) return "warn";
+  if (lower.includes("debug")) return "debug";
+  return "info";
 }

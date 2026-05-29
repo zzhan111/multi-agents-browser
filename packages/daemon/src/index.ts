@@ -16,9 +16,10 @@ import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { DAEMON_PORT, DAEMON_HOST } from "@bb-browser/shared";
-import { HttpServer } from "./http-server.js";
+import { HttpServer, installLogInterceptor } from "./http-server.js";
 import { CdpConnection } from "./cdp-connection.js";
 import { TabStateManager } from "./tab-state.js";
+import { CommandHistory } from "./command-history.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -193,10 +194,13 @@ async function discoverCdpPort(host: string, port: number): Promise<{ host: stri
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  installLogInterceptor();
+
   const options = parseOptions();
 
   // Create tab state manager and CDP connection
   const tabManager = new TabStateManager();
+  const history = new CommandHistory();
   let cdpEndpoint: { host: string; port: number };
 
   try {
@@ -226,8 +230,10 @@ async function main(): Promise<void> {
   const httpServer = new HttpServer({
     host: options.host,
     port: options.port,
+    cdpPort: cdpEndpoint.port,
     token: options.token,
     cdp,
+    history,
     onShutdown: shutdown,
   });
 

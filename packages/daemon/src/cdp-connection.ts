@@ -101,6 +101,9 @@ export class CdpConnection {
   /** Last connection error (for diagnostics in 503 responses). */
   lastError: string | null = null;
 
+  /** Chrome version string extracted from /json/version (e.g. "130.0.6723.116"). */
+  chromeVersion: string | null = null;
+
   /** Resolvers for commands queued before CDP is ready. */
   private readyWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 
@@ -150,6 +153,13 @@ export class CdpConnection {
     const wsUrl = versionData.webSocketDebuggerUrl;
     if (typeof wsUrl !== "string" || !wsUrl) {
       throw new Error("CDP endpoint missing webSocketDebuggerUrl");
+    }
+
+    // Extract Chrome version from "Chrome/130.0.6723.116" Browser string.
+    const browser = versionData.Browser ?? versionData.browser;
+    if (typeof browser === "string") {
+      const m = /Chrome\/([\d.]+)/.exec(browser);
+      if (m) this.chromeVersion = m[1];
     }
 
     const ws = await connectWebSocket(wsUrl);

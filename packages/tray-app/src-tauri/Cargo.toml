@@ -44,6 +44,12 @@ optional = true
 version = "7"
 optional = true
 
+# Windows registry access for autostart (HKCU\...\Run).
+# Always included on Windows (not optional) so the lib crate can use it
+# without requiring the tauri-app feature.
+[target.'cfg(windows)'.dependencies.winreg]
+version = "0.52"
+
 [features]
 default = []
 # Enable to build the actual Tauri binary. Tests don't need it.

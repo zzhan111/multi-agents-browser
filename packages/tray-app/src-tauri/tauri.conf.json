@@ -6,7 +6,8 @@
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
-    "frontendDist": "../src"
+    "frontendDist": "../src",
+    "features": ["tauri-app"]
   },
   "app": {
     "windows": [
@@ -26,6 +27,24 @@
         "shadow": true,
         "minWidth": 360,
         "maxWidth": 360
+      },
+      {
+        "label": "control-panel",
+        "title": "bb-browser 控制面板",
+        "url": "panel.html",
+        "width": 960,
+        "height": 680,
+        "minWidth": 720,
+        "minHeight": 480,
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "visible": false,
+        "focus": false,
+        "shadow": true,
+        "center": true
       }
     ],
     "trayIcon": {
@@ -41,7 +60,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "msi"],
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"
@@ -51,9 +70,7 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "perMachine",
-        "displayLanguageSelector": false,
-        "languages": ["English", "SimpChinese"]
+        "installMode": "currentUser"
       }
     }
   }
