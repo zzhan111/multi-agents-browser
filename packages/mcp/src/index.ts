@@ -106,6 +106,7 @@ async function ensureDaemon(): Promise<void> {
 
   const child = spawn(process.execPath, [getDaemonPath(), ...cdpArgs], {
     detached: true, stdio: "ignore", env: { ...process.env },
+    windowsHide: true,  // suppress console window when MCP spawns a daemon
   });
   child.unref();
   // wait up to 10s — re-read daemon.json each iteration (daemon writes it on startup)
@@ -359,7 +360,9 @@ const specialHandlers: Record<string, (cmd: CommandDef) => ToolHandler> = {
   },
 
   screenshot: (cmd) => async (args) => {
-    const resp = await runCommand(buildRequest(cmd, args));
+    // includeBase64 tells the daemon to embed the PNG as a data URL in the
+    // response — without it the daemon only saves to disk and omits dataUrl.
+    const resp = await runCommand({ ...buildRequest(cmd, args), includeBase64: true });
     if (!resp.success) return responseError(resp);
     const dataUrl = resp.data?.dataUrl;
     if (typeof dataUrl !== "string") return errorResult("Screenshot data missing");

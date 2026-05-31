@@ -47,12 +47,6 @@
         "center": true
       }
     ],
-    "trayIcon": {
-      "id": "main-tray",
-      "iconPath": "icons/tray-red.png",
-      "iconAsTemplate": false,
-      "tooltip": "bb-browser · starting..."
-    },
     "security": {
       "csp": null
     },

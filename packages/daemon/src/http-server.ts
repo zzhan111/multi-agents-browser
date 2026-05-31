@@ -12,11 +12,23 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
+import { createWriteStream, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Request } from "@bb-browser/shared";
 import { COMMAND_TIMEOUT, DAEMON_PORT } from "@bb-browser/shared";
 import { CdpConnection } from "./cdp-connection.js";
 import { dispatchRequest } from "./command-dispatch.js";
 import type { CommandHistory } from "./command-history.js";
+
+/**
+ * Mutable startup status shared between the background CDP bring-up loop and
+ * the HTTP server, so /status can report when it's blocked on user consent to
+ * close a non-debuggable browser.
+ */
+export interface DaemonRuntimeStatus {
+  /** True while a browser is running without debugging and we lack consent. */
+  needsBrowserConsent: boolean;
+}
 
 export interface HttpServerOptions {
   host?: string;
@@ -26,6 +38,7 @@ export interface HttpServerOptions {
   cdp: CdpConnection;
   history?: CommandHistory;
   onShutdown?: () => void;
+  runtimeStatus?: DaemonRuntimeStatus;
 }
 
 export class HttpServer {
@@ -37,6 +50,7 @@ export class HttpServer {
   private readonly cdp: CdpConnection;
   private readonly history: CommandHistory | null;
   private readonly onShutdown?: () => void;
+  private readonly runtimeStatus: DaemonRuntimeStatus;
   private startTime = 0;
 
   constructor(options: HttpServerOptions) {
@@ -47,6 +61,7 @@ export class HttpServer {
     this.cdp = options.cdp;
     this.history = options.history ?? null;
     this.onShutdown = options.onShutdown;
+    this.runtimeStatus = options.runtimeStatus ?? { needsBrowserConsent: false };
   }
 
   // ---------------------------------------------------------------------------
@@ -209,6 +224,7 @@ export class HttpServer {
     this.sendJson(res, 200, {
       running: true,
       cdpConnected: this.cdp.connected,
+      needsBrowserConsent: this.runtimeStatus.needsBrowserConsent,
       uptime: this.uptime,
       currentSeq: this.cdp.tabManager.currentSeq(),
       currentTargetId: this.cdp.currentTargetId,
@@ -343,15 +359,39 @@ export const logStore = new LogStore();
  * Call once at daemon startup to intercept `console.error` (which the daemon
  * uses for all operational logging) and feed entries into `logStore`.
  *
- * Original write still goes to stderr so nothing is lost.
+ * Original write still goes to stderr so nothing is lost. When `logFilePath`
+ * is provided, each line is also appended there so startup failures are
+ * diagnosable after the fact (the tray's "打开日志文件夹" opens this dir).
  */
-export function installLogInterceptor(): void {
+export function installLogInterceptor(logFilePath?: string): void {
+  let fileSink: { write: (s: string) => void } | null = null;
+  if (logFilePath) {
+    try {
+      mkdirSync(dirname(logFilePath), { recursive: true });
+      const stream = createWriteStream(logFilePath, { flags: "a" });
+      fileSink = stream;
+      stream.write(
+        `\n===== bb-browser daemon started ${new Date().toISOString()} (pid ${process.pid}) =====\n`,
+      );
+    } catch {
+      // Best-effort: if we can't open the log file, keep logging to stderr.
+    }
+  }
+
   const origError = console.error.bind(console);
   console.error = (...args: unknown[]) => {
     const msg = args.map((a) => (typeof a === "string" ? a : String(a))).join(" ");
     const trimmed = msg.trimEnd();
     if (trimmed) {
-      logStore.push({ ts: Date.now(), level: detectLevel(trimmed), msg: trimmed });
+      const entry: LogEntry = { ts: Date.now(), level: detectLevel(trimmed), msg: trimmed };
+      logStore.push(entry);
+      if (fileSink) {
+        try {
+          fileSink.write(`${new Date(entry.ts).toISOString()} [${entry.level}] ${trimmed}\n`);
+        } catch {
+          // ignore file write errors
+        }
+      }
     }
     origError(...args);
   };

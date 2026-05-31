@@ -25,15 +25,28 @@ const TABS = [
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState('overview');
-  const { connected } = useStore();
+  const { connected, setConnected } = useStore();
 
-  // Auto-connect to daemon on mount
+  // Auto-connect to daemon on mount + bridge connection events into the store
+  // (the DaemonClient only tracks state internally; the UI reads `connected`
+  // from the store, so we must mirror its events there).
   useEffect(() => {
+    const onConnected = () => setConnected(true);
+    const onDisconnected = () => setConnected(false);
+    daemon.on('connected', onConnected);
+    daemon.on('disconnected', onDisconnected);
+
     daemon.connect().catch((err) => {
       console.error('[panel] daemon connect failed:', err);
+      setConnected(false);
     });
-    return () => daemon.disconnect();
-  }, []);
+
+    return () => {
+      daemon.off('connected', onConnected);
+      daemon.off('disconnected', onDisconnected);
+      daemon.disconnect();
+    };
+  }, [setConnected]);
 
   const closeWindow = () => {
     if (window.__TAURI__?.window) {

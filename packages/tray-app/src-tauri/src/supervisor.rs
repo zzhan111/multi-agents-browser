@@ -141,6 +141,14 @@ impl Supervisor {
                 self.state = DaemonState::Stopped;
                 SupervisorAction::Wait
             }
+            (DaemonState::Running, Event::UserRestart) => {
+                // User explicitly asked to restart while running (e.g. stuck
+                // yellow: HTTP up but CDP down). Clear the crash budget and
+                // respawn — the runner kills the old process first.
+                self.policy.reset();
+                self.state = DaemonState::Starting;
+                SupervisorAction::Spawn { restart_count: None }
+            }
             (DaemonState::Running, _) => SupervisorAction::Wait,
 
             // ---- GaveUp / FailedToStart ----
@@ -199,6 +207,24 @@ mod tests {
         let action = sup.handle(Event::DaemonReady);
         assert_eq!(action, SupervisorAction::Wait);
         assert_eq!(sup.state(), DaemonState::Running);
+    }
+
+    #[test]
+    fn user_restart_while_running_respawns() {
+        let mut sup = fresh();
+        sup.handle(Event::UserStart);
+        sup.handle(Event::DaemonReady);
+        assert_eq!(sup.state(), DaemonState::Running);
+
+        // Stuck-yellow scenario: user clicks "重启 daemon" while Running.
+        let action = sup.handle(Event::UserRestart);
+        assert_eq!(
+            action,
+            SupervisorAction::Spawn {
+                restart_count: None
+            }
+        );
+        assert_eq!(sup.state(), DaemonState::Starting);
     }
 
     #[test]

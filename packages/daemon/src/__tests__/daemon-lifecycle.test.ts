@@ -11,6 +11,7 @@ import {
   spawn,
   type ChildProcess,
 } from "node:child_process";
+import process from "node:process";
 import { readFile, unlink } from "node:fs/promises";
 import { existsSync, mkdirSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -42,17 +43,6 @@ function nextPorts(): { daemonPort: number; cdpPort: number } {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function findTsx(): string {
-  const candidates = [
-    path.resolve(__dirname, "../../../../node_modules/.bin/tsx"),
-    path.resolve(__dirname, "../../../node_modules/.bin/tsx"),
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-  return "tsx";
-}
-
 function startFakeCdp(port: number): Promise<Server> {
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
@@ -83,10 +73,12 @@ function stopFakeCdp(server: Server): Promise<void> {
 }
 
 function spawnDaemon(port: number, cdpPort: number): ChildProcess {
-  const sourceEntry = path.resolve(__dirname, "../index.ts");
+  // Use the compiled dist so no tsx/shell-script issues on Windows.
+  // The pre-commit hook runs `pnpm build` before `pnpm test`, so dist is fresh.
+  const distEntry = path.resolve(__dirname, "../../dist/index.js");
   return spawn(
-    findTsx(),
-    [sourceEntry, "--port", String(port), "--cdp-port", String(cdpPort)],
+    process.execPath,
+    [distEntry, "--port", String(port), "--cdp-port", String(cdpPort)],
     { stdio: "pipe", env: { ...process.env } },
   );
 }
@@ -180,7 +172,6 @@ describe("daemon lifecycle (no Chrome needed)", () => {
     assert.equal(info.port, daemonPort);
     assert.equal(typeof info.token, "string");
     assert.ok((info.token as string).length > 0);
-    // Note: daemon.pid is tsx wrapper PID, info.pid is the actual daemon PID
     assert.ok(info.pid as number > 0, "daemon PID should be positive");
   });
 
@@ -199,20 +190,34 @@ describe("daemon lifecycle (no Chrome needed)", () => {
     assert.equal(typeof status.uptime, "number");
   });
 
-  it("daemon.json is deleted on graceful shutdown (SIGTERM)", async () => {
+  it("daemon.json is deleted on graceful HTTP shutdown", async () => {
+    // On Windows, SIGTERM delivered via ChildProcess.kill() does NOT run Node.js
+    // signal handlers — Windows TerminateProcess gives no chance for cleanup.
+    // Test the real shutdown path instead: POST /shutdown (used by CLI and tray).
     const { daemonPort, cdpPort } = nextPorts();
     await cleanupDaemonJson();
     fakeCdp = await startFakeCdp(cdpPort);
     daemon = spawnDaemon(daemonPort, cdpPort);
-    await waitForDaemonJson();
+    const info = await waitForDaemonJson();
 
     assert.ok(existsSync(DAEMON_JSON));
 
-    await killDaemon(daemon);
-    daemon = null;
-    await new Promise((r) => setTimeout(r, 500));
+    // Use the HTTP /shutdown endpoint (the real graceful shutdown path).
+    try {
+      await fetch(`http://${info.host as string}:${info.port as number}/shutdown`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${info.token as string}` },
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch {
+      // Connection reset mid-response is normal when the server shuts down.
+    }
 
-    assert.ok(!existsSync(DAEMON_JSON), "daemon.json should be deleted after graceful shutdown");
+    // Give the daemon a moment to delete daemon.json and exit.
+    await new Promise((r) => setTimeout(r, 800));
+    daemon = null;
+
+    assert.ok(!existsSync(DAEMON_JSON), "daemon.json should be deleted after graceful HTTP shutdown");
   });
 
   it("stale daemon.json survives kill -9", async () => {
@@ -223,7 +228,6 @@ describe("daemon lifecycle (no Chrome needed)", () => {
     const info = await waitForDaemonJson();
     const oldPid = info.pid;
 
-    // Kill the actual daemon PID (not tsx wrapper)
     try { process.kill(oldPid as number, "SIGKILL"); } catch {}
     daemon.kill("SIGKILL");
     await new Promise((r) => setTimeout(r, 1000));

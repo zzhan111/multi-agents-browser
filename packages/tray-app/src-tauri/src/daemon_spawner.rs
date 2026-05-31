@@ -102,6 +102,16 @@ impl DaemonProcess {
         for (k, v) in &cfg.env {
             command.env(k, v);
         }
+        // On Windows, the tray binary is a GUI app (no console). Spawning
+        // `node` would otherwise pop a visible console window ("黑框") on the
+        // desktop/taskbar. CREATE_NO_WINDOW (0x0800_0000) suppresses it; we
+        // still capture stdout/stderr via the piped handles above.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("piped stdout");
 
@@ -113,7 +123,11 @@ impl DaemonProcess {
                     Ok(l) => l,
                     Err(_) => break,
                 };
-                if let Some(rest) = line.strip_prefix(READY_PREFIX) {
+                // Tolerate a leading prefix (e.g. the daemon's log
+                // interceptor prepends "[Daemon] ") by locating the marker
+                // anywhere in the line rather than only at the start.
+                if let Some(pos) = line.find(READY_PREFIX) {
+                    let rest = &line[pos + READY_PREFIX.len()..];
                     let event = match serde_json::from_str::<ReadyInfo>(rest) {
                         Ok(info) => StdoutEvent::Ready(Ok(info)),
                         Err(e) => StdoutEvent::Ready(Err((line.clone(), e.to_string()))),

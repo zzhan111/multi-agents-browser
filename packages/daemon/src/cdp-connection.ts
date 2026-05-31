@@ -88,8 +88,8 @@ export class CdpConnection {
   /** sessionId -> targetId */
   private attachedTargets = new Map<string, string>();
 
-  readonly host: string;
-  readonly port: number;
+  host: string;
+  port: number;
   readonly tabManager: TabStateManager;
 
   /** Current (most recently selected) target ID. */
@@ -107,6 +107,17 @@ export class CdpConnection {
   /** Resolvers for commands queued before CDP is ready. */
   private readyWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 
+  /**
+   * Invoked when an established WebSocket drops unexpectedly (e.g. the user
+   * closed Chrome). The owner (index.ts) wires this to restart the CDP
+   * bring-up loop so the daemon self-heals. Not called on an intentional
+   * `disconnect()`.
+   */
+  onUnexpectedClose: (() => void) | null = null;
+
+  /** True once `disconnect()` was called, to suppress reconnect on shutdown. */
+  private intentionallyClosed = false;
+
   constructor(host: string, port: number, tabManager: TabStateManager) {
     this.host = host;
     this.port = port;
@@ -115,6 +126,17 @@ export class CdpConnection {
 
   get connected(): boolean {
     return this._connected && this.socket !== null && this.socket.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Re-point this connection at a new endpoint before a (re)connect attempt.
+   * Only valid while disconnected — the background bring-up loop uses this
+   * when discovery resolves a different host/port (e.g. a managed browser
+   * that came up on a fallback port).
+   */
+  repoint(host: string, port: number): void {
+    this.host = host;
+    this.port = port;
   }
 
   // ---------------------------------------------------------------------------
@@ -129,6 +151,9 @@ export class CdpConnection {
     if (this._connected) return;
     if (this.connectionPromise) return this.connectionPromise;
 
+    // A fresh connect attempt clears the intentional-close guard so a later
+    // unexpected drop will trigger self-heal again.
+    this.intentionallyClosed = false;
     this.connectionPromise = this.doConnect();
     try {
       await this.connectionPromise;
@@ -196,6 +221,8 @@ export class CdpConnection {
 
   /** Gracefully close the CDP connection. */
   disconnect(): void {
+    // Mark intentional so the ws "close" handler does not trigger self-heal.
+    this.intentionallyClosed = true;
     if (this.socket) {
       try {
         this.socket.close();
@@ -321,6 +348,18 @@ export class CdpConnection {
         waiter.reject(closeErr);
       }
       this.readyWaiters = [];
+
+      // Reset per-connection target/session state so a reconnect starts clean.
+      this.sessions.clear();
+      this.attachedTargets.clear();
+      this.currentTargetId = undefined;
+
+      // Self-heal: unless we closed on purpose (shutdown), ask the owner to
+      // restart the CDP bring-up loop. This re-discovers/relaunches Chrome,
+      // so the tray returns to green after the browser is reopened.
+      if (!this.intentionallyClosed && this.onUnexpectedClose) {
+        this.onUnexpectedClose();
+      }
     });
 
     ws.on("error", () => {});

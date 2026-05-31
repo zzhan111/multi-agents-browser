@@ -15,8 +15,13 @@ import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { DAEMON_PORT, DAEMON_HOST } from "@bb-browser/shared";
-import { HttpServer, installLogInterceptor } from "./http-server.js";
+import {
+  DAEMON_PORT,
+  DAEMON_HOST,
+  launchManagedBrowser,
+  isConfiguredBrowserRunning,
+} from "@bb-browser/shared";
+import { HttpServer, installLogInterceptor, type DaemonRuntimeStatus } from "./http-server.js";
 import { CdpConnection } from "./cdp-connection.js";
 import { TabStateManager } from "./tab-state.js";
 import { CommandHistory } from "./command-history.js";
@@ -143,7 +148,11 @@ function cleanupDaemonJson(): void {
 // CDP port discovery (simplified — daemon is told the port)
 // ---------------------------------------------------------------------------
 
-async function discoverCdpPort(host: string, port: number): Promise<{ host: string; port: number }> {
+async function discoverCdpPort(
+  host: string,
+  port: number,
+  allowKill = false,
+): Promise<{ host: string; port: number }> {
   // Try connecting to the specified port first
   try {
     const controller = new AbortController();
@@ -183,9 +192,35 @@ async function discoverCdpPort(host: string, port: number): Promise<{ host: stri
     }
   } catch {}
 
+  // Last resort: launch a managed Chrome on the requested (free) CDP port.
+  // The CLI does this before spawning the daemon, but the tray supervisor
+  // does not — so the daemon must be able to bootstrap its own browser.
+  //
+  // `killExisting` (gated on user confirmation via BB_ALLOW_BROWSER_KILL) —
+  // if the user's browser is already open WITHOUT remote debugging, its
+  // single-instance lock would swallow our launch and never expose a CDP
+  // port. With consent we close the running instance and relaunch the SAME
+  // real profile with debugging on (logins preserved).
+  console.error(
+    `[Daemon] No Chrome reachable at ${host}:${port}; launching a managed browser` +
+      `${allowKill ? " (will close any running instance first)" : ""}...`,
+  );
+  const launched = await launchManagedBrowser(port, { killExisting: allowKill });
+  if (launched) {
+    return launched;
+  }
+
+  // Throwing here is non-fatal: bringUpCdp() catches it and retries. This
+  // covers the case where the user's browser is open without debugging but we
+  // don't have consent to close it — we keep retrying so that the moment they
+  // close it themselves (or grant consent), we connect.
   throw new Error(
-    `Cannot connect to Chrome CDP at ${host}:${port}. ` +
-    `Make sure Chrome is running with --remote-debugging-port=${port}`,
+    `Cannot connect to Chrome CDP at ${host}:${port}, and no debuggable ` +
+      `browser is available.` +
+      (allowKill
+        ? " Install Chrome/Edge/Brave or start Chrome with --remote-debugging-port."
+        : " A browser appears to be running without remote debugging; waiting" +
+          " for it to become debuggable (close-and-relaunch not authorized)."),
   );
 }
 
@@ -194,25 +229,20 @@ async function discoverCdpPort(host: string, port: number): Promise<{ host: stri
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  installLogInterceptor();
+  // Persist all daemon logs to ~/.bb-browser/logs/daemon.log so startup
+  // failures are diagnosable (the tray's "打开日志文件夹" opens this dir).
+  installLogInterceptor(path.join(DAEMON_DIR, "logs", "daemon.log"));
 
   const options = parseOptions();
 
-  // Create tab state manager and CDP connection
+  // Create tab state manager and CDP connection. The CDP endpoint is not yet
+  // known — the background bring-up loop (below) discovers/launches Chrome and
+  // repoints the connection. We seed it with the requested port so /status has
+  // a sensible cdpPort to report before the first connect.
   const tabManager = new TabStateManager();
   const history = new CommandHistory();
-  let cdpEndpoint: { host: string; port: number };
-
-  try {
-    cdpEndpoint = await discoverCdpPort(options.cdpHost, options.cdpPort);
-  } catch (error) {
-    console.error(
-      `[Daemon] ${error instanceof Error ? error.message : String(error)}`,
-    );
-    process.exit(1);
-  }
-
-  const cdp = new CdpConnection(cdpEndpoint.host, cdpEndpoint.port, tabManager);
+  const cdp = new CdpConnection(options.cdpHost, options.cdpPort, tabManager);
+  const runtimeStatus: DaemonRuntimeStatus = { needsBrowserConsent: false };
 
   // Graceful shutdown handler (guarded against double-call)
   let shuttingDown = false;
@@ -226,15 +256,23 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
-  // Phase 1: Start HTTP server immediately
+  // ----- Phase 1: bring up the HTTP server and signal READY immediately -----
+  //
+  // CRITICAL: the HTTP server must start and BB_DAEMON_READY must be emitted
+  // BEFORE any CDP work. CDP discovery may kill+relaunch the browser and wait
+  // several seconds; doing that synchronously here would blow the tray's
+  // READY timeout and make a transient startup look like a hard failure (the
+  // supervisor would land in FailedToStart with no auto-retry). Keeping the
+  // HTTP server alive lets the tray see cdpConnected=false (yellow) instead.
   const httpServer = new HttpServer({
     host: options.host,
     port: options.port,
-    cdpPort: cdpEndpoint.port,
+    cdpPort: options.cdpPort,
     token: options.token,
     cdp,
     history,
     onShutdown: shutdown,
+    runtimeStatus,
   });
 
   process.on("SIGINT", shutdown);
@@ -252,12 +290,16 @@ async function main(): Promise<void> {
   // (packages/tray-app/src-tauri/src/daemon_spawner.rs) can pick up the
   // resolved ports and token. The prefix is fixed by `READY_PREFIX`; the
   // payload is `ReadyInfo` in the Rust side (camelCase).
-  console.log(
+  //
+  // NOTE: write directly to stdout — NOT console.log — because
+  // installLogInterceptor() rewrites console.log to prepend "[Daemon] ",
+  // which would corrupt the READY line and break the Rust parser.
+  process.stdout.write(
     `BB_DAEMON_READY ${JSON.stringify({
       daemonPort: options.port,
-      cdpPort: cdpEndpoint.port,
+      cdpPort: options.cdpPort,
       token: options.token,
-    })}`,
+    })}\n`,
   );
 
   console.error(
@@ -265,22 +307,90 @@ async function main(): Promise<void> {
   );
   console.error(`[Daemon] Auth token: ${options.token}`);
 
-  // Phase 2: Connect to CDP asynchronously
-  console.error(
-    `[Daemon] Connecting to Chrome CDP at ${cdpEndpoint.host}:${cdpEndpoint.port}...`,
-  );
+  // ----- Phase 2: connect to CDP in the background, retrying until ready -----
+  //
+  // Runs detached from startup so a failure here never kills the daemon — the
+  // HTTP server stays up and /status keeps reporting cdpConnected=false until
+  // we succeed. The tray's /status poller renders that as yellow (重连中).
+  void bringUpCdp(cdp, options, runtimeStatus);
 
+  // Self-heal: if the established CDP socket drops (e.g. user closed Chrome),
+  // restart the bring-up loop so we re-discover/relaunch and return to green.
+  cdp.onUnexpectedClose = () => {
+    console.error("[Daemon] CDP connection dropped; restarting bring-up loop...");
+    void bringUpCdp(cdp, options, runtimeStatus);
+  };
+}
+
+/** Guards against overlapping bring-up loops (initial start + reconnect). */
+let bringUpInFlight = false;
+
+/**
+ * Background loop that resolves a CDP endpoint and connects, retrying with a
+ * capped backoff until it succeeds. Never throws — every failure is logged
+ * and retried, so the daemon self-heals from a browser that wasn't ready yet
+ * or a relaunch that raced.
+ *
+ * Browser kill+relaunch (`killExisting`) is gated on `BB_ALLOW_BROWSER_KILL`,
+ * which the tray sets only after the user confirms the "close & relaunch"
+ * prompt. Without it, we still discover/connect to an already-debuggable
+ * Chrome but never close a normally-running browser behind the user's back.
+ */
+async function bringUpCdp(
+  cdp: CdpConnection,
+  options: DaemonOptions,
+  runtimeStatus: DaemonRuntimeStatus,
+): Promise<void> {
+  // Only one bring-up loop at a time. The initial start and a reconnect after
+  // a drop can both call this; the guard prevents two competing retry loops.
+  if (bringUpInFlight) return;
+  bringUpInFlight = true;
   try {
-    await cdp.connect();
-    const tabCount = tabManager.tabCount;
-    console.error(
-      `[Daemon] CDP connected, monitoring ${tabCount} tab(s)`,
-    );
-  } catch (error) {
-    console.error(
-      `[Daemon] Failed to connect to CDP: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    console.error("[Daemon] HTTP server is running, but commands will fail until CDP connects.");
+    await bringUpCdpLoop(cdp, options, runtimeStatus);
+  } finally {
+    bringUpInFlight = false;
+  }
+}
+
+async function bringUpCdpLoop(
+  cdp: CdpConnection,
+  options: DaemonOptions,
+  runtimeStatus: DaemonRuntimeStatus,
+): Promise<void> {
+  const allowKill = process.env.BB_ALLOW_BROWSER_KILL === "1";
+  let attempt = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    // If something reconnected us already, stop.
+    if (cdp.connected) return;
+    attempt += 1;
+    try {
+      const endpoint = await discoverCdpPort(options.cdpHost, options.cdpPort, allowKill);
+      runtimeStatus.needsBrowserConsent = false;
+      cdp.repoint(endpoint.host, endpoint.port);
+      console.error(
+        `[Daemon] Connecting to Chrome CDP at ${endpoint.host}:${endpoint.port} (attempt ${attempt})...`,
+      );
+      await cdp.connect();
+      console.error(`[Daemon] CDP connected, monitoring ${cdp.tabManager.tabCount} tab(s)`);
+      return;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      // If a browser is running but not debuggable and we lack consent to
+      // close it, surface that to the tray so it can prompt the user. (When
+      // consent IS granted we'd have closed+relaunched, so this only trips in
+      // the no-consent path.)
+      if (!allowKill) {
+        runtimeStatus.needsBrowserConsent = await isConfiguredBrowserRunning();
+      }
+      // Capped exponential backoff: 1s, 2s, 4s … max 15s.
+      const delayMs = Math.min(15000, 1000 * 2 ** Math.min(attempt - 1, 4));
+      console.error(
+        `[Daemon] CDP bring-up attempt ${attempt} failed: ${msg}. Retrying in ${Math.round(delayMs / 1000)}s...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
   }
 }
 

@@ -82,6 +82,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             controller: Mutex::new(TrayController::new()),
             menu_handles: Mutex::new(None),
@@ -103,7 +104,8 @@ pub fn run() {
         .setup(|app| {
             setup_tray(app.handle())?;
             apply_popup_effects(app.handle());
-            refresh_tray(app.handle());
+            // Auto-start the daemon as soon as the tray opens.
+            dispatch_event(app.handle(), Event::UserStart);
             Ok(())
         })
         .on_window_event(|window, event| {
