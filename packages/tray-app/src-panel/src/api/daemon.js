@@ -94,6 +94,10 @@ export class DaemonClient {
       try {
         const res = await fetch(`${this._baseUrl()}/ping`);
         if (!res.ok) throw new Error('ping failed');
+        // Always refresh token from ping response — handles daemon restarts
+        // where the old token would cause 401 on authed endpoints.
+        const data = await res.json();
+        if (data.token) this._token = data.token;
         if (!this._connected) {
           this._connected = true;
           this._emit('connected');
@@ -144,10 +148,17 @@ export class DaemonClient {
 
   // ── Internal helpers ──────────────────────────────────────
 
-  async _get(path) {
+  async _get(path, retry = true) {
     const headers = {};
     if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
     const res = await fetch(`${this._baseUrl()}${path}`, { headers });
+    if (res.status === 401 && retry) {
+      // Token may have rotated (daemon restart). Re-resolve identity once.
+      const { port, token } = await resolveDaemonIdentity();
+      this._port = port;
+      if (token) this._token = token;
+      return this._get(path, false);
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   }

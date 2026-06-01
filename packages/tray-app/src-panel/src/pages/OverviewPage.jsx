@@ -16,6 +16,8 @@ const POLL_INTERVAL = 5000;
 export default function OverviewPage() {
   const { connected, overview, commands, setOverview, setCommands } = useStore();
   const [copying, setCopying] = useState(null);
+  const [lastRefreshed, setLastRefreshed] = useState(null);
+  const [refreshError, setRefreshError] = useState(null);
 
   const refresh = useCallback(async () => {
     if (!daemon.isConnected()) return;
@@ -26,16 +28,27 @@ export default function OverviewPage() {
       ]);
       setOverview(ov);
       setCommands(cmds.commands ?? []);
+      setLastRefreshed(new Date());
+      setRefreshError(null);
     } catch (err) {
       console.error('[OverviewPage] refresh error:', err);
+      setRefreshError(err.message ?? String(err));
     }
   }, [setOverview, setCommands]);
 
+  // Poll on interval
   useEffect(() => {
     refresh();
     const t = setInterval(refresh, POLL_INTERVAL);
     return () => clearInterval(t);
   }, [refresh, connected]);
+
+  // Refresh immediately when the window/tab becomes visible again
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refresh]);
 
   const copy = async (text, key) => {
     try {
@@ -54,7 +67,19 @@ export default function OverviewPage() {
     <div className={styles.root}>
       {/* ── Daemon status card ── */}
       <section className={styles.card}>
-        <h2 className={styles.cardTitle}>Daemon 状态</h2>
+        <div className={styles.cardHeader}>
+          <h2 className={styles.cardTitle}>Daemon 状态</h2>
+          {lastRefreshed && (
+            <span className={styles.cardCount} title="最近刷新时间">
+              {lastRefreshed.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            </span>
+          )}
+          {refreshError && (
+            <span className={styles.cardCount} style={{ color: '#e74c3c' }} title={refreshError}>
+              ⚠ 刷新失败
+            </span>
+          )}
+        </div>
         {!overview ? (
           <p className={styles.empty}>{connected ? '加载中…' : '未连接到 daemon'}</p>
         ) : (

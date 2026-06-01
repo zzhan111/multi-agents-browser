@@ -38,6 +38,13 @@ export default function LogsPage() {
     return () => clearInterval(t);
   }, [refresh, connected]);
 
+  // Refresh immediately when the window becomes visible again
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refresh]);
+
   // Auto-scroll to bottom
   useEffect(() => {
     if (autoScroll && listRef.current) {

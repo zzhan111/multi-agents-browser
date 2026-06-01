@@ -24,7 +24,7 @@
         "skipTaskbar": true,
         "visible": false,
         "focus": false,
-        "shadow": true,
+        "shadow": false,
         "minWidth": 360,
         "maxWidth": 360
       },
