@@ -12,7 +12,7 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { createWriteStream, mkdirSync } from "node:fs";
+import { createWriteStream, mkdirSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Request } from "@bb-browser/shared";
 import { COMMAND_TIMEOUT, DAEMON_PORT } from "@bb-browser/shared";
@@ -265,7 +265,8 @@ export class HttpServer {
   private handleLogs(url: string, res: ServerResponse): void {
     const limit = parseIntParam(url, "limit", 200);
     const level = parseStringParam(url, "level", "");
-    const logs = logStore.recent(limit, level);
+    const since = parseIntParam(url, "since", 0);
+    const logs = logStore.recent(limit, level, since);
     this.sendJson(res, 200, { logs });
   }
 
@@ -277,6 +278,7 @@ export class HttpServer {
     this.sendJson(res, 200, { code: 0, message: "Shutting down" });
 
     setTimeout(() => {
+      try { installLogInterceptor.flush?.(); } catch {}
       if (this.onShutdown) {
         this.onShutdown();
       }
@@ -344,11 +346,11 @@ class LogStore {
     this.buf.push(entry);
   }
 
-  recent(limit: number, level: string): LogEntry[] {
+  recent(limit: number, level: string, since = 0): LogEntry[] {
     const all = this.buf.toArray();
-    const filtered = level
-      ? all.filter((e) => e.level === level)
-      : all;
+    const filtered = all.filter(
+      (e) => (!level || e.level === level) && e.ts > since,
+    );
     return filtered.slice(-limit).reverse();
   }
 }
@@ -363,11 +365,41 @@ export const logStore = new LogStore();
  * is provided, each line is also appended there so startup failures are
  * diagnosable after the fact (the tray's "打开日志文件夹" opens this dir).
  */
+/** Map console method name → log level.
+ *  This daemon uses console.error as its standard output stream, so
+ *  console.error → "info" preserves historical behaviour. */
+const METHOD_TO_LEVEL: Record<string, LogEntry["level"]> = {
+  error: "info",
+  warn: "warn",
+  info: "info",
+  log: "info",
+  debug: "debug",
+};
+
+/** Rotate logFilePath if it exceeds maxSize bytes, keeping up to `keep` archives. */
+function rotateLog(filePath: string, maxSize: number, keep: number): void {
+  try {
+    const st = statSync(filePath);
+    if (st.size < maxSize) return;
+  } catch {
+    return;
+  }
+  for (let i = keep; i >= 1; i--) {
+    const oldPath = i === 1 ? filePath : `${filePath}.${i}`;
+    const newPath = `${filePath}.${i + 1}`;
+    try {
+      if (i === keep) { try { unlinkSync(newPath); } catch {} }
+      renameSync(oldPath, newPath);
+    } catch {}
+  }
+}
+
 export function installLogInterceptor(logFilePath?: string): void {
-  let fileSink: { write: (s: string) => void } | null = null;
+  let fileSink: import("node:fs").WriteStream | null = null;
   if (logFilePath) {
     try {
       mkdirSync(dirname(logFilePath), { recursive: true });
+      rotateLog(logFilePath, 10 * 1024 * 1024, 3);
       const stream = createWriteStream(logFilePath, { flags: "a" });
       fileSink = stream;
       stream.write(
@@ -378,29 +410,32 @@ export function installLogInterceptor(logFilePath?: string): void {
     }
   }
 
-  const origError = console.error.bind(console);
-  console.error = (...args: unknown[]) => {
-    const msg = args.map((a) => (typeof a === "string" ? a : String(a))).join(" ");
-    const trimmed = msg.trimEnd();
-    if (trimmed) {
-      const entry: LogEntry = { ts: Date.now(), level: detectLevel(trimmed), msg: trimmed };
-      logStore.push(entry);
-      if (fileSink) {
-        try {
-          fileSink.write(`${new Date(entry.ts).toISOString()} [${entry.level}] ${trimmed}\n`);
-        } catch {
-          // ignore file write errors
+  const orig: Record<string, (...args: unknown[]) => void> = {};
+  for (const method of ["log", "warn", "error", "debug", "info"] as const) {
+    orig[method] = (console[method] as (...a: unknown[]) => void).bind(console);
+    (console[method] as (...a: unknown[]) => void) = (...args: unknown[]) => {
+      const msg = args.map((a) => (typeof a === "string" ? a : String(a))).join(" ");
+      const trimmed = msg.trimEnd();
+      if (trimmed) {
+        const level = METHOD_TO_LEVEL[method] ?? "info";
+        const entry: LogEntry = { ts: Date.now(), level, msg: trimmed };
+        logStore.push(entry);
+        if (fileSink) {
+          try {
+            fileSink.write(`${new Date(entry.ts).toISOString()} [${level}] ${trimmed}\n`);
+          } catch {}
         }
       }
+      orig[method](...args);
+    };
+  }
+
+  installLogInterceptor.flush = () => {
+    if (fileSink) {
+      try { fileSink.end(); } catch {}
+      fileSink = null;
     }
-    origError(...args);
   };
 }
 
-function detectLevel(msg: string): LogEntry["level"] {
-  const lower = msg.toLowerCase();
-  if (lower.includes("error") || lower.includes("fatal")) return "error";
-  if (lower.includes("warn")) return "warn";
-  if (lower.includes("debug")) return "debug";
-  return "info";
-}
+installLogInterceptor.flush = (): void => {};  // placeholder before first call
