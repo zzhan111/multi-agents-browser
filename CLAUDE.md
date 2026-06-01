@@ -43,6 +43,8 @@ ExportDialog 新增"智能等待"开关（默认开启）：
 
 （暂无。在此追加新的 roadmap 条目。）
 
+> 方向/脑暴讨论留存见 [docs/vision-and-roadmap-discussion.md](docs/vision-and-roadmap-discussion.md)（data & capability plane 主张、多 agent 接入、adapter 发现 —— 含未决岔路口，可随时捡回继续）
+
 ---
 
 ## MVP 2 实施记录（2026-05-28）
