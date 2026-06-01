@@ -25,6 +25,7 @@ const sessionOpenedTabs = new Set<string>();
 // interfere with other concurrent agents sharing the same daemon.
 const BB_SESSION_ID = process.env.BB_SESSION_ID ?? generateId();
 const BB_SESSION_LABEL = process.env.BB_SESSION_LABEL;
+const BB_SESSION_SCOPE = process.env.BB_SESSION_SCOPE; // "read-only" | "no-eval" | unset
 
 let cachedDaemonInfo: DaemonInfo | null = null;
 
@@ -45,6 +46,7 @@ function daemonHeaders(info: DaemonInfo): Record<string, string> {
     Authorization: `Bearer ${info.token}`,
     "X-BB-Session": BB_SESSION_ID,
     ...(BB_SESSION_LABEL ? { "X-BB-Session-Label": BB_SESSION_LABEL } : {}),
+    ...(BB_SESSION_SCOPE ? { "X-BB-Session-Scope": BB_SESSION_SCOPE } : {}),
   };
 }
 

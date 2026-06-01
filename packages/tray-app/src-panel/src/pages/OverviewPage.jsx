@@ -170,6 +170,12 @@ function AgentCard({ status }) {
                 {tabInfo?.leaseMode === 'exclusive' && (
                   <span className={styles.agentLease}>独占</span>
                 )}
+                {s.scope === 'read-only' && (
+                  <span className={`${styles.agentLease} ${styles.agentScopeRo}`}>只读</span>
+                )}
+                {s.scope === 'no-eval' && (
+                  <span className={`${styles.agentLease} ${styles.agentScopeNoeval}`}>无eval</span>
+                )}
                 <span className={styles.agentSeen}>{formatAge(s.lastSeen)}</span>
               </div>
             );

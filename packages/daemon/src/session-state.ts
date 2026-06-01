@@ -7,25 +7,45 @@
  * unaffected.
  */
 
+export type SessionScope = "full" | "read-only" | "no-eval";
+
 export interface AgentSession {
   id: string;
   label?: string;
   /** The most recently selected/opened tab for this session. */
   currentTargetId?: string;
+  /**
+   * Permission scope for this session.
+   *   full      — all commands (default, existing behaviour)
+   *   read-only — observe-only: snapshot/get/screenshot/network/console/errors/tab_list/history/wait
+   *   no-eval   — everything except eval and trace-start (which both run Runtime.evaluate)
+   */
+  scope: SessionScope;
   lastSeen: number;
 }
+
+/** Numeric rank: lower = more restrictive. Used to prevent scope escalation. */
+const SCOPE_RANK: Record<SessionScope, number> = {
+  "read-only": 0,
+  "no-eval":   1,
+  "full":      2,
+};
 
 export class SessionManager {
   private readonly sessions = new Map<string, AgentSession>();
 
-  getOrCreate(id: string, label?: string): AgentSession {
+  getOrCreate(id: string, label?: string, scope?: SessionScope): AgentSession {
     let session = this.sessions.get(id);
     if (!session) {
-      session = { id, label, lastSeen: Date.now() };
+      session = { id, label, scope: scope ?? "full", lastSeen: Date.now() };
       this.sessions.set(id, session);
     } else {
       session.lastSeen = Date.now();
       if (label) session.label = label;
+      // Scope can be tightened on reconnect but never widened for an existing session.
+      if (scope && SCOPE_RANK[scope] < SCOPE_RANK[session.scope]) {
+        session.scope = scope;
+      }
     }
     return session;
   }

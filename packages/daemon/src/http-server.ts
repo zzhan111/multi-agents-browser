@@ -19,7 +19,7 @@ import { COMMAND_TIMEOUT, DAEMON_PORT } from "@bb-browser/shared";
 import { CdpConnection } from "./cdp-connection.js";
 import { dispatchRequest } from "./command-dispatch.js";
 import type { CommandHistory } from "./command-history.js";
-import { SessionManager } from "./session-state.js";
+import { SessionManager, type SessionScope } from "./session-state.js";
 import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
 import { DAEMON_DIR } from "@bb-browser/shared";
 
@@ -120,7 +120,7 @@ export class HttpServer {
     // CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-BB-Session, X-BB-Session-Label");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-BB-Session, X-BB-Session-Label, X-BB-Session-Scope");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -198,7 +198,11 @@ export class HttpServer {
       // Resolve the calling agent's session (isolates per-session "current tab").
       const sessionId = (req.headers["x-bb-session"] as string | undefined) ?? "default";
       const sessionLabel = req.headers["x-bb-session-label"] as string | undefined;
-      const session = this.sessions.getOrCreate(sessionId, sessionLabel);
+      const rawScope = req.headers["x-bb-session-scope"] as string | undefined;
+      const sessionScope = (
+        rawScope === "read-only" || rawScope === "no-eval" ? rawScope : undefined
+      ) as SessionScope | undefined;
+      const session = this.sessions.getOrCreate(sessionId, sessionLabel, sessionScope);
 
       // Dispatch with timeout
       const timeout = new Promise<never>((_, reject) =>
@@ -249,6 +253,7 @@ export class HttpServer {
       sessions: this.sessions.all().map((s) => ({
         id: s.id,
         label: s.label,
+        scope: s.scope !== "full" ? s.scope : undefined,
         currentTargetId: s.currentTargetId,
         lastSeen: s.lastSeen,
       })),

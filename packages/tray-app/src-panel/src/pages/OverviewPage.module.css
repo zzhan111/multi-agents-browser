@@ -137,6 +137,15 @@
   flex-shrink: 0;
 }
 
+.agentScopeRo {
+  background: rgba(231, 76, 60, 0.15);
+  color: #e74c3c;
+}
+.agentScopeNoeval {
+  background: rgba(52, 152, 219, 0.15);
+  color: #3498db;
+}
+
 /* ── Commands list ── */
 .cmdList {
   display: flex;

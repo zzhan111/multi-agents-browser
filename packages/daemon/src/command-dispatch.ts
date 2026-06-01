@@ -504,11 +504,43 @@ async function getAttributeValue(
  * Dispatch a command request. This is the core function that handles all
  * browser automation commands via CDP.
  */
+// ---------------------------------------------------------------------------
+// Scope enforcement
+// ---------------------------------------------------------------------------
+
+/** Commands allowed in read-only scope (observe-only, no browser side effects). */
+const READ_ONLY_ALLOWED = new Set([
+  "snapshot", "get", "screenshot",
+  "network", "console", "errors",
+  "tab_list",
+  "history",
+  "wait",
+]);
+
+/** Returns true if the request involves running JavaScript via Runtime.evaluate. */
+function isEvalLike(request: Request): boolean {
+  return (
+    request.action === "eval" ||
+    (request.action === "trace" && request.traceCommand === "start")
+  );
+}
+
 export async function dispatchRequest(
   cdp: CdpConnection,
   request: Request,
   session?: AgentSession,
 ): Promise<Response> {
+  // Scope enforcement — fast-fail before any CDP work.
+  if (session?.scope === "read-only") {
+    if (!READ_ONLY_ALLOWED.has(request.action)) {
+      return fail(request.id, `Action '${request.action}' is not allowed in read-only scope`);
+    }
+  } else if (session?.scope === "no-eval") {
+    if (isEvalLike(request)) {
+      return fail(request.id, `Action '${request.action}' requires eval permission (session scope: no-eval)`);
+    }
+  }
+
   // Resolve target from request.tabId (supports short IDs)
   const tabRef = request.tabId;
 
