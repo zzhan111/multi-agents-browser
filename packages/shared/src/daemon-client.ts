@@ -115,6 +115,14 @@ async function getWindowsHostIp(): Promise<string | null> {
 }
 
 async function resolveDaemonHost(host: string): Promise<string> {
+  // Explicit override wins — the deterministic escape hatch for when the
+  // daemon isn't on loopback (e.g. a WSL agent pointing at the Windows daemon,
+  // or auto-detection picking the wrong gateway). Port + token still come from
+  // daemon.json, so token rotation on daemon restart is handled transparently.
+  const override = process.env.BB_DAEMON_HOST;
+  if (override) return override;
+  // Default: on WSL, rewrite advertised loopback → the Windows host IP, since
+  // WSL2's loopback is a separate network namespace from Windows.
   if (!isWsl()) return host;
   if (host !== "127.0.0.1" && host !== "localhost") return host;
   return (await getWindowsHostIp()) ?? host;
