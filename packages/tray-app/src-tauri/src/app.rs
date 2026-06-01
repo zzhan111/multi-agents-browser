@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use bb_browser_tray::controller::TrayController;
 use bb_browser_tray::supervisor::{Event, SupervisorAction};
-use bb_browser_tray::tray_state::{CdpState, TrayColor};
+use bb_browser_tray::tray_state::TrayColor;
 
 use crate::daemon_runner::DaemonRunner;
 use crate::notifier;
@@ -37,19 +37,9 @@ const ID_OPEN_LOGS: &str = "open_logs";
 const ID_DIAGNOSTICS: &str = "diagnostics";
 const ID_AUTOSTART: &str = "set_autostart";
 const ID_PORTS: &str = "set_ports";
-const ID_BROWSER_PATH: &str = "set_browser_path";
 const ID_NOTIFICATIONS: &str = "set_notifications";
 const ID_ABOUT: &str = "about";
 const ID_QUIT: &str = "quit";
-
-// Debug submenu — temporary, removed after Phase 2.8.
-const ID_DBG_START: &str = "dbg_start";
-const ID_DBG_READY: &str = "dbg_ready";
-const ID_DBG_CDP_OK: &str = "dbg_cdp_ok";
-const ID_DBG_CDP_RETRY: &str = "dbg_cdp_retry";
-const ID_DBG_CDP_DEAD: &str = "dbg_cdp_dead";
-const ID_DBG_CRASH: &str = "dbg_crash";
-const ID_DBG_STOP: &str = "dbg_stop";
 
 // ---------------------------------------------------------------------------
 // App state
@@ -206,8 +196,6 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)>
         None::<&str>,
     )?;
     let ports = MenuItem::with_id(app, ID_PORTS, "端口配置...", true, None::<&str>)?;
-    let browser_path =
-        MenuItem::with_id(app, ID_BROWSER_PATH, "浏览器路径...", true, None::<&str>)?;
     let notifications = CheckMenuItem::with_id(
         app,
         ID_NOTIFICATIONS,
@@ -220,50 +208,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)>
         app,
         "设置",
         true,
-        &[&autostart, &ports, &browser_path, &notifications],
-    )?;
-
-    // --- Group 4b: debug submenu (TEMPORARY — Phase 2.3 manual driver) ---
-    let dbg_start = MenuItem::with_id(app, ID_DBG_START, "→ UserStart", true, None::<&str>)?;
-    let dbg_ready =
-        MenuItem::with_id(app, ID_DBG_READY, "→ DaemonReady (port=19826)", true, None::<&str>)?;
-    let dbg_cdp_ok =
-        MenuItem::with_id(app, ID_DBG_CDP_OK, "→ CDP Connected", true, None::<&str>)?;
-    let dbg_cdp_retry = MenuItem::with_id(
-        app,
-        ID_DBG_CDP_RETRY,
-        "→ CDP Reconnecting",
-        true,
-        None::<&str>,
-    )?;
-    let dbg_cdp_dead = MenuItem::with_id(
-        app,
-        ID_DBG_CDP_DEAD,
-        "→ CDP Disconnected",
-        true,
-        None::<&str>,
-    )?;
-    let dbg_crash = MenuItem::with_id(
-        app,
-        ID_DBG_CRASH,
-        "→ DaemonExited (crash)",
-        true,
-        None::<&str>,
-    )?;
-    let dbg_stop = MenuItem::with_id(app, ID_DBG_STOP, "→ UserStop", true, None::<&str>)?;
-    let debug_submenu = Submenu::with_items(
-        app,
-        "调试 / 状态模拟 (Phase 2.3 临时)",
-        true,
-        &[
-            &dbg_start,
-            &dbg_ready,
-            &dbg_cdp_ok,
-            &dbg_cdp_retry,
-            &dbg_cdp_dead,
-            &dbg_crash,
-            &dbg_stop,
-        ],
+        &[&autostart, &ports, &notifications],
     )?;
     let sep4 = PredefinedMenuItem::separator(app)?;
 
@@ -283,7 +228,6 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)>
             &diagnostics,
             &sep3,
             &settings_submenu,
-            &debug_submenu,
             &sep4,
             &about,
             &quit,
@@ -366,8 +310,11 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 // wasn't stored, but the OS toggles it automatically on click.
             }
         }
-        ID_PORTS => eprintln!("[tray] open port config (TODO MVP2)"),
-        ID_BROWSER_PATH => eprintln!("[tray] open browser path picker (TODO MVP2)"),
+        ID_PORTS => {
+            if let Err(e) = crate::commands::open_control_panel(app.clone()) {
+                eprintln!("[tray] open_control_panel failed: {e}");
+            }
+        }
         ID_NOTIFICATIONS => {
             // Flip the in-memory preference; CheckMenuItem state stays in
             // sync via the menu auto-toggle.
@@ -384,69 +331,23 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
         // --- About / quit ---
         ID_ABOUT => {
-            // TODO MVP2: open about dialog
-            eprintln!("[tray] about");
+            use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+            app.dialog()
+                .message(concat!(
+                    "版本: 0.0.1\n\n",
+                    "bb-browser 让 AI 通过 Chrome DevTools Protocol\n",
+                    "直接控制你真实的 Chrome 浏览器。\n\n",
+                    "GitHub: github.com/anthropics/bb-browser"
+                ))
+                .title("关于 bb-browser")
+                .kind(MessageDialogKind::Info)
+                .show(|_| {});
         }
         ID_QUIT => {
             // Kill the daemon cleanly before exiting.
             let state = app.state::<AppState>();
             state.runner.kill();
             app.exit(0);
-            return;
-        }
-
-        // --- Debug state simulation (TEMPORARY — removed in Phase 2.8) ---
-        ID_DBG_START => {
-            dispatch_event(app, Event::UserStart);
-            return;
-        }
-        ID_DBG_READY => {
-            // First flip state to Running, then seed identity for the
-            // popup demo.
-            {
-                let state = app.state::<AppState>();
-                let mut c = state.controller.lock().unwrap();
-                c.handle_event(Event::DaemonReady);
-                c.set_daemon_identity(19826, 19827, "0d50a5e3demo".into());
-            }
-            refresh_tray(app);
-            return;
-        }
-        ID_DBG_CDP_OK => {
-            let state = app.state::<AppState>();
-            let mut c = state.controller.lock().unwrap();
-            c.set_cdp_state(CdpState::Connected);
-        }
-        ID_DBG_CDP_RETRY => {
-            let state = app.state::<AppState>();
-            let mut c = state.controller.lock().unwrap();
-            c.set_cdp_state(CdpState::Reconnecting);
-        }
-        ID_DBG_CDP_DEAD => {
-            let state = app.state::<AppState>();
-            let mut c = state.controller.lock().unwrap();
-            c.set_cdp_state(CdpState::Disconnected);
-        }
-        ID_DBG_CRASH => {
-            dispatch_event(
-                app,
-                Event::DaemonExited {
-                    now_ms: now_ms(),
-                    during_startup: false,
-                },
-            );
-            return;
-        }
-        ID_DBG_STOP => {
-            {
-                let state = app.state::<AppState>();
-                let mut c = state.controller.lock().unwrap();
-                c.handle_event(Event::UserStop);
-                c.set_daemon_port(None);
-                c.set_cdp_port(None);
-                c.set_token(None);
-            }
-            refresh_tray(app);
             return;
         }
 
@@ -684,13 +585,6 @@ pub fn dispatch_toggle(app: &AppHandle) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn now_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
 
 fn load_tray_icon(app: &AppHandle, color: &str) -> Image<'static> {
     let path = app
