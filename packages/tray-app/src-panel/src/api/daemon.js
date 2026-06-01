@@ -79,6 +79,9 @@ export class DaemonClient {
     }
     this._connected = false;
     this._emit('disconnected');
+    // Start health check even on failure so we recover automatically when
+    // the daemon eventually starts (panel may open before daemon is ready).
+    this._startHealthCheck();
     throw new Error(`Cannot connect to daemon at ${this._baseUrl()}`);
   }
 
@@ -92,6 +95,13 @@ export class DaemonClient {
     if (this._healthTimer) return;
     this._healthTimer = setInterval(async () => {
       try {
+        // When disconnected, re-resolve port+token — daemon may have restarted
+        // on a fallback port, so pinging the old port would never succeed.
+        if (!this._connected) {
+          const { port, token } = await resolveDaemonIdentity();
+          this._port = port;
+          if (token) this._token = token;
+        }
         const res = await fetch(`${this._baseUrl()}/ping`);
         if (!res.ok) throw new Error('ping failed');
         // Always refresh token from ping response — handles daemon restarts

@@ -54,6 +54,12 @@ export default function Dashboard() {
     }
   };
 
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') closeWindow(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   return (
     <div className={styles.root}>
       {/* ── Title bar (draggable) ── */}
