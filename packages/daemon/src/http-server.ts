@@ -126,9 +126,15 @@ export class HttpServer {
 
     const url = req.url ?? "/";
 
-    // /ping 不需要认证（前端连接检测用）
+    // /ping 不需要认证（前端连接检测用）。
+    // 只对 loopback 调用方回显 token：daemon 现在绑定 0.0.0.0 以便 WSL 访问，
+    // 若对 LAN 回显 token 等于把浏览器控制权拱手让人。本机（控制面板 vite-dev
+    // 回退路径）仍能拿到 token；WSL / 远程 client 从 daemon.json 取 token。
     if (req.method === "GET" && url === "/ping") {
-      this.sendJson(res, 200, { pong: true, token: this.token });
+      this.sendJson(res, 200, {
+        pong: true,
+        token: isLoopback(req) ? this.token : null,
+      });
       return;
     }
 
@@ -375,6 +381,21 @@ const METHOD_TO_LEVEL: Record<string, LogEntry["level"]> = {
   log: "info",
   debug: "debug",
 };
+
+/**
+ * True if the request originates from the local loopback interface. Used to
+ * decide whether /ping may echo the auth token: the daemon binds 0.0.0.0 (so
+ * WSL2 agents can reach it via the Windows host IP), and we must not hand the
+ * token to non-local callers on the LAN.
+ */
+export function isLoopback(req: IncomingMessage): boolean {
+  const addr = req.socket?.remoteAddress ?? "";
+  return (
+    addr === "127.0.0.1" ||
+    addr === "::1" ||
+    addr === "::ffff:127.0.0.1"
+  );
+}
 
 /** Rotate logFilePath if it exceeds maxSize bytes, keeping up to `keep` archives. */
 function rotateLog(filePath: string, maxSize: number, keep: number): void {

@@ -43,6 +43,9 @@ export {
   readDaemonJson,
   isProcessAlive,
   httpJson,
+  isWsl,
+  parseDefaultGatewayHex,
+  parseNameserver,
 } from "./daemon-client.js";
 
 export {

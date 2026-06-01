@@ -129,6 +129,16 @@ interface DaemonInfo {
   token: string;
 }
 
+/**
+ * daemon.json advertises a *connectable* host. When the server binds a
+ * wildcard address (0.0.0.0 / ::) we can't tell clients to dial there, so we
+ * advertise loopback instead: same-host clients reach it directly, and the WSL
+ * client rewrites loopback → Windows host IP on its own (see daemon-client.ts).
+ */
+function advertisedHost(bindHost: string): string {
+  return bindHost === "0.0.0.0" || bindHost === "::" ? "127.0.0.1" : bindHost;
+}
+
 function writeDaemonJson(info: DaemonInfo): void {
   try {
     mkdirSync(DAEMON_DIR, { recursive: true });
@@ -281,7 +291,7 @@ async function main(): Promise<void> {
   await httpServer.start();
   writeDaemonJson({
     pid: process.pid,
-    host: options.host,
+    host: advertisedHost(options.host),
     port: options.port,
     token: options.token,
   });

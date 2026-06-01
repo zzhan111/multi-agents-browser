@@ -201,6 +201,13 @@ fn build_spawn_config(app: &AppHandle) -> Result<SpawnConfig, String> {
         program: PathBuf::from("node"),
         args: vec![
             entry_str,
+            // Bind the wildcard address so agents inside WSL2 can reach the
+            // daemon via the Windows host IP (WSL2's loopback is a separate
+            // network namespace and can't dial Windows' 127.0.0.1). The daemon
+            // still advertises loopback in daemon.json, and Bearer-token auth
+            // gates the now-LAN-reachable port.
+            "--host".into(),
+            "0.0.0.0".into(),
             "--port".into(),
             daemon.to_string(),
             "--cdp-port".into(),
