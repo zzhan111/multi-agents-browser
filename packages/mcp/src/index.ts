@@ -21,6 +21,11 @@ const CHROME_NOT_CONNECTED_HINT = [
 
 const sessionOpenedTabs = new Set<string>();
 
+// Stable per-process session ID so this MCP instance's tab cursor doesn't
+// interfere with other concurrent agents sharing the same daemon.
+const BB_SESSION_ID = process.env.BB_SESSION_ID ?? generateId();
+const BB_SESSION_LABEL = process.env.BB_SESSION_LABEL;
+
 let cachedDaemonInfo: DaemonInfo | null = null;
 
 async function getDaemonInfo(): Promise<DaemonInfo | null> {
@@ -38,6 +43,8 @@ function daemonHeaders(info: DaemonInfo): Record<string, string> {
   return {
     "Content-Type": "application/json",
     Authorization: `Bearer ${info.token}`,
+    "X-BB-Session": BB_SESSION_ID,
+    ...(BB_SESSION_LABEL ? { "X-BB-Session-Label": BB_SESSION_LABEL } : {}),
   };
 }
 
@@ -587,6 +594,16 @@ server.tool(
   {},
   async () => {
     try {
+      const info = await getDaemonInfo();
+      if (info) {
+        const res = await fetch(`${daemonBaseUrl(info)}/api/sites`, {
+          headers: daemonHeaders(info),
+        });
+        if (res.ok) {
+          const data = await res.json() as { adapters: unknown[] };
+          return textResult(data.adapters);
+        }
+      }
       const result = await runSiteCli(["list", "--json"]);
       return textResult(result);
     } catch (error) {
@@ -597,12 +614,25 @@ server.tool(
 
 server.tool(
   "site_search",
-  "Search installed site adapters by name, description, or domain",
+  "Search installed site adapters by name, description, or domain. Pass domain to filter by the current page's domain.",
   {
-    query: z.string().describe("Search query"),
+    query: z.string().describe("Search query — matches adapter name, description, or domain"),
+    domain: z.string().optional().describe("Filter to adapters for this domain (e.g. 'github.com')"),
   },
-  async ({ query }) => {
+  async ({ query, domain }) => {
     try {
+      const info = await getDaemonInfo();
+      if (info) {
+        const params = new URLSearchParams({ q: query });
+        if (domain) params.set("domain", domain);
+        const res = await fetch(`${daemonBaseUrl(info)}/api/sites?${params}`, {
+          headers: daemonHeaders(info),
+        });
+        if (res.ok) {
+          const data = await res.json() as { adapters: unknown[] };
+          return textResult(data.adapters);
+        }
+      }
       const result = await runSiteCli(["search", query, "--json"]);
       return textResult(result);
     } catch (error) {

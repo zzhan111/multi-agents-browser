@@ -19,6 +19,9 @@ import { COMMAND_TIMEOUT, DAEMON_PORT } from "@bb-browser/shared";
 import { CdpConnection } from "./cdp-connection.js";
 import { dispatchRequest } from "./command-dispatch.js";
 import type { CommandHistory } from "./command-history.js";
+import { SessionManager } from "./session-state.js";
+import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
+import { DAEMON_DIR } from "@bb-browser/shared";
 
 /**
  * Mutable startup status shared between the background CDP bring-up loop and
@@ -51,6 +54,7 @@ export class HttpServer {
   private readonly history: CommandHistory | null;
   private readonly onShutdown?: () => void;
   private readonly runtimeStatus: DaemonRuntimeStatus;
+  private readonly sessions = new SessionManager();
   private startTime = 0;
 
   constructor(options: HttpServerOptions) {
@@ -116,7 +120,7 @@ export class HttpServer {
     // CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-BB-Session, X-BB-Session-Label");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -152,6 +156,8 @@ export class HttpServer {
       this.handleCommands(url, res);
     } else if (req.method === "GET" && url.startsWith("/api/logs")) {
       this.handleLogs(url, res);
+    } else if (req.method === "GET" && url.startsWith("/api/sites")) {
+      this.handleSites(url, res);
     } else {
       this.sendJson(res, 404, { error: "Not found" });
     }
@@ -189,6 +195,11 @@ export class HttpServer {
         }
       }
 
+      // Resolve the calling agent's session (isolates per-session "current tab").
+      const sessionId = (req.headers["x-bb-session"] as string | undefined) ?? "default";
+      const sessionLabel = req.headers["x-bb-session-label"] as string | undefined;
+      const session = this.sessions.getOrCreate(sessionId, sessionLabel);
+
       // Dispatch with timeout
       const timeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("Command timeout")), COMMAND_TIMEOUT),
@@ -196,7 +207,7 @@ export class HttpServer {
       const finish = this.history?.record(request.action ?? "unknown", request);
       try {
         const response = await Promise.race([
-          dispatchRequest(this.cdp, request),
+          dispatchRequest(this.cdp, request, session),
           timeout,
         ]);
         finish?.();
@@ -225,6 +236,8 @@ export class HttpServer {
       consoleMessages: tab.consoleMessages.size,
       jsErrors: tab.jsErrors.size,
       lastActionSeq: tab.lastActionSeq,
+      leaseOwner: tab.leaseOwner,
+      leaseMode: tab.leaseMode !== "shared" ? tab.leaseMode : undefined,
     }));
 
     this.sendJson(res, 200, {
@@ -233,7 +246,12 @@ export class HttpServer {
       needsBrowserConsent: this.runtimeStatus.needsBrowserConsent,
       uptime: this.uptime,
       currentSeq: this.cdp.tabManager.currentSeq(),
-      currentTargetId: this.cdp.currentTargetId,
+      sessions: this.sessions.all().map((s) => ({
+        id: s.id,
+        label: s.label,
+        currentTargetId: s.currentTargetId,
+        lastSeen: s.lastSeen,
+      })),
       tabs,
     });
   }
@@ -274,6 +292,19 @@ export class HttpServer {
     const since = parseIntParam(url, "since", 0);
     const logs = logStore.recent(limit, level, since);
     this.sendJson(res, 200, { logs });
+  }
+
+  // ---------------------------------------------------------------------------
+  // GET /api/sites?q=&domain=&invalidate=1
+  // ---------------------------------------------------------------------------
+
+  private handleSites(url: string, res: ServerResponse): void {
+    if (parseStringParam(url, "invalidate", "") === "1") invalidateCatalog();
+    const q = parseStringParam(url, "q", "");
+    const domain = parseStringParam(url, "domain", "");
+    const { adapters, cacheAge } = getCatalog(DAEMON_DIR);
+    const results = queryCatalog(adapters, { q: q || undefined, domain: domain || undefined });
+    this.sendJson(res, 200, { adapters: results, total: adapters.length, cacheAge });
   }
 
   // ---------------------------------------------------------------------------

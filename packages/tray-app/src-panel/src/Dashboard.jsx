@@ -14,13 +14,15 @@ import { daemon } from './api/daemon.js';
 import OverviewPage from './pages/OverviewPage.jsx';
 import TracePage from './pages/TracePage.jsx';
 import LogsPage from './pages/LogsPage.jsx';
+import CapabilitiesPage from './pages/CapabilitiesPage.jsx';
 
 import styles from './Dashboard.module.css';
 
 const TABS = [
-  { id: 'overview', label: '📊 Overview' },
-  { id: 'trace',    label: '🎬 Trace' },
-  { id: 'logs',     label: '📋 Logs' },
+  { id: 'overview',      label: '📊 Overview' },
+  { id: 'capabilities',  label: '🔌 Capabilities' },
+  { id: 'trace',         label: '🎬 Trace' },
+  { id: 'logs',          label: '📋 Logs' },
 ];
 
 export default function Dashboard() {
@@ -92,9 +94,10 @@ export default function Dashboard() {
 
       {/* ── Content ── */}
       <div className={styles.content}>
-        {activeTab === 'overview' && <OverviewPage />}
-        {activeTab === 'trace'    && <TracePage />}
-        {activeTab === 'logs'     && <LogsPage />}
+        {activeTab === 'overview'     && <OverviewPage />}
+        {activeTab === 'capabilities' && <CapabilitiesPage />}
+        {activeTab === 'trace'        && <TracePage />}
+        {activeTab === 'logs'         && <LogsPage />}
       </div>
     </div>
   );

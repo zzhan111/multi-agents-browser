@@ -29,6 +29,8 @@ export type ActionType =
   | "tab_new"
   | "tab_select"
   | "tab_close"
+  | "tab_claim"
+  | "tab_release"
   | "frame"
   | "frame_main"
   | "dialog"
@@ -115,6 +117,8 @@ export interface Request {
   status?: string;
   /** 返回条数限制（observation 命令使用） */
   limit?: number;
+  /** 租约模式（tab_claim 命令使用） */
+  leaseMode?: "shared" | "exclusive";
 }
 
 /** 元素引用信息 */

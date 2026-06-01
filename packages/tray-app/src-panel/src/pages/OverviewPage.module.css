@@ -76,6 +76,67 @@
 .copyBtn:hover  { background: var(--bg-active); color: var(--text-primary); }
 .copyBtn.copied { background: rgba(63,185,80,0.2); color: #3fb950; }
 
+/* ── Agent list ── */
+.agentList {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.agentRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.agentRow:hover { background: var(--bg-hover); }
+
+.agentDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+.agentDotActive { background: var(--status-green); }
+
+.agentLabel {
+  font-family: "Cascadia Code", monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+  min-width: 90px;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agentTab {
+  font-family: "Cascadia Code", monospace;
+  font-size: 11px;
+  color: var(--accent);
+  flex: 1;
+}
+
+.agentIdle { color: var(--text-muted); font-style: italic; }
+
+.agentLease {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 160, 0, 0.15);
+  color: #ffa000;
+  flex-shrink: 0;
+}
+
+.agentSeen {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
 /* ── Commands list ── */
 .cmdList {
   display: flex;

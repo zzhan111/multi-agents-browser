@@ -12,6 +12,7 @@ import WebSocket from "ws";
 import type { TraceEvent } from "@bb-browser/shared";
 import { TabStateManager } from "./tab-state.js";
 import { TRACE_INJECTION_SCRIPT, TRACE_PREFIX } from "./trace-inject.js";
+import type { AgentSession } from "./session-state.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -87,13 +88,12 @@ export class CdpConnection {
   private sessions = new Map<string, string>();
   /** sessionId -> targetId */
   private attachedTargets = new Map<string, string>();
+  /** Per-target serial queue: commands on the same tab run one at a time. */
+  private tabQueues = new Map<string, Promise<void>>();
 
   host: string;
   port: number;
   readonly tabManager: TabStateManager;
-
-  /** Current (most recently selected) target ID. */
-  currentTargetId: string | undefined;
 
   private connectionPromise: Promise<void> | null = null;
   private _connected = false;
@@ -290,9 +290,6 @@ export class CdpConnection {
             this.sessions.delete(targetId);
             this.attachedTargets.delete(sessionId);
             this.tabManager.removeTab(targetId);
-            if (this.currentTargetId === targetId) {
-              this.currentTargetId = undefined;
-            }
           }
         }
         return;
@@ -318,9 +315,6 @@ export class CdpConnection {
             this.attachedTargets.delete(sessionId);
           }
           this.tabManager.removeTab(targetId);
-          if (this.currentTargetId === targetId) {
-            this.currentTargetId = undefined;
-          }
         }
         return;
       }
@@ -352,7 +346,6 @@ export class CdpConnection {
       // Reset per-connection target/session state so a reconnect starts clean.
       this.sessions.clear();
       this.attachedTargets.clear();
-      this.currentTargetId = undefined;
 
       // Self-heal: unless we closed on purpose (shutdown), ask the owner to
       // restart the CDP bring-up loop. This re-discovers/relaunches Chrome,
@@ -619,9 +612,13 @@ export class CdpConnection {
    *   - short ID string
    *   - full target ID string
    *   - numeric index
-   *   - undefined (use currentTargetId or first page)
+   *   - undefined (use session.currentTargetId or first page)
+   *
+   * When `session` is provided, the resolved target is recorded back into
+   * session.currentTargetId so each caller maintains its own "current tab"
+   * without affecting other concurrent callers.
    */
-  async ensurePageTarget(tabRef?: string | number): Promise<CdpTargetInfo> {
+  async ensurePageTarget(tabRef?: string | number, session?: AgentSession): Promise<CdpTargetInfo> {
     const targets = (await this.getTargets()).filter((t) => t.type === "page");
     if (targets.length === 0) throw new Error("No page target found");
 
@@ -646,8 +643,8 @@ export class CdpConnection {
       }
     } else if (typeof tabRef === "number") {
       target = targets[tabRef];
-    } else if (this.currentTargetId) {
-      target = targets.find((t) => t.id === this.currentTargetId);
+    } else if (session?.currentTargetId) {
+      target = targets.find((t) => t.id === session.currentTargetId);
     }
 
     if (typeof tabRef === "string" && !target) {
@@ -655,7 +652,7 @@ export class CdpConnection {
     }
 
     target ??= targets[0];
-    this.currentTargetId = target.id;
+    if (session) session.currentTargetId = target.id;
     await this.attachAndEnable(target.id);
     return target;
   }
@@ -732,6 +729,26 @@ export class CdpConnection {
       method,
       frameId ? { ...params, frameId } : params,
     );
+  }
+
+  /**
+   * Run `fn` on the given tab serially. Concurrent calls for the same targetId
+   * are queued; calls for different tabs run in parallel.
+   *
+   * The queue always advances even if a previous item errored, so a single
+   * failing command never blocks the tab permanently.
+   */
+  runOnTab<T>(targetId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.tabQueues.get(targetId) ?? Promise.resolve();
+    const result = prev.then(() => fn(), () => fn());
+    const tail = result.then(() => {}, () => {});
+    this.tabQueues.set(targetId, tail);
+    tail.then(() => {
+      if (this.tabQueues.get(targetId) === tail) {
+        this.tabQueues.delete(targetId);
+      }
+    });
+    return result;
   }
 
   /** Inject trace event listeners into a page (start recording). */

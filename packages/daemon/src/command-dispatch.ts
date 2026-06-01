@@ -19,6 +19,7 @@ import type {
 } from "@bb-browser/shared";
 import { CdpConnection, type CdpTargetInfo } from "./cdp-connection.js";
 import type { TabState } from "./tab-state.js";
+import type { AgentSession } from "./session-state.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -506,6 +507,7 @@ async function getAttributeValue(
 export async function dispatchRequest(
   cdp: CdpConnection,
   request: Request,
+  session?: AgentSession,
 ): Promise<Response> {
   // Resolve target from request.tabId (supports short IDs)
   const tabRef = request.tabId;
@@ -521,9 +523,11 @@ export async function dispatchRequest(
         index,
         url: t.url,
         title: t.title,
-        active: t.id === cdp.currentTargetId || (!cdp.currentTargetId && index === 0),
+        active: t.id === session?.currentTargetId || (!session?.currentTargetId && index === 0),
         tabId: t.id,
         tab: tState?.shortId ?? t.id.slice(-4).toLowerCase(),
+        owner: tState?.leaseOwner,
+        lease: tState?.leaseMode === "exclusive" ? "exclusive" : undefined,
       };
     });
     return ok(request.id, {
@@ -550,9 +554,23 @@ export async function dispatchRequest(
 
   const target = await cdp.ensurePageTarget(
     tabRef !== undefined ? String(tabRef) : undefined,
+    session,
   );
+
+  return cdp.runOnTab(target.id, async () => {
   const tab = cdp.tabManager.getTab(target.id);
   if (!tab) throw new Error("Internal error: tab state not found");
+
+  // Exclusive lease enforcement: block non-owners from operating on claimed tabs.
+  // tab_release is exempt so the owner can always release.
+  if (
+    request.action !== "tab_release" &&
+    tab.leaseMode === "exclusive" &&
+    tab.leaseOwner &&
+    tab.leaseOwner !== session?.id
+  ) {
+    return fail(request.id, `Tab ${tab.shortId} is exclusively held by another session`);
+  }
 
   const shortId = tab.shortId;
 
@@ -569,7 +587,7 @@ export async function dispatchRequest(
           "Target.createTarget",
           { url: request.url, background: true },
         );
-        const newTarget = await cdp.ensurePageTarget(created.targetId);
+        const newTarget = await cdp.ensurePageTarget(created.targetId, session);
         const newTab = cdp.tabManager.getTab(newTarget.id);
         return ok(request.id, {
           url: request.url,
@@ -840,7 +858,7 @@ export async function dispatchRequest(
       }
 
       if (!selected) return fail(request.id, "Tab not found");
-      cdp.currentTargetId = selected.id;
+      if (session) session.currentTargetId = selected.id;
       await cdp.attachAndEnable(selected.id);
       const selTab = cdp.tabManager.getTab(selected.id);
       return ok(request.id, {
@@ -878,13 +896,31 @@ export async function dispatchRequest(
       const closedTab = cdp.tabManager.getTab(selected.id);
       const closedShort = closedTab?.shortId;
       await cdp.browserCommand("Target.closeTarget", { targetId: selected.id });
-      if (cdp.currentTargetId === selected.id) {
-        cdp.currentTargetId = undefined;
+      if (session?.currentTargetId === selected.id) {
+        session.currentTargetId = undefined;
       }
       return ok(request.id, {
         tabId: selected.id,
         tab: closedShort,
       });
+    }
+
+    // -----------------------------------------------------------------------
+    // Tab lease
+    // -----------------------------------------------------------------------
+    case "tab_claim": {
+      tab.leaseOwner = session?.id;
+      tab.leaseMode = (request.leaseMode ?? "exclusive") as "shared" | "exclusive";
+      return ok(request.id, { tab: shortId, lease: tab.leaseMode, owner: tab.leaseOwner });
+    }
+
+    case "tab_release": {
+      if (tab.leaseOwner && tab.leaseOwner !== session?.id) {
+        return fail(request.id, `Tab ${shortId} is not claimed by this session`);
+      }
+      tab.leaseOwner = undefined;
+      tab.leaseMode = "shared";
+      return ok(request.id, { tab: shortId, released: true });
     }
 
     // -----------------------------------------------------------------------
@@ -1123,4 +1159,5 @@ export async function dispatchRequest(
     default:
       return fail(request.id, `Unknown action: ${request.action}`);
   }
+  }); // end runOnTab
 }

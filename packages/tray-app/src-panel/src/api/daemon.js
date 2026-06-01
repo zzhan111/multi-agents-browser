@@ -141,6 +141,18 @@ export class DaemonClient {
 
   // ── New MVP 2 endpoints ───────────────────────────────────
 
+  async getStatus() {
+    return this._get('/status');
+  }
+
+  async getSites(q = '', domain = '') {
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (domain) params.set('domain', domain);
+    const qs = params.toString();
+    return this._get(`/api/sites${qs ? `?${qs}` : ''}`);
+  }
+
   async getOverview() {
     return this._get('/api/overview');
   }

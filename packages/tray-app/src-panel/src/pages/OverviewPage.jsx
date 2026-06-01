@@ -18,16 +18,19 @@ export default function OverviewPage() {
   const [copying, setCopying] = useState(null);
   const [lastRefreshed, setLastRefreshed] = useState(null);
   const [refreshError, setRefreshError] = useState(null);
+  const [status, setStatus] = useState(null);
 
   const refresh = useCallback(async () => {
     if (!daemon.isConnected()) return;
     try {
-      const [ov, cmds] = await Promise.all([
+      const [ov, cmds, st] = await Promise.all([
         daemon.getOverview(),
         daemon.getCommands(50),
+        daemon.getStatus(),
       ]);
       setOverview(ov);
       setCommands(cmds.commands ?? []);
+      setStatus(st);
       setLastRefreshed(new Date());
       setRefreshError(null);
     } catch (err) {
@@ -94,6 +97,9 @@ export default function OverviewPage() {
         )}
       </section>
 
+      {/* ── Active agents ── */}
+      <AgentCard status={status} />
+
       {/* ── Commands history ── */}
       <section className={styles.card}>
         <div className={styles.cardHeader}>
@@ -127,6 +133,52 @@ export default function OverviewPage() {
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
+
+function AgentCard({ status }) {
+  const sessions = status?.sessions ?? [];
+  const tabs = status?.tabs ?? [];
+
+  // Build targetId → shortId lookup
+  const tabShort = {};
+  for (const t of tabs) tabShort[t.targetId] = { shortId: t.shortId, leaseMode: t.leaseMode };
+
+  // Sort: most recently seen first
+  const sorted = [...sessions].sort((a, b) => b.lastSeen - a.lastSeen);
+
+  return (
+    <section className={styles.card}>
+      <div className={styles.cardHeader}>
+        <h2 className={styles.cardTitle}>活跃 Agent</h2>
+        <span className={styles.cardCount}>{sessions.length} 个</span>
+      </div>
+      {sessions.length === 0 ? (
+        <p className={styles.empty}>暂无活跃 session</p>
+      ) : (
+        <div className={styles.agentList}>
+          {sorted.map((s) => {
+            const tabInfo = s.currentTargetId ? tabShort[s.currentTargetId] : null;
+            const isActive = Date.now() - s.lastSeen < 30_000;
+            return (
+              <div key={s.id} className={styles.agentRow}>
+                <span className={`${styles.agentDot} ${isActive ? styles.agentDotActive : ''}`} />
+                <span className={styles.agentLabel} title={s.id}>
+                  {s.label ?? s.id.slice(0, 8)}
+                </span>
+                <span className={styles.agentTab}>
+                  {tabInfo ? `tab:${tabInfo.shortId}` : <span className={styles.agentIdle}>空闲</span>}
+                </span>
+                {tabInfo?.leaseMode === 'exclusive' && (
+                  <span className={styles.agentLease}>独占</span>
+                )}
+                <span className={styles.agentSeen}>{formatAge(s.lastSeen)}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
 
 function InfoRow({ label, value, copyKey, copying, onCopy }) {
   return (

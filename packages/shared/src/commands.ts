@@ -307,6 +307,25 @@ export const COMMANDS: CommandDef[] = [
       index: z.number().optional().describe("Tab index (0-based, used if tab is not specified)"),
     }),
   },
+  {
+    name: "tab_claim",
+    action: "tab_claim",
+    description: "Claim a tab for this session. Use exclusive mode to prevent other agents from using it.",
+    category: "tab",
+    args: z.object({
+      tab: z.string().optional().describe("Tab short ID (defaults to current tab)"),
+      leaseMode: z.enum(["shared", "exclusive"]).default("exclusive").describe("shared: others can still use the tab; exclusive: only this session may use it"),
+    }),
+  },
+  {
+    name: "tab_release",
+    action: "tab_release",
+    description: "Release a previously claimed tab, making it available to other sessions",
+    category: "tab",
+    args: z.object({
+      tab: z.string().optional().describe("Tab short ID (defaults to current tab)"),
+    }),
+  },
 
   // ---------------------------------------------------------------------------
   // Network / observation

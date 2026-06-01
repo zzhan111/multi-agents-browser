@@ -73,6 +73,11 @@ export class TabState {
   /** Trace recording flag. */
   traceRecording = false;
 
+  /** Session ID that holds the lease on this tab (undefined = unclaimed). */
+  leaseOwner?: string;
+  /** "exclusive" blocks other sessions; "shared" allows concurrent access. */
+  leaseMode: "shared" | "exclusive" = "shared";
+
   /** Trace events buffer. */
   traceEvents = new RingBuffer<SeqTraceEvent>(TRACE_CAPACITY);
 
