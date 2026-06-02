@@ -1,54 +1,50 @@
-//! Read/write `~/.bb-browser/daemon.json`.
+//! Read `~/.bb-browser/daemon.json`.
 //!
 //! The daemon writes this file on startup so MCP clients (and the CLI) can
-//! discover its port + token without a hardcoded value. The tray app reads
-//! and writes it too.
+//! discover its port + token without a hardcoded value. The schema is owned by
+//! the daemon (`packages/daemon/src/index.ts` `writeDaemonJson`) and read by
+//! the MCP/CLI clients (`packages/shared/src/daemon-client.ts`):
 //!
-//! Schema:
 //! ```json
 //! {
-//!   "schemaVersion": 1,
-//!   "daemonPort": 19824,
-//!   "cdpPort": 19825,
-//!   "token": "0d50a5e3...",
 //!   "pid": 12345,
-//!   "startedAt": "2026-05-21T10:00:00Z"
+//!   "host": "127.0.0.1",
+//!   "port": 19824,
+//!   "token": "0d50a5e3..."
 //! }
 //! ```
 //!
-//! See docs/system-tray-design.md §8.1.
+//! The tray only ever *reads* this file (to reap/adopt the advertised daemon);
+//! it never writes it. The struct below must therefore match exactly what the
+//! daemon writes — an older, camelCase `{schemaVersion,daemonPort,cdpPort}`
+//! shape never existed on disk and made every read fail to parse.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
-
-/// Daemon connection info persisted to `~/.bb-browser/daemon.json`.
+/// Daemon connection info as persisted to `~/.bb-browser/daemon.json` by the
+/// daemon. Field names match the on-disk JSON exactly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct DaemonConfig {
-    pub schema_version: u32,
-    pub daemon_port: u16,
-    pub cdp_port: u16,
-    pub token: String,
-    /// PID of the running daemon. Used to detect stale config from an
-    /// old crashed daemon.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// PID of the running daemon. Used to reap an orphan. The daemon always
+    /// writes it; `default` tolerates an older/partial file.
+    #[serde(default)]
     pub pid: Option<u32>,
-    /// RFC-3339 timestamp of when the daemon started. Optional.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
+    /// Connectable host the daemon advertises (loopback when it bound 0.0.0.0).
+    pub host: String,
+    /// Daemon HTTP port.
+    pub port: u16,
+    /// Bearer token for the daemon HTTP API.
+    pub token: String,
 }
 
 impl DaemonConfig {
-    pub fn new(daemon_port: u16, cdp_port: u16, token: impl Into<String>) -> Self {
+    pub fn new(port: u16, token: impl Into<String>) -> Self {
         Self {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            daemon_port,
-            cdp_port,
-            token: token.into(),
             pid: None,
-            started_at: None,
+            host: "127.0.0.1".into(),
+            port,
+            token: token.into(),
         }
     }
 }
@@ -58,7 +54,6 @@ impl DaemonConfig {
 pub enum ConfigError {
     Io(std::io::Error),
     Parse(serde_json::Error),
-    UnsupportedSchema { found: u32, expected: u32 },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -66,9 +61,6 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::Io(e) => write!(f, "io error: {e}"),
             ConfigError::Parse(e) => write!(f, "parse error: {e}"),
-            ConfigError::UnsupportedSchema { found, expected } => {
-                write!(f, "unsupported schemaVersion {found} (expected {expected})")
-            }
         }
     }
 }
@@ -106,27 +98,21 @@ pub fn read_config(path: &Path) -> Result<Option<DaemonConfig>, ConfigError> {
     }
     let bytes = std::fs::read(path)?;
     let config: DaemonConfig = serde_json::from_slice(&bytes)?;
-    if config.schema_version != CURRENT_SCHEMA_VERSION {
-        return Err(ConfigError::UnsupportedSchema {
-            found: config.schema_version,
-            expected: CURRENT_SCHEMA_VERSION,
-        });
-    }
     Ok(Some(config))
 }
 
 /// Atomically write `daemon.json`. Writes to a temp file in the same
 /// directory and renames into place so a crash during write leaves the
-/// previous file intact.
+/// previous file intact. (The tray does not write this file in production; this
+/// exists for completeness and tests.)
 pub fn write_config(path: &Path, config: &DaemonConfig) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_vec_pretty(config)?;
+    let json = serde_json::to_vec(config)?;
     let tmp = with_extension(path, "tmp");
     std::fs::write(&tmp, &json)?;
-    // On Windows, rename will fail if the destination already exists;
-    // std::fs::rename does the right thing here by replacing.
+    // On Windows, std::fs::rename replaces an existing destination.
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -229,19 +215,6 @@ mod tests {
         dir
     }
 
-    // ---- DaemonConfig::new ----
-
-    #[test]
-    fn new_uses_current_schema_version() {
-        let cfg = DaemonConfig::new(19824, 19825, "abc");
-        assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(cfg.daemon_port, 19824);
-        assert_eq!(cfg.cdp_port, 19825);
-        assert_eq!(cfg.token, "abc");
-        assert_eq!(cfg.pid, None);
-        assert_eq!(cfg.started_at, None);
-    }
-
     // ---- read_config ----
 
     #[test]
@@ -253,43 +226,29 @@ mod tests {
     }
 
     #[test]
-    fn read_parses_valid_config() {
-        let dir = temp_dir("valid");
+    fn read_parses_real_daemon_written_shape() {
+        // Exactly what packages/daemon/src/index.ts writeDaemonJson emits.
+        let dir = temp_dir("real-shape");
         let path = dir.join("daemon.json");
-        let json = r#"{
-            "schemaVersion": 1,
-            "daemonPort": 19824,
-            "cdpPort": 19825,
-            "token": "abc123"
-        }"#;
+        let json = r#"{"pid":12345,"host":"127.0.0.1","port":19824,"token":"abc123"}"#;
         std::fs::write(&path, json).unwrap();
 
         let cfg = read_config(&path).unwrap().expect("should parse");
-        assert_eq!(cfg.daemon_port, 19824);
-        assert_eq!(cfg.cdp_port, 19825);
+        assert_eq!(cfg.pid, Some(12345));
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.port, 19824);
         assert_eq!(cfg.token, "abc123");
     }
 
     #[test]
-    fn read_rejects_unsupported_schema_version() {
-        let dir = temp_dir("schema-bad");
+    fn read_tolerates_missing_pid() {
+        let dir = temp_dir("no-pid");
         let path = dir.join("daemon.json");
-        let json = r#"{
-            "schemaVersion": 99,
-            "daemonPort": 19824,
-            "cdpPort": 19825,
-            "token": "abc"
-        }"#;
+        let json = r#"{"host":"127.0.0.1","port":19824,"token":"abc"}"#;
         std::fs::write(&path, json).unwrap();
 
-        let err = read_config(&path).unwrap_err();
-        match err {
-            ConfigError::UnsupportedSchema { found, expected } => {
-                assert_eq!(found, 99);
-                assert_eq!(expected, CURRENT_SCHEMA_VERSION);
-            }
-            other => panic!("expected UnsupportedSchema, got {other:?}"),
-        }
+        let cfg = read_config(&path).unwrap().expect("should parse");
+        assert_eq!(cfg.pid, None);
     }
 
     #[test]
@@ -311,7 +270,7 @@ mod tests {
     fn write_creates_parent_directory() {
         let dir = temp_dir("nested");
         let path = dir.join("nested-dir").join("daemon.json");
-        let cfg = DaemonConfig::new(19824, 19825, "abc");
+        let cfg = DaemonConfig::new(19824, "abc");
 
         write_config(&path, &cfg).unwrap();
         assert!(path.exists(), "file should be created");
@@ -322,12 +281,10 @@ mod tests {
         let dir = temp_dir("rt");
         let path = dir.join("daemon.json");
         let cfg = DaemonConfig {
-            schema_version: 1,
-            daemon_port: 19828,
-            cdp_port: 19829,
-            token: "xyz".into(),
             pid: Some(12345),
-            started_at: Some("2026-05-21T10:00:00Z".into()),
+            host: "127.0.0.1".into(),
+            port: 19828,
+            token: "xyz".into(),
         };
 
         write_config(&path, &cfg).unwrap();
@@ -336,19 +293,16 @@ mod tests {
     }
 
     #[test]
-    fn write_uses_camel_case_keys() {
-        let dir = temp_dir("camel");
+    fn write_uses_daemon_field_names() {
+        let dir = temp_dir("fields");
         let path = dir.join("daemon.json");
-        let cfg = DaemonConfig::new(19824, 19825, "abc");
+        let cfg = DaemonConfig::new(19824, "abc");
         write_config(&path, &cfg).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"schemaVersion\""));
-        assert!(text.contains("\"daemonPort\""));
-        assert!(text.contains("\"cdpPort\""));
-        // pid + startedAt are None → must be omitted, not serialized as null.
-        assert!(!text.contains("pid"));
-        assert!(!text.contains("startedAt"));
+        assert!(text.contains("\"host\""));
+        assert!(text.contains("\"port\""));
+        assert!(text.contains("\"token\""));
     }
 
     #[test]
@@ -356,18 +310,15 @@ mod tests {
         let dir = temp_dir("atomic");
         let path = dir.join("daemon.json");
 
-        // Initial write.
-        let first = DaemonConfig::new(19824, 19825, "first");
+        let first = DaemonConfig::new(19824, "first");
         write_config(&path, &first).unwrap();
 
-        // Overwrite.
-        let second = DaemonConfig::new(19826, 19827, "second");
+        let second = DaemonConfig::new(19826, "second");
         write_config(&path, &second).unwrap();
 
         let read = read_config(&path).unwrap().unwrap();
         assert_eq!(read, second);
 
-        // No leftover .tmp file.
         let tmp = with_extension(&path, "tmp");
         assert!(!tmp.exists(), "tmp file should be cleaned up");
     }
@@ -385,7 +336,7 @@ mod tests {
     fn remove_deletes_existing_file() {
         let dir = temp_dir("rm-exists");
         let path = dir.join("daemon.json");
-        let cfg = DaemonConfig::new(19824, 19825, "abc");
+        let cfg = DaemonConfig::new(19824, "abc");
         write_config(&path, &cfg).unwrap();
         assert!(path.exists());
 
@@ -397,12 +348,10 @@ mod tests {
 
     fn cfg_with_pid(pid: Option<u32>) -> DaemonConfig {
         DaemonConfig {
-            schema_version: 1,
-            daemon_port: 19824,
-            cdp_port: 19825,
-            token: "t".into(),
             pid,
-            started_at: None,
+            host: "127.0.0.1".into(),
+            port: 19824,
+            token: "t".into(),
         }
     }
 

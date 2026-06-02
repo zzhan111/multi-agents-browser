@@ -88,7 +88,7 @@ impl DaemonRunner {
             if let Some(adopted) = probe_healthy_daemon() {
                 eprintln!(
                     "[runner] adopting healthy daemon on port {} (pid={:?}); not spawning a second one",
-                    adopted.daemon_port, adopted.pid
+                    adopted.port, adopted.pid
                 );
                 let (tx, rx) = std::sync::mpsc::channel::<()>();
                 *self.kill_tx.lock().unwrap() = Some(tx);
@@ -208,7 +208,7 @@ fn probe_healthy_daemon() -> Option<DaemonConfig> {
     let config = read_config(&path).ok()??;
     // poll_status returning Some means the daemon answered /status with a
     // recognizable body — i.e. it is alive and serving.
-    poll_status(config.daemon_port, &config.token)?;
+    poll_status(config.port, &config.token)?;
     Some(config)
 }
 
@@ -244,7 +244,7 @@ fn reap_orphan_daemon() {
     let killed = kill_process(pid);
     // `decide_reap` returned Some, so config is Some too.
     let cfg = config.as_ref().expect("decide_reap implies a config");
-    if poll_status(cfg.daemon_port, &cfg.token).is_some() {
+    if poll_status(cfg.port, &cfg.token).is_some() {
         // Still serving despite the kill — keep its advertisement rather than
         // stranding a live daemon. A fresh daemon (if we go on to spawn one)
         // will atomically overwrite daemon.json on startup anyway.
@@ -472,11 +472,14 @@ fn run_adopt_watcher(
     kill_rx: std::sync::mpsc::Receiver<()>,
 ) {
     // Seed identity from daemon.json and mark ready, as if we'd spawned it.
+    // daemon.json carries no CDP port, so report the well-known default (the
+    // tray always spawns the daemon with --cdp-port DEFAULT_CDP_PORT); this is
+    // cosmetic, only used for the tray's "CDP 端口" display.
     on_ready(
         &app,
         ReadyInfo {
-            daemon_port: info.daemon_port,
-            cdp_port: info.cdp_port,
+            daemon_port: info.port,
+            cdp_port: DEFAULT_CDP_PORT,
             token: info.token.clone(),
         },
     );
@@ -491,7 +494,7 @@ fn run_adopt_watcher(
             return;
         }
 
-        match poll_status(info.daemon_port, &info.token) {
+        match poll_status(info.port, &info.token) {
             Some(status) => {
                 misses = 0;
                 if last_connected != Some(status.cdp_connected) {
