@@ -93,8 +93,8 @@ export interface Request {
   consoleCommand?: "get" | "clear";
   /** errors 子命令：get, clear */
   errorsCommand?: "get" | "clear";
-  /** trace 子命令：start, stop, status */
-  traceCommand?: "start" | "stop" | "status";
+  /** trace 子命令：start, stop, status, events */
+  traceCommand?: "start" | "stop" | "status" | "events";
   /** history 子命令：search, domains */
   historyCommand?: "search" | "domains";
   /** 按键名（press 命令使用） */
@@ -119,6 +119,8 @@ export interface Request {
   limit?: number;
   /** 租约模式（tab_claim 命令使用） */
   leaseMode?: "shared" | "exclusive";
+  /** 是否在响应中附带 base64 data URL（screenshot 命令使用） */
+  includeBase64?: boolean;
 }
 
 /** 元素引用信息 */
@@ -255,6 +257,12 @@ export interface ResponseData {
   tabId?: number | string;
   /** 短标签页 ID（daemon 模式） */
   tab?: string;
+  /** 租约模式（tab_claim 命令返回） */
+  lease?: "shared" | "exclusive";
+  /** 租约持有者 session ID（tab_claim 命令返回） */
+  owner?: string;
+  /** 是否已释放租约（tab_release 命令返回） */
+  released?: boolean;
   /** 全局操作序号 */
   seq?: number;
   /** 观测查询游标（用于 since 增量查询） */
