@@ -36,10 +36,6 @@ use tauri::{AppHandle, Manager};
 pub struct DaemonRunner {
     /// `Some(sender)` while a watcher is running; `None` when idle.
     kill_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
-    /// When true, the next spawn passes `BB_ALLOW_BROWSER_KILL=1` so the
-    /// daemon may close a non-debuggable browser and relaunch it. Set after
-    /// the user accepts the consent dialog; persists across auto-restarts.
-    allow_browser_kill: std::sync::atomic::AtomicBool,
 }
 
 impl Default for DaemonRunner {
@@ -49,17 +45,9 @@ impl Default for DaemonRunner {
 }
 
 impl DaemonRunner {
-    /// Grant (or revoke) consent to close the user's running browser on the
-    /// next spawn. Sticky so it survives supervisor auto-restarts.
-    pub fn set_allow_browser_kill(&self, allow: bool) {
-        self.allow_browser_kill
-            .store(allow, std::sync::atomic::Ordering::SeqCst);
-    }
-
     pub fn new() -> Self {
         Self {
             kill_tx: Mutex::new(None),
-            allow_browser_kill: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -72,19 +60,15 @@ impl DaemonRunner {
         let was_tracking = self.kill_tx.lock().unwrap().is_some();
         self.kill();
 
-        let want_browser_relaunch = self
-            .allow_browser_kill
-            .load(std::sync::atomic::Ordering::SeqCst);
-
         // Policy: prefer adopting an already-healthy daemon over killing and
-        // replacing it. On a *fresh* start (we weren't tracking our own daemon)
-        // and when we don't specifically need to relaunch the browser, if
-        // daemon.json points at a daemon that still answers GET /status, monitor
-        // it instead of spawning a second daemon. A second daemon on the same
-        // Chrome runs its own SessionManager / lease table (defeating per-session
-        // isolation) and the two race to delete each other's daemon.json —
-        // exactly the failure that leaves WSL agents unable to find the daemon.
-        if !was_tracking && !want_browser_relaunch {
+        // replacing it. On a *fresh* start (we weren't tracking our own daemon),
+        // if daemon.json points at a daemon that still answers GET /status,
+        // monitor it instead of spawning a second daemon. A second daemon on the
+        // same Chrome runs its own SessionManager / lease table (defeating
+        // per-session isolation) and the two race to delete each other's
+        // daemon.json — exactly the failure that leaves WSL agents unable to
+        // find the daemon.
+        if !was_tracking {
             if let Some(adopted) = probe_healthy_daemon() {
                 eprintln!(
                     "[runner] adopting healthy daemon on port {} (pid={:?}); not spawning a second one",
@@ -105,7 +89,7 @@ impl DaemonRunner {
         // on the same Chrome. See daemon_config::decide_reap.
         reap_orphan_daemon();
 
-        let mut config = match build_spawn_config(&app) {
+        let config = match build_spawn_config(&app) {
             Ok(c) => c,
             Err(msg) => {
                 eprintln!("[runner] cannot build spawn config: {msg}");
@@ -122,18 +106,6 @@ impl DaemonRunner {
                 return;
             }
         };
-
-        // If the user has consented to closing their browser, pass the gate
-        // through to the daemon. Sticky across auto-restarts.
-        if self
-            .allow_browser_kill
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            config
-                .env
-                .push(("BB_ALLOW_BROWSER_KILL".into(), "1".into()));
-            eprintln!("[runner] BB_ALLOW_BROWSER_KILL=1 (user consented to browser relaunch)");
-        }
 
         let process = match DaemonProcess::spawn(&config) {
             Ok(p) => p,
@@ -432,12 +404,8 @@ fn run_watcher(
     // Phase 2: watch for process exit OR a kill signal, and poll the daemon's
     // real CDP status. READY only means the HTTP server is up — the tray must
     // turn green once Chrome is actually attached, which the daemon reports as
-    // `"cdpConnected":true` from GET /status. The daemon also reports
-    // `"needsBrowserConsent":true` when it's blocked on closing a
-    // non-debuggable browser; we prompt the user once and, on consent, set the
-    // sticky gate and restart the daemon so it relaunches with debugging.
+    // `"cdpConnected":true` from GET /status.
     let mut last_connected: Option<bool> = None;
-    let mut consent_prompted = false;
     let mut ticks: u32 = 0;
     loop {
         // Check for kill signal first (non-blocking).
@@ -466,11 +434,6 @@ fn run_watcher(
                     last_connected = Some(status.cdp_connected);
                     on_cdp_status(&app, status.cdp_connected);
                 }
-                // Prompt for browser-close consent at most once per watcher.
-                if status.needs_browser_consent && !consent_prompted && !status.cdp_connected {
-                    consent_prompted = true;
-                    maybe_prompt_browser_consent(&app);
-                }
             }
         }
         ticks = ticks.wrapping_add(1);
@@ -481,10 +444,10 @@ fn run_watcher(
 
 /// Watch an *adopted* daemon — one already running that we did NOT spawn (e.g.
 /// left by bb-daemon-run.bat or a previous tray). We have no process handle and
-/// no stdout, so we only poll `GET /status`: report CDP state to the tray,
-/// prompt for browser consent if it's blocked, and relinquish (let the
-/// supervisor restart → spawn our own) if it stops responding. We never kill it
-/// or touch its daemon.json — it may be serving other agents.
+/// no stdout, so we only poll `GET /status`: report CDP state to the tray, and
+/// relinquish (let the supervisor restart → spawn our own) if it stops
+/// responding. We never kill it or touch its daemon.json — it may be serving
+/// other agents.
 fn run_adopt_watcher(
     app: AppHandle,
     info: DaemonConfig,
@@ -507,7 +470,6 @@ fn run_adopt_watcher(
     );
 
     let mut last_connected: Option<bool> = None;
-    let mut consent_prompted = false;
     let mut misses: u32 = 0;
     loop {
         if kill_rx.try_recv().is_ok() {
@@ -522,10 +484,6 @@ fn run_adopt_watcher(
                 if last_connected != Some(status.cdp_connected) {
                     last_connected = Some(status.cdp_connected);
                     on_cdp_status(&app, status.cdp_connected);
-                }
-                if status.needs_browser_consent && !consent_prompted && !status.cdp_connected {
-                    consent_prompted = true;
-                    maybe_prompt_browser_consent(&app);
                 }
             }
             None => {
@@ -552,7 +510,6 @@ struct DaemonStatus {
     /// The CDP port the daemon is using, if it reports one (`cdpPort`). Older
     /// daemons omit it; callers fall back to `DEFAULT_CDP_PORT`.
     cdp_port: Option<u16>,
-    needs_browser_consent: bool,
 }
 
 /// Best-effort raw-HTTP `GET /status` against `host:daemon_port`. Returns `None`
@@ -580,7 +537,6 @@ fn poll_status(host: &str, daemon_port: u16, token: &str) -> Option<DaemonStatus
     Some(DaemonStatus {
         cdp_connected: has("cdpConnected", true),
         cdp_port: json_u16(&body, "cdpPort"),
-        needs_browser_consent: has("needsBrowserConsent", true),
     })
 }
 
@@ -595,44 +551,6 @@ fn json_u16(body: &str, key: &str) -> Option<u16> {
         .take_while(|c| c.is_ascii_digit())
         .collect();
     digits.parse().ok()
-}
-
-/// Show a native confirm dialog asking whether to close the user's running
-/// browser and relaunch it (real profile) with remote debugging. On "yes",
-/// set the sticky gate and restart the daemon so it actually performs the
-/// close-and-relaunch.
-fn maybe_prompt_browser_consent(app: &AppHandle) {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-
-    let app_clone = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        let app_for_cb = app_clone.clone();
-        app_clone
-            .dialog()
-            .message(
-                "bb-browser 需要浏览器开启远程调试才能连接。\n\n\
-                 检测到浏览器正在运行但未开启调试。是否关闭它并用相同的配置文件\
-                 （保留登录态）重新打开？\n\n\
-                 注意：当前打开的标签页会重新加载。",
-            )
-            .title("bb-browser · 重启浏览器")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "关闭并重启".into(),
-                "暂不".into(),
-            ))
-            .show(move |accepted| {
-                if accepted {
-                    eprintln!("[runner] user consented to browser relaunch");
-                    let state = app_for_cb.state::<crate::app::AppState>();
-                    state.runner.set_allow_browser_kill(true);
-                    // Restart the daemon so it spawns with the consent env var.
-                    crate::app::dispatch_event(&app_for_cb, Event::UserRestart);
-                } else {
-                    eprintln!("[runner] user declined browser relaunch");
-                }
-            });
-    });
 }
 
 /// Push a CDP connection-status change into the controller and repaint.

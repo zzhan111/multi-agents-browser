@@ -49,11 +49,10 @@ export {
 } from "./daemon-client.js";
 
 export {
-  type LaunchManagedBrowserOptions,
   DEFAULT_CDP_PORT,
   MANAGED_BROWSER_DIR,
   MANAGED_PORT_FILE,
   findBrowserExecutable,
   launchManagedBrowser,
-  isConfiguredBrowserRunning,
+  probeCdp,
 } from "./browser-launcher.js";

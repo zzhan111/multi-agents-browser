@@ -19,7 +19,7 @@ import {
   DAEMON_PORT,
   DAEMON_HOST,
   launchManagedBrowser,
-  isConfiguredBrowserRunning,
+  probeCdp,
 } from "@bb-browser/shared";
 import { HttpServer, installLogInterceptor, type DaemonRuntimeStatus } from "./http-server.js";
 import { CdpConnection } from "./cdp-connection.js";
@@ -183,76 +183,45 @@ function cleanupDaemonJson(): void {
 async function discoverCdpPort(
   host: string,
   port: number,
-  allowKill = false,
 ): Promise<{ host: string; port: number }> {
-  // Try connecting to the specified port first
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
-    try {
-      const response = await fetch(`http://${host}:${port}/json/version`, {
-        signal: controller.signal,
-      });
-      if (response.ok) {
-        return { host, port };
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {}
+  // Try the configured port first, on both IPv4 and IPv6 (360ChromeX may bind
+  // the debug port on ::1).
+  const direct = await probeCdp(port);
+  if (direct) {
+    return { host: direct, port };
+  }
 
-  // Try reading managed browser port file
+  // Try the port recorded for a previously-launched managed browser.
   const managedPortFile = path.join(DAEMON_DIR, "browser", "cdp-port");
   try {
-    const rawPort = readFileSync(managedPortFile, "utf8").trim();
-    const managedPort = parseInt(rawPort, 10);
+    const managedPort = parseInt(readFileSync(managedPortFile, "utf8").trim(), 10);
     if (Number.isInteger(managedPort) && managedPort > 0) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 2000);
-        try {
-          const response = await fetch(`http://127.0.0.1:${managedPort}/json/version`, {
-            signal: controller.signal,
-          });
-          if (response.ok) {
-            return { host: "127.0.0.1", port: managedPort };
-          }
-        } finally {
-          clearTimeout(timer);
-        }
-      } catch {}
+      const managedHost = await probeCdp(managedPort);
+      if (managedHost) {
+        return { host: managedHost, port: managedPort };
+      }
     }
   } catch {}
 
-  // Last resort: launch a managed Chrome on the requested (free) CDP port.
-  // The CLI does this before spawning the daemon, but the tray supervisor
-  // does not — so the daemon must be able to bootstrap its own browser.
-  //
-  // `killExisting` (gated on user confirmation via BB_ALLOW_BROWSER_KILL) —
-  // if the user's browser is already open WITHOUT remote debugging, its
-  // single-instance lock would swallow our launch and never expose a CDP
-  // port. With consent we close the running instance and relaunch the SAME
-  // real profile with debugging on (logins preserved).
+  // Last resort: launch a managed browser under a dedicated profile. The CLI
+  // pre-launches Chrome before spawning the daemon, but the tray supervisor
+  // does not — so the daemon must be able to bootstrap its own browser. The
+  // managed instance uses its own --user-data-dir, so it coexists with the
+  // user's normal browser and never closes it.
   console.error(
-    `[Daemon] No Chrome reachable at ${host}:${port}; launching a managed browser` +
-      `${allowKill ? " (will close any running instance first)" : ""}...`,
+    `[Daemon] No Chrome reachable at ${host}:${port}; launching a managed browser (dedicated profile)...`,
   );
-  const launched = await launchManagedBrowser(port, { killExisting: allowKill });
+  const launched = await launchManagedBrowser(port);
   if (launched) {
     return launched;
   }
 
-  // Throwing here is non-fatal: bringUpCdp() catches it and retries. This
-  // covers the case where the user's browser is open without debugging but we
-  // don't have consent to close it — we keep retrying so that the moment they
-  // close it themselves (or grant consent), we connect.
+  // Throwing here is non-fatal: bringUpCdp() catches it and retries, so the
+  // daemon self-heals once a browser becomes available.
   throw new Error(
-    `Cannot connect to Chrome CDP at ${host}:${port}, and no debuggable ` +
-      `browser is available.` +
-      (allowKill
-        ? " Install Chrome/Edge/Brave or start Chrome with --remote-debugging-port."
-        : " A browser appears to be running without remote debugging; waiting" +
-          " for it to become debuggable (close-and-relaunch not authorized)."),
+    `Cannot connect to Chrome CDP at ${host}:${port}, and could not launch a ` +
+      `managed browser. Install Chrome/Edge/Brave, or start your browser with ` +
+      `--remote-debugging-port=${port}.`,
   );
 }
 
@@ -361,12 +330,10 @@ let bringUpInFlight = false;
  * Background loop that resolves a CDP endpoint and connects, retrying with a
  * capped backoff until it succeeds. Never throws — every failure is logged
  * and retried, so the daemon self-heals from a browser that wasn't ready yet
- * or a relaunch that raced.
+ * or a managed-browser launch that was still starting up.
  *
- * Browser kill+relaunch (`killExisting`) is gated on `BB_ALLOW_BROWSER_KILL`,
- * which the tray sets only after the user confirms the "close & relaunch"
- * prompt. Without it, we still discover/connect to an already-debuggable
- * Chrome but never close a normally-running browser behind the user's back.
+ * If no debuggable browser is reachable, launchManagedBrowser starts one under
+ * a dedicated profile (never touching the user's own browser).
  */
 async function bringUpCdp(
   cdp: CdpConnection,
@@ -389,7 +356,6 @@ async function bringUpCdpLoop(
   options: DaemonOptions,
   runtimeStatus: DaemonRuntimeStatus,
 ): Promise<void> {
-  const allowKill = process.env.BB_ALLOW_BROWSER_KILL === "1";
   let attempt = 0;
   // Quiet repeated identical failures. A browser that stays non-debuggable (or
   // an endpoint that never becomes Chrome) would otherwise emit one log line
@@ -407,7 +373,7 @@ async function bringUpCdpLoop(
     if (cdp.connected) return;
     attempt += 1;
     try {
-      const endpoint = await discoverCdpPort(options.cdpHost, options.cdpPort, allowKill);
+      const endpoint = await discoverCdpPort(options.cdpHost, options.cdpPort);
       runtimeStatus.needsBrowserConsent = false;
       cdp.repoint(endpoint.host, endpoint.port);
       console.error(
@@ -418,13 +384,9 @@ async function bringUpCdpLoop(
       return;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      // If a browser is running but not debuggable and we lack consent to
-      // close it, surface that to the tray so it can prompt the user. (When
-      // consent IS granted we'd have closed+relaunched, so this only trips in
-      // the no-consent path.)
-      if (!allowKill) {
-        runtimeStatus.needsBrowserConsent = await isConfiguredBrowserRunning();
-      }
+      // The managed browser uses a dedicated profile, so we never need to close
+      // the user's browser — no consent is required. Keep the flag clear.
+      runtimeStatus.needsBrowserConsent = false;
       // Capped exponential backoff: 1s, 2s, 4s … max 15s.
       const delayMs = Math.min(15000, 1000 * 2 ** Math.min(attempt - 1, 4));
       const everySecs = Math.round(delayMs / 1000);
