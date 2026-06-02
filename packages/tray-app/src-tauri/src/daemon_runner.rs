@@ -19,7 +19,7 @@ use std::thread;
 use std::time::Duration;
 
 use bb_browser_tray::daemon_config::{
-    daemon_config_path, decide_reap, kill_process, read_config, remove_config,
+    daemon_config_path, decide_reap, kill_process, read_config, remove_config, DaemonConfig,
 };
 use bb_browser_tray::daemon_spawner::{
     DaemonProcess, ReadyInfo, SpawnConfig, SpawnOutcome, DEFAULT_READY_TIMEOUT,
@@ -66,13 +66,43 @@ impl DaemonRunner {
     /// Launch the daemon and start the lifecycle watcher. If a previous
     /// daemon is still running, kill it first.
     pub fn spawn(&self, app: AppHandle) {
+        // Were we tracking our own daemon before this call? If so, this is a
+        // restart (the supervisor decided to replace our daemon), not a fresh
+        // start — we must spawn, never adopt.
+        let was_tracking = self.kill_tx.lock().unwrap().is_some();
         self.kill();
 
-        // Reap any orphan daemon advertised in daemon.json before spawning. The
-        // tray's own kill() only covers the process it tracks; an orphan from a
-        // prior crash / manual launch / bb-daemon-run.bat keeps the port bound
-        // AND runs a second SessionManager on the same Chrome, which would
-        // silently break per-session tab isolation. See daemon_config::decide_reap.
+        let want_browser_relaunch = self
+            .allow_browser_kill
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        // Policy: prefer adopting an already-healthy daemon over killing and
+        // replacing it. On a *fresh* start (we weren't tracking our own daemon)
+        // and when we don't specifically need to relaunch the browser, if
+        // daemon.json points at a daemon that still answers GET /status, monitor
+        // it instead of spawning a second daemon. A second daemon on the same
+        // Chrome runs its own SessionManager / lease table (defeating per-session
+        // isolation) and the two race to delete each other's daemon.json —
+        // exactly the failure that leaves WSL agents unable to find the daemon.
+        if !was_tracking && !want_browser_relaunch {
+            if let Some(adopted) = probe_healthy_daemon() {
+                eprintln!(
+                    "[runner] adopting healthy daemon on port {} (pid={:?}); not spawning a second one",
+                    adopted.daemon_port, adopted.pid
+                );
+                let (tx, rx) = std::sync::mpsc::channel::<()>();
+                *self.kill_tx.lock().unwrap() = Some(tx);
+                let app_clone = app.clone();
+                thread::spawn(move || run_adopt_watcher(app_clone, adopted, rx));
+                return;
+            }
+        }
+
+        // No healthy daemon to adopt. Reap whatever (dead/unhealthy) orphan
+        // daemon.json still advertises — the tray's own kill() only covers the
+        // process it tracks; an orphan from a prior crash / manual launch /
+        // bb-daemon-run.bat keeps the port bound AND runs a second SessionManager
+        // on the same Chrome. See daemon_config::decide_reap.
         reap_orphan_daemon();
 
         let mut config = match build_spawn_config(&app) {
@@ -170,10 +200,23 @@ impl DaemonRunner {
 // Orphan daemon reaping
 // ---------------------------------------------------------------------------
 
-/// Read daemon.json, and if it advertises a foreign pid, kill it and delete the
-/// file so the fresh daemon starts from a clean slate (single global daemon).
-/// Best-effort: every failure path is logged and swallowed so reaping never
-/// blocks startup.
+/// If daemon.json advertises a daemon that still answers `GET /status`, return
+/// its config so the caller can adopt it. `None` when there's no (readable)
+/// config or the advertised daemon doesn't respond.
+fn probe_healthy_daemon() -> Option<DaemonConfig> {
+    let path = daemon_config_path()?;
+    let config = read_config(&path).ok()??;
+    // poll_status returning Some means the daemon answered /status with a
+    // recognizable body — i.e. it is alive and serving.
+    poll_status(config.daemon_port, &config.token)?;
+    Some(config)
+}
+
+/// Read daemon.json, and if it advertises a foreign pid, kill it. Only delete
+/// the file once we've confirmed the advertised daemon is no longer serving —
+/// if it somehow survives the kill and still answers /status, we leave its
+/// daemon.json intact so readers (e.g. WSL agents) keep finding it. Best-effort:
+/// every failure path is logged and swallowed so reaping never blocks startup.
 fn reap_orphan_daemon() {
     let path = match daemon_config_path() {
         Some(p) => p,
@@ -192,15 +235,27 @@ fn reap_orphan_daemon() {
     };
 
     let self_pid = std::process::id();
-    match decide_reap(config.as_ref(), self_pid) {
-        Some(pid) => {
-            let killed = kill_process(pid);
-            eprintln!("[runner] reap: killed orphan daemon pid={pid} (success={killed}); removing daemon.json");
-            let _ = remove_config(&path);
-        }
-        None => {
-            // Either no file, no pid, or it was our own pid — nothing to reap.
-        }
+    let pid = match decide_reap(config.as_ref(), self_pid) {
+        Some(pid) => pid,
+        // Either no file, no pid, or it was our own pid — nothing to reap.
+        None => return,
+    };
+
+    let killed = kill_process(pid);
+    // `decide_reap` returned Some, so config is Some too.
+    let cfg = config.as_ref().expect("decide_reap implies a config");
+    if poll_status(cfg.daemon_port, &cfg.token).is_some() {
+        // Still serving despite the kill — keep its advertisement rather than
+        // stranding a live daemon. A fresh daemon (if we go on to spawn one)
+        // will atomically overwrite daemon.json on startup anyway.
+        eprintln!(
+            "[runner] reap: pid {pid} still serving after kill (success={killed}); leaving daemon.json"
+        );
+    } else {
+        eprintln!(
+            "[runner] reap: orphan pid {pid} gone (kill success={killed}); removing daemon.json"
+        );
+        let _ = remove_config(&path);
     }
 }
 
@@ -402,6 +457,67 @@ fn run_watcher(
         ticks = ticks.wrapping_add(1);
 
         thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Watch an *adopted* daemon — one already running that we did NOT spawn (e.g.
+/// left by bb-daemon-run.bat or a previous tray). We have no process handle and
+/// no stdout, so we only poll `GET /status`: report CDP state to the tray,
+/// prompt for browser consent if it's blocked, and relinquish (let the
+/// supervisor restart → spawn our own) if it stops responding. We never kill it
+/// or touch its daemon.json — it may be serving other agents.
+fn run_adopt_watcher(
+    app: AppHandle,
+    info: DaemonConfig,
+    kill_rx: std::sync::mpsc::Receiver<()>,
+) {
+    // Seed identity from daemon.json and mark ready, as if we'd spawned it.
+    on_ready(
+        &app,
+        ReadyInfo {
+            daemon_port: info.daemon_port,
+            cdp_port: info.cdp_port,
+            token: info.token.clone(),
+        },
+    );
+
+    let mut last_connected: Option<bool> = None;
+    let mut consent_prompted = false;
+    let mut misses: u32 = 0;
+    loop {
+        if kill_rx.try_recv().is_ok() {
+            eprintln!("[runner] adopt watcher: stop requested (leaving adopted daemon running)");
+            on_crash(&app);
+            return;
+        }
+
+        match poll_status(info.daemon_port, &info.token) {
+            Some(status) => {
+                misses = 0;
+                if last_connected != Some(status.cdp_connected) {
+                    last_connected = Some(status.cdp_connected);
+                    on_cdp_status(&app, status.cdp_connected);
+                }
+                if status.needs_browser_consent && !consent_prompted && !status.cdp_connected {
+                    consent_prompted = true;
+                    maybe_prompt_browser_consent(&app);
+                }
+            }
+            None => {
+                // Tolerate a couple of transient misses; a sustained silence
+                // means the adopted daemon is gone, so hand back to the
+                // supervisor, which restarts → spawn() reaps the corpse and
+                // launches a fresh tray-owned daemon.
+                misses += 1;
+                if misses >= 3 {
+                    eprintln!("[runner] adopted daemon stopped responding; relinquishing to respawn");
+                    on_crash(&app);
+                    return;
+                }
+            }
+        }
+
+        thread::sleep(Duration::from_millis(1500));
     }
 }
 
