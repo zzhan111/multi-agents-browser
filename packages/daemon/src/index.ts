@@ -32,6 +32,8 @@ import { CommandHistory } from "./command-history.js";
 
 const DAEMON_DIR = process.env.BB_BROWSER_HOME || path.join(os.homedir(), ".bb-browser");
 const DAEMON_JSON = path.join(DAEMON_DIR, "daemon.json");
+/** Bare token file — simpler than daemon.json; WSL agent reads this first. */
+const TOKEN_FILE = path.join(DAEMON_DIR, "token");
 const DEFAULT_CDP_PORT = 19825;
 
 // ---------------------------------------------------------------------------
@@ -149,12 +151,25 @@ function writeDaemonJson(info: DaemonInfo): void {
     const tmp = path.join(DAEMON_DIR, `daemon.json.${process.pid}.tmp`);
     writeFileSync(tmp, JSON.stringify(info), { mode: 0o600 });
     renameSync(tmp, DAEMON_JSON);
-  } catch {
+  } catch (err) {
+    console.error("[Daemon] Failed to write daemon.json (atomic):", (err as Error)?.message ?? err);
     // Fall back to a direct write if rename isn't available (e.g. a transient
     // sharing violation on Windows). A brief non-atomic window beats no file.
     try {
       writeFileSync(DAEMON_JSON, JSON.stringify(info), { mode: 0o600 });
-    } catch {}
+    } catch (err2) {
+      console.error("[Daemon] Failed to write daemon.json (fallback):", (err2 as Error)?.message ?? err2);
+    }
+  }
+}
+
+/** Write the bearer token to a bare file so WSL agents can discover it. */
+function writeTokenFile(token: string): void {
+  try {
+    mkdirSync(DAEMON_DIR, { recursive: true });
+    writeFileSync(TOKEN_FILE, token, { mode: 0o600 });
+  } catch (err) {
+    console.error("[Daemon] Failed to write token file:", (err as Error)?.message ?? err);
   }
 }
 
@@ -253,7 +268,10 @@ async function main(): Promise<void> {
     console.error("[Daemon] Shutting down...");
     cdp.disconnect();
     await httpServer.stop();
-    cleanupDaemonJson();
+    // daemon.json intentionally NOT deleted — a tray-driven restart may already
+    // have a replacement daemon running, and WSL agents need the file to
+    // discover the daemon. The replacement daemon overwrites daemon.json on its
+    // own startup, so stale entries are harmless.
     process.exit(0);
   };
 
@@ -286,6 +304,7 @@ async function main(): Promise<void> {
     port: options.port,
     token: options.token,
   });
+  writeTokenFile(options.token);
 
   // Emit a machine-readable READY line on stdout so the tray supervisor
   // (packages/tray-app/src-tauri/src/daemon_spawner.rs) can pick up the
@@ -410,6 +429,5 @@ async function bringUpCdpLoop(
 
 main().catch((error) => {
   console.error("[Daemon] Fatal error:", error);
-  cleanupDaemonJson();
   process.exit(1);
 });

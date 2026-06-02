@@ -190,10 +190,12 @@ describe("daemon lifecycle (no Chrome needed)", () => {
     assert.equal(typeof status.uptime, "number");
   });
 
-  it("daemon.json is deleted on graceful HTTP shutdown", async () => {
-    // On Windows, SIGTERM delivered via ChildProcess.kill() does NOT run Node.js
-    // signal handlers — Windows TerminateProcess gives no chance for cleanup.
-    // Test the real shutdown path instead: POST /shutdown (used by CLI and tray).
+  it("daemon.json survives graceful HTTP shutdown", async () => {
+    // daemon.json is intentionally NOT deleted on shutdown. A tray-driven
+    // restart may already have a replacement daemon running; deleting
+    // daemon.json would strand WSL agents and other clients that depend on
+    // it for discovery. The replacement daemon overwrites daemon.json on
+    // its own startup, so stale entries are harmless.
     const { daemonPort, cdpPort } = nextPorts();
     await cleanupDaemonJson();
     fakeCdp = await startFakeCdp(cdpPort);
@@ -213,19 +215,18 @@ describe("daemon lifecycle (no Chrome needed)", () => {
       // Connection reset mid-response is normal when the server shuts down.
     }
 
-    // Give the daemon a moment to delete daemon.json and exit.
+    // Give the daemon a moment to exit.
     await new Promise((r) => setTimeout(r, 800));
     daemon = null;
 
-    assert.ok(!existsSync(DAEMON_JSON), "daemon.json should be deleted after graceful HTTP shutdown");
+    assert.ok(existsSync(DAEMON_JSON), "daemon.json should survive graceful HTTP shutdown");
   });
 
-  it("does not delete daemon.json owned by a newer daemon (restart race)", async () => {
+  it("successor's daemon.json survives old daemon shutdown (restart race)", async () => {
     // Simulates a tray restart where the replacement daemon writes its own
-    // daemon.json (new pid) before this daemon's async shutdown runs. The
-    // departing daemon must NOT delete a file it no longer owns, or it would
-    // strand the healthy successor with no advertisement and make every WSL
-    // agent fail to find the daemon.
+    // daemon.json (new pid) before this daemon's async shutdown runs. Since
+    // daemon.json is never deleted on shutdown, the successor's file is
+    // always safe regardless of timing.
     const { daemonPort, cdpPort } = nextPorts();
     await cleanupDaemonJson();
     fakeCdp = await startFakeCdp(cdpPort);
