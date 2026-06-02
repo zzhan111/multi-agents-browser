@@ -78,10 +78,10 @@ agent 浏览(④)  →  抓到底层 API(①)  →  固化成命名能力(②)
 | 维度 | 现状（2026-06-02） | 剩余缺口 |
 |---|---|---|
 | **身份** | ✅ per-agent session ID（`X-BB-Session` header / `SessionManager`） | — |
-| **隔离/并发** | ✅ per-session currentTargetId + tab lease（`TabState.leaseOwner`/`leaseMode`, `tab_claim`/`tab_release` MCP 工具） | 调度队列（P1） |
-| **调度** | 串行（无队列） | 需队列 + per-agent 并发上限 + 公平性 |
+| **隔离/并发** | ✅ per-session currentTargetId + tab lease（`TabState.leaseOwner`/`leaseMode`, `tab_claim`/`tab_release` MCP 工具） | — |
+| **调度** | ✅ `CommandScheduler`（全局+per-session 并发上限 + least-loaded 公平性，`command-scheduler.ts`） | — |
 | **权限/信任** | ✅ scope 系统（`full`/`read-only`/`no-eval`），`eval`/`trace start` 受控 | — |
-| **审计** | ✅ `CommandHistory` 加 `sessionId` 字段，`/api/commands` 返回每条命令归属→可运行 `browser_tab_claim` 测试 | UI 实时展示（P1） |
+| **审计** | ✅ `CommandHistory` 带 `sessionId` + 控制面板「活动」tab 实时展示（`ActivityPage.jsx`） | — |
 
 **生命周期串联：**
 
@@ -99,15 +99,16 @@ agent 连上 → 标识身份 → 拿到「被允许看到」的 scoped catalog
 > ✅ = 已实现（2026-06-02，行号经 2026-06-02 复核修正），~~删除线~~ = 已解决
 > 每个 ✅ 后面标注了实现位置（代码行 / 模块）
 
-### ⏭️ 下一步待办（已钉定，2026-06-02 复核后确认）
+### ✅ P1 多 agent 已闭环（2026-06-02）
 
-多 agent 线的 ✅ 已全部在代码中核实属实，闭环只差两块 P1：
+多 agent 线的两块 P1 已全部落地：
 
 1. [x] ~~**调度队列（P1）**~~\
    ✅ 已实现（2026-06-02）。`command-scheduler.ts` 的 `CommandScheduler`：每条 `/command` 在打到共享 CDP 前先 `acquire` 一个槽。全局上限 `BB_SCHED_GLOBAL_LIMIT`（默认 12）+ per-session 上限 `BB_SCHED_SESSION_LIMIT`（默认 4）+ 公平性（least-loaded-session-first 准入，平局 FIFO）。接在 `http-server.ts` 的 CDP-ready 等待之后、`dispatchRequest` 之前；与 tab lease 正交、无死锁。`/status` 暴露 `scheduler` 统计供审计 UI 用。单测见 `__tests__/command-scheduler.test.ts`。
-2. **审计 UI 实时展示（P1）** —— 数据已就绪（`/api/commands` 带 `sessionId`、`/api/sessions` 暴露 tab 归属/scope、`/status` 现含 `scheduler` 队列深度/各 session 在飞数），缺面板侧"谁在用哪个 tab、排了多少队、跑了什么"的实时视图。← **下一步**
+2. [x] ~~**审计 UI 实时展示（P1）**~~\
+   ✅ 已实现（2026-06-02）。控制面板独立「🛰 活动」tab（`src-panel/src/pages/ActivityPage.jsx`）：调度状态条（在飞/排队/活跃 agent/占用 tab）+ 可点筛选的 session 行（scope badge、当前 tab + 独占租约、在飞命令数、最近活跃）+ 按 `sessionId` 归属的命令流。纯消费已有数据面（`/status.scheduler` + `/status.sessions/tabs` + `/api/commands`），无新增端点。
 
-线 A 的两个 `[ ]`（agent 端 search-first vs 动态注册、UI 端 Capabilities Tab）偏产品决策，待 P1 落地后再拍方向。
+→ **下一步（线 A，偏产品决策，待拍方向）**：agent 端 search-first vs 动态注册真工具二选一/都做；UI 端 Capabilities Tab 优先级。更远见下方"更远"小节（⑤数据统一层等）。
 
 ### 多 agent（用户重心，需先钉一个子问题深挖到可动手）
 
@@ -115,7 +116,7 @@ agent 连上 → 标识身份 → 拿到「被允许看到」的 scoped catalog
   ✅ **`session-state.ts`**（per-session currentTargetId）+ **`tab-state.ts`**（`leaseOwner`/`leaseMode` exclusive）+ **`command-dispatch.ts:943-956`**（`tab_claim`/`tab_release` dispatch）。`tab_claim`/`tab_release` 已自动注册为 MCP 工具 `browser_tab_claim`/`browser_tab_release`（`commands.ts:311-324` → `mcp/index.ts:528-542` 自动生成循环）。
 - [x] ~~**信任模型**：scope + token + 审计~~\
   ✅ **`session-state.ts`** 的 `SessionScope`（`"full"` / `"read-only"` / `"no-eval"`），等级不可 escalate。**`command-dispatch.ts:534-542`** 按 scope 拦截 eval/trace start（`isEvalLike` 在 `:521-524` 同时覆盖 `eval` 和 `trace start`）。**`command-history.ts`** 已加 `sessionId` 字段（`CommandRecord.sessionId`），`/api/commands` 返回每条命令的归属 session。\
-  剩余缺口：调度队列（P1）、审计 UI 实时展示（P1）。→ 见本节顶部「⏭️ 下一步待办」。
+  剩余缺口：~~调度队列（P1）、审计 UI 实时展示（P1）~~ → 均已闭环，见本节顶部「✅ P1 多 agent 已闭环」。
 - [x] ~~**远程 `eval` 策略**~~\
   ✅ 折叠进 scope 系统：`no-eval` scope 拒绝 `eval` 和 `trace start`，`read-only` scope 只允许观察类命令。
 
