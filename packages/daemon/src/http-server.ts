@@ -19,9 +19,18 @@ import { COMMAND_TIMEOUT, DAEMON_PORT } from "@bb-browser/shared";
 import { CdpConnection } from "./cdp-connection.js";
 import { dispatchRequest } from "./command-dispatch.js";
 import type { CommandHistory } from "./command-history.js";
+import { CommandScheduler } from "./command-scheduler.js";
 import { SessionManager, type SessionScope } from "./session-state.js";
 import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
 import { DAEMON_DIR } from "@bb-browser/shared";
+
+/** Parse a positive integer env var, falling back to `fallback` if unset/invalid. */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
 
 /**
  * Mutable startup status shared between the background CDP bring-up loop and
@@ -55,6 +64,7 @@ export class HttpServer {
   private readonly onShutdown?: () => void;
   private readonly runtimeStatus: DaemonRuntimeStatus;
   private readonly sessions = new SessionManager();
+  private readonly scheduler: CommandScheduler;
   private startTime = 0;
 
   constructor(options: HttpServerOptions) {
@@ -66,6 +76,10 @@ export class HttpServer {
     this.history = options.history ?? null;
     this.onShutdown = options.onShutdown;
     this.runtimeStatus = options.runtimeStatus ?? { needsBrowserConsent: false };
+    this.scheduler = new CommandScheduler({
+      globalLimit: envInt("BB_SCHED_GLOBAL_LIMIT", 12),
+      perSessionLimit: envInt("BB_SCHED_SESSION_LIMIT", 4),
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -204,6 +218,11 @@ export class HttpServer {
       ) as SessionScope | undefined;
       const session = this.sessions.getOrCreate(sessionId, sessionLabel, sessionScope);
 
+      // Admission control: bound global + per-session concurrency and serve
+      // waiters fairly before touching the shared CDP connection. Acquired
+      // AFTER the CDP-ready wait so a stalled browser never consumes slots.
+      const release = await this.scheduler.acquire(session.id);
+
       // Dispatch with timeout
       const timeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("Command timeout")), COMMAND_TIMEOUT),
@@ -219,6 +238,8 @@ export class HttpServer {
       } catch (err2) {
         finish?.(false);
         throw err2;
+      } finally {
+        release();
       }
     } catch (error) {
       this.sendJson(res, 400, {
@@ -251,6 +272,7 @@ export class HttpServer {
       needsBrowserConsent: this.runtimeStatus.needsBrowserConsent,
       uptime: this.uptime,
       currentSeq: this.cdp.tabManager.currentSeq(),
+      scheduler: this.scheduler.stats(),
       sessions: this.sessions.all().map((s) => ({
         id: s.id,
         label: s.label,
