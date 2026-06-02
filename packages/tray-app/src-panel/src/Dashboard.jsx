@@ -12,6 +12,7 @@ import { useStore } from './store/useStore.jsx';
 import { daemon } from './api/daemon.js';
 
 import OverviewPage from './pages/OverviewPage.jsx';
+import ActivityPage from './pages/ActivityPage.jsx';
 import TracePage from './pages/TracePage.jsx';
 import LogsPage from './pages/LogsPage.jsx';
 import CapabilitiesPage from './pages/CapabilitiesPage.jsx';
@@ -20,6 +21,7 @@ import styles from './Dashboard.module.css';
 
 const TABS = [
   { id: 'overview',      label: '📊 Overview' },
+  { id: 'activity',      label: '🛰 活动' },
   { id: 'capabilities',  label: '🔌 Capabilities' },
   { id: 'trace',         label: '🎬 Trace' },
   { id: 'logs',          label: '📋 Logs' },
@@ -95,6 +97,7 @@ export default function Dashboard() {
       {/* ── Content ── */}
       <div className={styles.content}>
         {activeTab === 'overview'     && <OverviewPage />}
+        {activeTab === 'activity'     && <ActivityPage />}
         {activeTab === 'capabilities' && <CapabilitiesPage />}
         {activeTab === 'trace'        && <TracePage />}
         {activeTab === 'logs'         && <LogsPage />}
