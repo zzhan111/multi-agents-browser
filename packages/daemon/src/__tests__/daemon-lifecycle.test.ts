@@ -12,7 +12,7 @@ import {
   type ChildProcess,
 } from "node:child_process";
 import process from "node:process";
-import { readFile, unlink } from "node:fs/promises";
+import { readFile, writeFile, unlink } from "node:fs/promises";
 import { existsSync, mkdirSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -218,6 +218,40 @@ describe("daemon lifecycle (no Chrome needed)", () => {
     daemon = null;
 
     assert.ok(!existsSync(DAEMON_JSON), "daemon.json should be deleted after graceful HTTP shutdown");
+  });
+
+  it("does not delete daemon.json owned by a newer daemon (restart race)", async () => {
+    // Simulates a tray restart where the replacement daemon writes its own
+    // daemon.json (new pid) before this daemon's async shutdown runs. The
+    // departing daemon must NOT delete a file it no longer owns, or it would
+    // strand the healthy successor with no advertisement and make every WSL
+    // agent fail to find the daemon.
+    const { daemonPort, cdpPort } = nextPorts();
+    await cleanupDaemonJson();
+    fakeCdp = await startFakeCdp(cdpPort);
+    daemon = spawnDaemon(daemonPort, cdpPort);
+    const info = await waitForDaemonJson();
+
+    // A "successor" overwrites daemon.json with a foreign pid.
+    const successor = { ...info, pid: 999_999 };
+    await writeFile(DAEMON_JSON, JSON.stringify(successor));
+
+    // Gracefully shut down the ORIGINAL daemon via the real shutdown path.
+    try {
+      await fetch(`http://${info.host as string}:${info.port as number}/shutdown`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${info.token as string}` },
+        signal: AbortSignal.timeout(3000),
+      });
+    } catch {
+      // Connection reset mid-response is normal when the server shuts down.
+    }
+    await new Promise((r) => setTimeout(r, 800));
+    daemon = null;
+
+    assert.ok(existsSync(DAEMON_JSON), "successor's daemon.json must survive the old daemon's shutdown");
+    const after = JSON.parse(await readFile(DAEMON_JSON, "utf8"));
+    assert.equal(after.pid, 999_999, "successor's pid must be preserved");
   });
 
   it("stale daemon.json survives kill -9", async () => {

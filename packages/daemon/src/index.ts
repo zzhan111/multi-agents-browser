@@ -10,7 +10,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { writeFileSync, unlinkSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, unlinkSync, renameSync, readFileSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
@@ -142,16 +142,38 @@ function advertisedHost(bindHost: string): string {
 function writeDaemonJson(info: DaemonInfo): void {
   try {
     mkdirSync(DAEMON_DIR, { recursive: true });
-    writeFileSync(DAEMON_JSON, JSON.stringify(info), { mode: 0o600 });
-  } catch {}
+    // Write a temp file in the same dir, then atomically rename it over
+    // daemon.json. A reader (e.g. a WSL agent) therefore never observes a
+    // truncated/half-written file: it sees either the previous contents or the
+    // new ones in full, never an empty or partial JSON mid-write.
+    const tmp = path.join(DAEMON_DIR, `daemon.json.${process.pid}.tmp`);
+    writeFileSync(tmp, JSON.stringify(info), { mode: 0o600 });
+    renameSync(tmp, DAEMON_JSON);
+  } catch {
+    // Fall back to a direct write if rename isn't available (e.g. a transient
+    // sharing violation on Windows). A brief non-atomic window beats no file.
+    try {
+      writeFileSync(DAEMON_JSON, JSON.stringify(info), { mode: 0o600 });
+    } catch {}
+  }
 }
 
 function cleanupDaemonJson(): void {
-  if (existsSync(DAEMON_JSON)) {
-    try {
-      unlinkSync(DAEMON_JSON);
-    } catch {}
+  // Only remove daemon.json if it still advertises *this* process. During a
+  // tray-driven restart the replacement daemon can write its own daemon.json
+  // (new pid) before our async shutdown runs; deleting it then would strand a
+  // healthy daemon with no advertisement and make every WSL agent fail to find
+  // it. So we check ownership and skip if we've already been superseded.
+  try {
+    const info = JSON.parse(readFileSync(DAEMON_JSON, "utf8")) as { pid?: number };
+    if (info.pid !== process.pid) return;
+  } catch {
+    // Missing or unparseable — nothing of ours to clean up.
+    return;
   }
+  try {
+    unlinkSync(DAEMON_JSON);
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
