@@ -247,6 +247,7 @@ export class HttpServer {
     this.sendJson(res, 200, {
       running: true,
       cdpConnected: this.cdp.connected,
+      cdpPort: this.cdpPort,
       needsBrowserConsent: this.runtimeStatus.needsBrowserConsent,
       uptime: this.uptime,
       currentSeq: this.cdp.tabManager.currentSeq(),

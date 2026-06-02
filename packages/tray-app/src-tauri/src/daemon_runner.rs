@@ -208,7 +208,7 @@ fn probe_healthy_daemon() -> Option<DaemonConfig> {
     let config = read_config(&path).ok()??;
     // poll_status returning Some means the daemon answered /status with a
     // recognizable body — i.e. it is alive and serving.
-    poll_status(config.port, &config.token)?;
+    poll_status(&config.host, config.port, &config.token)?;
     Some(config)
 }
 
@@ -244,19 +244,37 @@ fn reap_orphan_daemon() {
     let killed = kill_process(pid);
     // `decide_reap` returned Some, so config is Some too.
     let cfg = config.as_ref().expect("decide_reap implies a config");
-    if poll_status(cfg.port, &cfg.token).is_some() {
-        // Still serving despite the kill — keep its advertisement rather than
-        // stranding a live daemon. A fresh daemon (if we go on to spawn one)
-        // will atomically overwrite daemon.json on startup anyway.
-        eprintln!(
-            "[runner] reap: pid {pid} still serving after kill (success={killed}); leaving daemon.json"
-        );
-    } else {
+    // `taskkill` returns before the daemon's HTTP socket is torn down, so a
+    // single immediate poll can falsely see the dying daemon as alive. Confirm
+    // it has actually stopped serving over a short window before deciding.
+    if daemon_confirmed_gone(&cfg.host, cfg.port, &cfg.token) {
         eprintln!(
             "[runner] reap: orphan pid {pid} gone (kill success={killed}); removing daemon.json"
         );
         let _ = remove_config(&path);
+    } else {
+        // Still serving ~1.5s after the kill — keep its advertisement rather
+        // than stranding a live daemon. A fresh daemon (if we go on to spawn
+        // one) will atomically overwrite daemon.json on startup anyway.
+        eprintln!(
+            "[runner] reap: pid {pid} still serving after kill (success={killed}); leaving daemon.json"
+        );
     }
+}
+
+/// Poll `/status` a few times over ~1.5s to confirm a just-killed daemon has
+/// actually stopped serving. Returns true once it stops responding; false if it
+/// is still serving after the window (genuinely alive / unkillable).
+fn daemon_confirmed_gone(host: &str, port: u16, token: &str) -> bool {
+    for attempt in 0..6 {
+        if poll_status(host, port, token).is_none() {
+            return true;
+        }
+        if attempt < 5 {
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -440,9 +458,10 @@ fn run_watcher(
             return;
         }
 
-        // Poll /status every ~1.5s (every 3rd 500ms tick).
+        // Poll /status every ~1.5s (every 3rd 500ms tick). A tray-spawned daemon
+        // advertises loopback, so dial 127.0.0.1.
         if ticks % 3 == 0 {
-            if let Some(status) = poll_status(poll_port, &poll_token) {
+            if let Some(status) = poll_status("127.0.0.1", poll_port, &poll_token) {
                 if last_connected != Some(status.cdp_connected) {
                     last_connected = Some(status.cdp_connected);
                     on_cdp_status(&app, status.cdp_connected);
@@ -472,14 +491,17 @@ fn run_adopt_watcher(
     kill_rx: std::sync::mpsc::Receiver<()>,
 ) {
     // Seed identity from daemon.json and mark ready, as if we'd spawned it.
-    // daemon.json carries no CDP port, so report the well-known default (the
-    // tray always spawns the daemon with --cdp-port DEFAULT_CDP_PORT); this is
-    // cosmetic, only used for the tray's "CDP 端口" display.
+    // daemon.json carries no CDP port, so learn the real one from the adopted
+    // daemon's /status; fall back to DEFAULT_CDP_PORT only if an older daemon
+    // omits it.
+    let cdp_port = poll_status(&info.host, info.port, &info.token)
+        .and_then(|s| s.cdp_port)
+        .unwrap_or(DEFAULT_CDP_PORT);
     on_ready(
         &app,
         ReadyInfo {
             daemon_port: info.port,
-            cdp_port: DEFAULT_CDP_PORT,
+            cdp_port,
             token: info.token.clone(),
         },
     );
@@ -494,7 +516,7 @@ fn run_adopt_watcher(
             return;
         }
 
-        match poll_status(info.port, &info.token) {
+        match poll_status(&info.host, info.port, &info.token) {
             Some(status) => {
                 misses = 0;
                 if last_connected != Some(status.cdp_connected) {
@@ -527,17 +549,22 @@ fn run_adopt_watcher(
 /// Parsed subset of the daemon's `GET /status` response.
 struct DaemonStatus {
     cdp_connected: bool,
+    /// The CDP port the daemon is using, if it reports one (`cdpPort`). Older
+    /// daemons omit it; callers fall back to `DEFAULT_CDP_PORT`.
+    cdp_port: Option<u16>,
     needs_browser_consent: bool,
 }
 
-/// Best-effort raw-HTTP `GET /status`. Returns `None` on any error so
-/// transient failures don't flap the tray.
-fn poll_status(daemon_port: u16, token: &str) -> Option<DaemonStatus> {
-    let mut stream = TcpStream::connect(("127.0.0.1", daemon_port)).ok()?;
+/// Best-effort raw-HTTP `GET /status` against `host:daemon_port`. Returns `None`
+/// on any error so transient failures don't flap the tray. `host` honours the
+/// address advertised in daemon.json (the daemon may bind/advertise something
+/// other than loopback).
+fn poll_status(host: &str, daemon_port: u16, token: &str) -> Option<DaemonStatus> {
+    let mut stream = TcpStream::connect((host, daemon_port)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
     let req = format!(
-        "GET /status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        "GET /status HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).ok()?;
     let mut body = String::new();
@@ -552,8 +579,22 @@ fn poll_status(daemon_port: u16, token: &str) -> Option<DaemonStatus> {
     }
     Some(DaemonStatus {
         cdp_connected: has("cdpConnected", true),
+        cdp_port: json_u16(&body, "cdpPort"),
         needs_browser_consent: has("needsBrowserConsent", true),
     })
+}
+
+/// Extract a numeric JSON field (`"key":12345` or `"key": 12345`) from a raw
+/// body. Returns None if absent or not a u16.
+fn json_u16(body: &str, key: &str) -> Option<u16> {
+    let pat = format!("\"{key}\":");
+    let start = body.find(&pat)? + pat.len();
+    let digits: String = body[start..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// Show a native confirm dialog asking whether to close the user's running
