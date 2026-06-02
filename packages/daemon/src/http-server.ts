@@ -208,7 +208,7 @@ export class HttpServer {
       const timeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("Command timeout")), COMMAND_TIMEOUT),
       );
-      const finish = this.history?.record(request.action ?? "unknown", request);
+      const finish = this.history?.record(request.action ?? "unknown", request, session.id);
       try {
         const response = await Promise.race([
           dispatchRequest(this.cdp, request, session),
