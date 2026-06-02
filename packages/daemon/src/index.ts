@@ -391,6 +391,15 @@ async function bringUpCdpLoop(
 ): Promise<void> {
   const allowKill = process.env.BB_ALLOW_BROWSER_KILL === "1";
   let attempt = 0;
+  // Quiet repeated identical failures. A browser that stays non-debuggable (or
+  // an endpoint that never becomes Chrome) would otherwise emit one log line
+  // every 15s forever — hundreds of identical lines that bloat daemon.log. We
+  // log the first occurrence of each distinct error in full, then suppress
+  // repeats, emitting only a periodic heartbeat so the log still shows we're
+  // alive and retrying.
+  let lastLoggedMsg = "";
+  let suppressed = 0;
+  const HEARTBEAT_EVERY = 20; // ~every 5 min at the 15s cap
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -418,9 +427,20 @@ async function bringUpCdpLoop(
       }
       // Capped exponential backoff: 1s, 2s, 4s … max 15s.
       const delayMs = Math.min(15000, 1000 * 2 ** Math.min(attempt - 1, 4));
-      console.error(
-        `[Daemon] CDP bring-up attempt ${attempt} failed: ${msg}. Retrying in ${Math.round(delayMs / 1000)}s...`,
-      );
+      const everySecs = Math.round(delayMs / 1000);
+      if (msg !== lastLoggedMsg) {
+        // New/changed failure reason — log it in full once.
+        lastLoggedMsg = msg;
+        suppressed = 0;
+        console.error(
+          `[Daemon] CDP bring-up attempt ${attempt} failed: ${msg}. Retrying every ${everySecs}s (suppressing repeats)...`,
+        );
+      } else if (++suppressed % HEARTBEAT_EVERY === 0) {
+        // Same reason as before — heartbeat only, no repeated detail.
+        console.error(
+          `[Daemon] CDP bring-up still failing after ${attempt} attempts (same error). Retrying...`,
+        );
+      }
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
