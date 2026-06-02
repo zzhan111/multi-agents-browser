@@ -148,6 +148,68 @@ pub fn remove_config(path: &Path) -> Result<(), ConfigError> {
 }
 
 // ---------------------------------------------------------------------------
+// Orphan daemon reaping
+// ---------------------------------------------------------------------------
+//
+// The tray only tracks the daemon *it* spawned. A daemon left behind by a
+// previous tray crash, a manual `node daemon.js`, or the bb-daemon-run.bat
+// launcher is invisible to it. Such an orphan keeps port 19824 bound (forcing
+// the new daemon onto 19826) and — critically — a second daemon attached to the
+// same Chrome runs its own SessionManager / lease table, silently defeating the
+// per-session tab isolation. So before spawning, the tray reaps whatever pid
+// the existing daemon.json advertises (mirrors bb-daemon-run.bat step 1).
+
+/// Decide which pid (if any) should be reaped before spawning a fresh daemon.
+///
+/// Returns the advertised pid unless it is our own process (a corrupt/foreign
+/// daemon.json could otherwise make the tray kill itself). A `None` config or a
+/// config without a pid yields `None`.
+pub fn decide_reap(config: Option<&DaemonConfig>, self_pid: u32) -> Option<u32> {
+    let pid = config?.pid?;
+    if pid == self_pid {
+        return None;
+    }
+    Some(pid)
+}
+
+/// Force-kill a process by pid. Returns true if the kill command reported
+/// success. A pid that is already dead yields false (harmless). Best-effort:
+/// any spawn failure is swallowed into `false`.
+pub fn kill_process(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Suppress the console window the tray GUI would otherwise flash.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Resolve the daemon.json path the *daemon* would write, honouring
+/// `BB_BROWSER_HOME` (which the daemon uses) before falling back to
+/// `~/.bb-browser`. This keeps the tray's reap target aligned with wherever the
+/// daemon actually persists its config.
+pub fn daemon_config_path() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("BB_BROWSER_HOME") {
+        return Some(PathBuf::from(home).join("daemon.json"));
+    }
+    default_config_path()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -329,5 +391,41 @@ mod tests {
 
         remove_config(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    // ---- decide_reap ----
+
+    fn cfg_with_pid(pid: Option<u32>) -> DaemonConfig {
+        DaemonConfig {
+            schema_version: 1,
+            daemon_port: 19824,
+            cdp_port: 19825,
+            token: "t".into(),
+            pid,
+            started_at: None,
+        }
+    }
+
+    #[test]
+    fn reap_returns_advertised_pid() {
+        let cfg = cfg_with_pid(Some(4321));
+        assert_eq!(decide_reap(Some(&cfg), 1000), Some(4321));
+    }
+
+    #[test]
+    fn reap_skips_when_no_config() {
+        assert_eq!(decide_reap(None, 1000), None);
+    }
+
+    #[test]
+    fn reap_skips_when_config_has_no_pid() {
+        let cfg = cfg_with_pid(None);
+        assert_eq!(decide_reap(Some(&cfg), 1000), None);
+    }
+
+    #[test]
+    fn reap_never_kills_self() {
+        let cfg = cfg_with_pid(Some(1000));
+        assert_eq!(decide_reap(Some(&cfg), 1000), None);
     }
 }

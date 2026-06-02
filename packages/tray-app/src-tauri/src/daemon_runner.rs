@@ -18,6 +18,9 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use bb_browser_tray::daemon_config::{
+    daemon_config_path, decide_reap, kill_process, read_config, remove_config,
+};
 use bb_browser_tray::daemon_spawner::{
     DaemonProcess, ReadyInfo, SpawnConfig, SpawnOutcome, DEFAULT_READY_TIMEOUT,
 };
@@ -64,6 +67,13 @@ impl DaemonRunner {
     /// daemon is still running, kill it first.
     pub fn spawn(&self, app: AppHandle) {
         self.kill();
+
+        // Reap any orphan daemon advertised in daemon.json before spawning. The
+        // tray's own kill() only covers the process it tracks; an orphan from a
+        // prior crash / manual launch / bb-daemon-run.bat keeps the port bound
+        // AND runs a second SessionManager on the same Chrome, which would
+        // silently break per-session tab isolation. See daemon_config::decide_reap.
+        reap_orphan_daemon();
 
         let mut config = match build_spawn_config(&app) {
             Ok(c) => c,
@@ -152,6 +162,44 @@ impl DaemonRunner {
     pub fn kill(&self) {
         if let Some(tx) = self.kill_tx.lock().unwrap().take() {
             let _ = tx.send(());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orphan daemon reaping
+// ---------------------------------------------------------------------------
+
+/// Read daemon.json, and if it advertises a foreign pid, kill it and delete the
+/// file so the fresh daemon starts from a clean slate (single global daemon).
+/// Best-effort: every failure path is logged and swallowed so reaping never
+/// blocks startup.
+fn reap_orphan_daemon() {
+    let path = match daemon_config_path() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let config = match read_config(&path) {
+        Ok(c) => c,
+        // A corrupt / unsupported daemon.json still warrants removal so the new
+        // daemon isn't read against stale data.
+        Err(e) => {
+            eprintln!("[runner] reap: unreadable daemon.json ({e}); removing it");
+            let _ = remove_config(&path);
+            return;
+        }
+    };
+
+    let self_pid = std::process::id();
+    match decide_reap(config.as_ref(), self_pid) {
+        Some(pid) => {
+            let killed = kill_process(pid);
+            eprintln!("[runner] reap: killed orphan daemon pid={pid} (success={killed}); removing daemon.json");
+            let _ = remove_config(&path);
+        }
+        None => {
+            // Either no file, no pid, or it was our own pid — nothing to reap.
         }
     }
 }
