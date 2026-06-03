@@ -12,8 +12,10 @@ use std::net::{TcpListener, SocketAddr};
 pub const DEFAULT_DAEMON_PORT: u16 = 19824;
 pub const DEFAULT_CDP_PORT: u16 = 19825;
 
-/// Maximum scan distance before giving up (256 ports = 128 attempts per chain).
-pub const MAX_SCAN_RANGE: u16 = 256;
+/// Maximum scan distance before giving up.
+/// 2048 is wide enough to skip past Windows Hyper-V/WSL port exclusion clusters
+/// (e.g. 19826–20525) and portproxy-held ports starting from the default 19824/19825.
+pub const MAX_SCAN_RANGE: u16 = 2048;
 
 /// Result of a successful dual-port allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

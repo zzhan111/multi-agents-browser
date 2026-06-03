@@ -25,7 +25,7 @@ use bb_browser_tray::daemon_spawner::{
     DaemonProcess, ReadyInfo, SpawnConfig, SpawnOutcome, DEFAULT_READY_TIMEOUT,
 };
 use bb_browser_tray::port_discovery::{
-    find_even_port, OsPortChecker, DEFAULT_CDP_PORT, DEFAULT_DAEMON_PORT,
+    find_even_port, find_odd_port, OsPortChecker, DEFAULT_CDP_PORT, DEFAULT_DAEMON_PORT,
 };
 use bb_browser_tray::supervisor::Event;
 use bb_browser_tray::tray_state::CdpState;
@@ -274,13 +274,15 @@ fn build_spawn_config(app: &AppHandle) -> Result<SpawnConfig, String> {
         daemon_entry.exists()
     );
 
-    // Only the daemon HTTP port is free-allocated. The CDP port is NOT a
-    // port we allocate — it must point at where Chrome already listens, so we
-    // pass the well-known default and let the Node daemon resolve it
-    // (connect there → managed port file → launch a browser).
+    // Discover a free even port for the daemon HTTP server and a free odd port
+    // for Chrome's CDP debug port. Both ports are scanned from their defaults;
+    // the wide MAX_SCAN_RANGE lets discovery skip over Windows Hyper-V/WSL port
+    // exclusion clusters and portproxy-held ports that would otherwise cause
+    // Chrome to crash at startup (unable to bind its debug port).
     let daemon = find_even_port(&OsPortChecker, DEFAULT_DAEMON_PORT)
         .map_err(|e| format!("daemon port discovery failed: {e:?}"))?;
-    let cdp = DEFAULT_CDP_PORT;
+    let cdp = find_odd_port(&OsPortChecker, DEFAULT_CDP_PORT)
+        .map_err(|e| format!("cdp port discovery failed: {e:?}"))?;
     eprintln!("[runner] using daemon={daemon}, cdp={cdp}");
 
     // Node.js cannot run a main module given a Windows extended-length
