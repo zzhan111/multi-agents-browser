@@ -45,7 +45,6 @@ export interface DaemonRuntimeStatus {
 export interface HttpServerOptions {
   host?: string;
   port?: number;
-  cdpPort?: number;
   token?: string;
   cdp: CdpConnection;
   history?: CommandHistory;
@@ -57,7 +56,6 @@ export class HttpServer {
   private server: Server | null = null;
   private readonly host: string;
   private readonly port: number;
-  private readonly cdpPort: number;
   private readonly token: string | null;
   private readonly cdp: CdpConnection;
   private readonly history: CommandHistory | null;
@@ -70,7 +68,6 @@ export class HttpServer {
   constructor(options: HttpServerOptions) {
     this.host = options.host ?? "127.0.0.1";
     this.port = options.port ?? DAEMON_PORT;
-    this.cdpPort = options.cdpPort ?? 0;
     this.token = options.token ?? null;
     this.cdp = options.cdp;
     this.history = options.history ?? null;
@@ -268,7 +265,7 @@ export class HttpServer {
     this.sendJson(res, 200, {
       running: true,
       cdpConnected: this.cdp.connected,
-      cdpPort: this.cdpPort,
+      cdpPort: this.cdp.port,
       needsBrowserConsent: this.runtimeStatus.needsBrowserConsent,
       uptime: this.uptime,
       currentSeq: this.cdp.tabManager.currentSeq(),
@@ -293,7 +290,7 @@ export class HttpServer {
     this.sendJson(res, 200, {
       uptime: this.uptime,
       daemonPort: this.port,
-      cdpPort: this.cdpPort,
+      cdpPort: this.cdp.port,
       cdpConnected: this.cdp.connected,
       tabCount: tabs.length,
       chromeVersion: this.cdp.chromeVersion ?? null,

@@ -286,7 +286,6 @@ async function main(): Promise<void> {
   const httpServer = new HttpServer({
     host: options.host,
     port: options.port,
-    cdpPort: options.cdpPort,
     token: options.token,
     cdp,
     history,
