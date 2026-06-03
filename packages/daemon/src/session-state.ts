@@ -12,6 +12,8 @@ export type SessionScope = "full" | "read-only" | "no-eval";
 export interface AgentSession {
   id: string;
   label?: string;
+  /** Stable cross-restart agent identity (from AgentRegistry). */
+  agentId?: string;
   /** The most recently selected/opened tab for this session. */
   currentTargetId?: string;
   /**
@@ -34,14 +36,15 @@ const SCOPE_RANK: Record<SessionScope, number> = {
 export class SessionManager {
   private readonly sessions = new Map<string, AgentSession>();
 
-  getOrCreate(id: string, label?: string, scope?: SessionScope): AgentSession {
+  getOrCreate(id: string, label?: string, scope?: SessionScope, agentId?: string): AgentSession {
     let session = this.sessions.get(id);
     if (!session) {
-      session = { id, label, scope: scope ?? "full", lastSeen: Date.now() };
+      session = { id, label, agentId, scope: scope ?? "full", lastSeen: Date.now() };
       this.sessions.set(id, session);
     } else {
       session.lastSeen = Date.now();
       if (label) session.label = label;
+      if (agentId) session.agentId = agentId;
       // Scope can be tightened on reconnect but never widened for an existing session.
       if (scope && SCOPE_RANK[scope] < SCOPE_RANK[session.scope]) {
         session.scope = scope;

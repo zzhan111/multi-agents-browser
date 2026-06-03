@@ -25,6 +25,8 @@ import { HttpServer, installLogInterceptor, type DaemonRuntimeStatus } from "./h
 import { CdpConnection } from "./cdp-connection.js";
 import { TabStateManager } from "./tab-state.js";
 import { CommandHistory } from "./command-history.js";
+import { StateStore } from "./state-store.js";
+import { AgentRegistry } from "./agent-registry.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -259,6 +261,8 @@ async function main(): Promise<void> {
   const history = new CommandHistory();
   const cdp = new CdpConnection(options.cdpHost, options.cdpPort, tabManager);
   const runtimeStatus: DaemonRuntimeStatus = { needsBrowserConsent: false };
+  const stateStore = new StateStore(path.join(DAEMON_DIR, "state"));
+  const agentRegistry = new AgentRegistry(stateStore);
 
   // Graceful shutdown handler (guarded against double-call)
   let shuttingDown = false;
@@ -289,6 +293,7 @@ async function main(): Promise<void> {
     token: options.token,
     cdp,
     history,
+    agentRegistry,
     onShutdown: shutdown,
     runtimeStatus,
   });

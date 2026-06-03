@@ -11,6 +11,7 @@
  * use the `since` mechanism for incremental queries.
  */
 
+import { randomUUID } from "node:crypto";
 import type {
   NetworkRequestInfo,
   ConsoleMessageInfo,
@@ -50,6 +51,8 @@ export { TRACE_CAPACITY };
 export class TabState {
   readonly targetId: string;
   shortId: string;
+  /** Stable logical tab ID, decoupled from the CDP targetId (which changes on browser restart). */
+  readonly bbTabId: string = randomUUID();
 
   networkRequests = new RingBuffer<SeqNetworkRequest>(NETWORK_CAPACITY);
   consoleMessages = new RingBuffer<SeqConsoleMessage>(CONSOLE_CAPACITY);
@@ -344,6 +347,7 @@ export class TabStateManager {
   private tabs = new Map<string, TabState>(); // targetId -> TabState
   private shortToTarget = new Map<string, string>(); // shortId -> targetId
   private targetToShort = new Map<string, string>(); // targetId -> shortId
+  private bbTabIdToTarget = new Map<string, string>(); // bbTabId -> targetId
 
   /** Generate a globally unique short ID for a target. */
   private generateShortId(targetId: string): string {
@@ -377,6 +381,7 @@ export class TabStateManager {
     this.tabs.set(targetId, tab);
     this.shortToTarget.set(shortId, targetId);
     this.targetToShort.set(targetId, shortId);
+    this.bbTabIdToTarget.set(tab.bbTabId, targetId);
     return tab;
   }
 
@@ -386,7 +391,14 @@ export class TabStateManager {
     if (!tab) return;
     this.shortToTarget.delete(tab.shortId);
     this.targetToShort.delete(targetId);
+    this.bbTabIdToTarget.delete(tab.bbTabId);
     this.tabs.delete(targetId);
+  }
+
+  /** Get tab by stable bbTabId. */
+  resolveByBbTabId(bbTabId: string): TabState | undefined {
+    const targetId = this.bbTabIdToTarget.get(bbTabId);
+    return targetId ? this.tabs.get(targetId) : undefined;
   }
 
   /** Get tab by targetId. */

@@ -23,6 +23,7 @@ import { CommandScheduler } from "./command-scheduler.js";
 import { SessionManager, type SessionScope } from "./session-state.js";
 import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
 import { DAEMON_DIR } from "@bb-browser/shared";
+import type { AgentRegistry } from "./agent-registry.js";
 
 /** Parse a positive integer env var, falling back to `fallback` if unset/invalid. */
 function envInt(name: string, fallback: number): number {
@@ -48,6 +49,7 @@ export interface HttpServerOptions {
   token?: string;
   cdp: CdpConnection;
   history?: CommandHistory;
+  agentRegistry?: AgentRegistry;
   onShutdown?: () => void;
   runtimeStatus?: DaemonRuntimeStatus;
 }
@@ -59,6 +61,7 @@ export class HttpServer {
   private readonly token: string | null;
   private readonly cdp: CdpConnection;
   private readonly history: CommandHistory | null;
+  private readonly agentRegistry: AgentRegistry | null;
   private readonly onShutdown?: () => void;
   private readonly runtimeStatus: DaemonRuntimeStatus;
   private readonly sessions = new SessionManager();
@@ -71,6 +74,7 @@ export class HttpServer {
     this.token = options.token ?? null;
     this.cdp = options.cdp;
     this.history = options.history ?? null;
+    this.agentRegistry = options.agentRegistry ?? null;
     this.onShutdown = options.onShutdown;
     this.runtimeStatus = options.runtimeStatus ?? { needsBrowserConsent: false };
     this.scheduler = new CommandScheduler({
@@ -169,6 +173,8 @@ export class HttpServer {
       this.handleLogs(url, res);
     } else if (req.method === "GET" && url.startsWith("/api/sites")) {
       this.handleSites(url, res);
+    } else if (req.method === "GET" && url.startsWith("/api/agents")) {
+      this.handleAgents(res);
     } else {
       this.sendJson(res, 404, { error: "Not found" });
     }
@@ -209,11 +215,17 @@ export class HttpServer {
       // Resolve the calling agent's session (isolates per-session "current tab").
       const sessionId = (req.headers["x-bb-session"] as string | undefined) ?? "default";
       const sessionLabel = req.headers["x-bb-session-label"] as string | undefined;
+      const explicitAgentId = req.headers["x-bb-agent"] as string | undefined;
       const rawScope = req.headers["x-bb-session-scope"] as string | undefined;
       const sessionScope = (
         rawScope === "read-only" || rawScope === "no-eval" ? rawScope : undefined
       ) as SessionScope | undefined;
-      const session = this.sessions.getOrCreate(sessionId, sessionLabel, sessionScope);
+      const agentRec = this.agentRegistry?.resolveOrCreate({
+        sessionId,
+        explicitAgentId,
+        label: sessionLabel,
+      });
+      const session = this.sessions.getOrCreate(sessionId, sessionLabel, sessionScope, agentRec?.agentId);
 
       // Admission control: bound global + per-session concurrency and serve
       // waiters fairly before touching the shared CDP connection. Acquired
@@ -254,6 +266,7 @@ export class HttpServer {
     const tabs = this.cdp.tabManager.allTabs().map((tab) => ({
       shortId: tab.shortId,
       targetId: tab.targetId,
+      bbTabId: tab.bbTabId,
       networkRequests: tab.networkRequests.size,
       consoleMessages: tab.consoleMessages.size,
       jsErrors: tab.jsErrors.size,
@@ -330,6 +343,15 @@ export class HttpServer {
     const { adapters, cacheAge } = getCatalog(DAEMON_DIR);
     const results = queryCatalog(adapters, { q: q || undefined, domain: domain || undefined });
     this.sendJson(res, 200, { adapters: results, total: adapters.length, cacheAge });
+  }
+
+  // ---------------------------------------------------------------------------
+  // GET /api/agents
+  // ---------------------------------------------------------------------------
+
+  private handleAgents(res: ServerResponse): void {
+    const agents = this.agentRegistry?.all() ?? [];
+    this.sendJson(res, 200, { agents });
   }
 
   // ---------------------------------------------------------------------------

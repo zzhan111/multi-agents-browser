@@ -41,7 +41,15 @@ ExportDialog 新增"智能等待"开关（默认开启）：
 
 ## 后续待改进项
 
-（暂无。在此追加新的 roadmap 条目。）
+### 🚧 线 C — 状态持久面 (State Persistence Plane)（2026-06-03 敲定方向，待动手）
+
+把多 agent 状态从「内存态、易失」升级为「跨浏览器&daemon 重启持久」。让 agent 独占的 tab 能长期绑定、不因浏览器关掉丢任务、一接入就拿回自己的上下文。
+
+**三个已锁决策**：① 绑定语义 = 任务锚 + 主动续做（存 `anchorUrl/intent/progress`，重启后 agent 重开续做）；② 身份 = daemon 协助派生稳定 agentId；③ 存储 = 先 JSON 快照（原子写，`BB_BROWSER_HOME/state/`）。
+
+**阶段**：P0 基座（`state-store.ts` + 稳定 `bbTabId` 与 targetId 解耦 + agentId registry，闸门）→ P1 持久绑定/任务锚 → P2 Agent Journal + 接入握手 context → P3 Tab Scratchpad（短 TTL 交接）→ P4 控制面板 Bindings 视图。
+
+> 完整设计（数据模型 / verify 判据 / 新增 MCP+HTTP 面 / 待定缝）见 [docs/vision-and-roadmap-discussion.md](docs/vision-and-roadmap-discussion.md) 第 4 节「线 C」。
 
 > 方向/脑暴讨论留存见 [docs/vision-and-roadmap-discussion.md](docs/vision-and-roadmap-discussion.md)（data & capability plane 主张、多 agent 接入、adapter 发现 —— 含未决岔路口，可随时捡回继续）
 

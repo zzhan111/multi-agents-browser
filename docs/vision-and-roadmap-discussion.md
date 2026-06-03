@@ -136,6 +136,86 @@ agent 连上 → 标识身份 → 拿到「被允许看到」的 scoped catalog
 
 ---
 
+## 4. 线 C — 状态持久面 (State Persistence Plane)（2026-06-03 敲定方向）
+
+> 把上面「更远 · ⑤数据统一层 / 反孤岛」具体化的第一条线。由用户场景激活：
+> *agent 独占的 tab 能否长期绑定？下次浏览器起来还记得这 tab 是 xxx agent 的？让 agent 不因浏览器关掉而丢任务，一接入就清楚自己的上下文。*
+
+### 4.1 出发点：现有多 agent 状态全是「内存态、易失」
+
+线 B 五维（身份/隔离/调度/权限/审计）已闭环，但**无一落盘**：
+
+- 身份 `SessionManager`（`session-state.ts`）— 内存 `Map`，`gcIdle` 还会回收
+- 租约 `TabState.leaseOwner/leaseMode` — 内存
+- 审计 `CommandHistory` — 200 条 ring buffer，明确「no file I/O」
+- per-tab 事件（network/console/errors/trace）— 内存 ring，按 targetId 索引
+
+**致命约束**：整套状态以 CDP `targetId` 为主键（`tab-state.ts` `TabStateManager.tabs`）。
+`targetId` 浏览器一重启就全变，`shortId` 由其尾部切出同样不稳定。
+→ 今天连一个能跨重启存活的 tab 主键都没有。
+
+### 4.2 三个已锁决策（2026-06-03）
+
+| 决策 | 选择 | 含义 |
+|---|---|---|
+| **绑定语义** | 任务锚 + 主动续做 | binding 存 `{anchorUrl, intent, progress}`；重启后 agent 接入拿到未完成任务，自行 `open(anchorUrl)` 续做，daemon 把新 targetId 回挂 bbTabId。→ bbTabId 跨重启回挂只是 best-effort 便利，**正确性不挂在 URL 重匹配上**。 |
+| **身份连续性** | daemon 协助派生稳定 agentId | MCP client info + label + 持久 registry 派生稳定 id；agent 自带 `X-BB-Session`/`BB_SESSION_ID` 优先。 |
+| **存储基座** | 先 JSON 快照 | 原子写（临时文件 + rename），位于 `BB_BROWSER_HOME/state/`；查询需求出现再迁 JSONL/SQLite。 |
+
+### 4.3 数据模型
+
+```
+BB_BROWSER_HOME/state/
+  agents.json                     # registry: stable agentId → {label, fingerprint, scope, first/lastSeen}
+  bindings.json                   # 任务锚数组
+  agents/<agentId>/journal.json   # capped ring，原子写
+```
+
+```ts
+// 任务锚（需求①）— 不是物理 tab，是"一个 agent 在某 URL 上的活"
+interface TabBinding {
+  bbTabId: string;          // daemon 分配的稳定句柄，与 targetId 解耦
+  agentId: string;
+  leaseMode: "exclusive" | "shared";
+  anchorUrl: string;        // 重启后靠它重开
+  title?: string;
+  intent?: string;          // agent 写的任务意图
+  progress?: string;        // 进度游标（到哪步了）
+  liveTargetId?: string;    // 浏览器活着时的 CDP targetId；重启后失效待回挂
+  status: "active" | "detached" | "done";
+  createdAt: number; updatedAt: number;
+}
+
+// Tab Scratchpad（需求③）— 内存，短 TTL，不落盘
+interface TabScratchpad {
+  bbTabId: string; lastTouchedBy: string; lastAction: string;
+  lastUrl: string; keyRefs?: string[]; updatedAt: number;  // TTL 驱逐
+}
+```
+
+### 4.4 分阶段路线（每阶段独立交付，P0 是闸门）
+
+| 阶段 | 做什么 | verify |
+|---|---|---|
+| **P0** 基座 | 新 `state-store.ts`（原子 JSON）；`TabStateManager` 给每 tab 附稳定 `bbTabId`（与 targetId 解耦）；`SessionManager` 升级为 daemon 派生稳定 agentId + `agents.json` 落盘 | 单测：杀 daemon 重启后 `agents.json` 恢复 registry；模拟 targetId 替换后 bbTabId 仍解析同一 binding |
+| **P1** 持久绑定/任务锚 | `bindings.json` + 内存活映射；`tab_claim` 扩展接 `intent`，新 `browser_task_update` 写 progress/标 done；重启从 bindings.json 恢复 | e2e：claim+写 intent/progress → 杀 daemon → 同 agentId 重连 → 拿回含 intent/progress 的 binding；`open(anchorUrl)` 后 `liveTargetId` 回挂 |
+| **P2** Journal + 握手 | `CommandHistory` 旁路 mirror 到 per-agent `journal.json`；新 `GET /api/agents/:id/context` + MCP `browser_resume` 返回 context bundle | agent 重连后**一次调用**即得到未完成 binding + 最近 N 条活动 |
+| **P3** Scratchpad | 内存 `ScratchpadManager`，每命令派发后更新；`snapshot`/`tab_list` 响应附带 | agent A 操作后 agent B 的 `tab_list`/`snapshot` 看到 A 的最近动作摘要；TTL 过期消失 |
+| **P4** 面板 | ActivityPage 扩展 + 新 Bindings 视图（agent/anchorUrl/intent/progress/status） | 面板看到跨重启存活的绑定与任务进度 |
+
+### 4.5 新增对外面
+
+- **MCP**：`browser_tab_claim`（+`intent`）、新 `browser_task_update`、新 `browser_resume`；scratchpad 自动随 `snapshot`/`tab_list` 返回。
+- **HTTP**：`GET /api/agents`、`GET /api/agents/:id/context`、`GET /api/bindings`。
+
+### 4.6 待定的缝（P0 要先定）
+
+1. **agentId 派生指纹粒度** — MCP client name/version 可能粗（同 client 多实例难分），`label` 是主消歧手段，可能要约定 agent 接入时给 label。
+2. **「永久」的边界** — journal 是 capped ring（如 per-agent 2000 条 + 字节上限），不是真无限；与「JSON-first，够痛再迁」一致。
+3. **单写者前提** — 所有持久化写必须走 daemon（单 daemon 独占成立），P0 需复核没有旁路写。
+
+---
+
 ## 附：本次讨论涉及的关键文件
 
 - `packages/mcp/src/index.ts:650` — `site_run` 泛型派发器
