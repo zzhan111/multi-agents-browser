@@ -17,7 +17,6 @@ import { dirname } from "node:path";
 import type { Request } from "@bb-browser/shared";
 import { COMMAND_TIMEOUT, DAEMON_PORT } from "@bb-browser/shared";
 import { CdpConnection } from "./cdp-connection.js";
-import { dispatchRequest } from "./command-dispatch.js";
 import type { CommandHistory } from "./command-history.js";
 import { CommandScheduler } from "./command-scheduler.js";
 import { SessionManager, type SessionScope } from "./session-state.js";
@@ -26,6 +25,8 @@ import { DAEMON_DIR } from "@bb-browser/shared";
 import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
 import type { JournalManager } from "./agent-journal.js";
+import type { ScratchpadManager } from "./scratchpad-manager.js";
+import { dispatchRequest, type DispatchContext } from "./command-dispatch.js";
 
 /** Parse a positive integer env var, falling back to `fallback` if unset/invalid. */
 function envInt(name: string, fallback: number): number {
@@ -54,6 +55,7 @@ export interface HttpServerOptions {
   agentRegistry?: AgentRegistry;
   bindingStore?: BindingStore;
   journalManager?: JournalManager;
+  scratchpadManager?: ScratchpadManager;
   onShutdown?: () => void;
   runtimeStatus?: DaemonRuntimeStatus;
 }
@@ -68,6 +70,7 @@ export class HttpServer {
   private readonly agentRegistry: AgentRegistry | null;
   private readonly bindingStore: BindingStore | null;
   private readonly journalManager: JournalManager | null;
+  private readonly scratchpadManager: ScratchpadManager | null;
   private readonly onShutdown?: () => void;
   private readonly runtimeStatus: DaemonRuntimeStatus;
   private readonly sessions = new SessionManager();
@@ -83,6 +86,7 @@ export class HttpServer {
     this.agentRegistry = options.agentRegistry ?? null;
     this.bindingStore = options.bindingStore ?? null;
     this.journalManager = options.journalManager ?? null;
+    this.scratchpadManager = options.scratchpadManager ?? null;
     this.onShutdown = options.onShutdown;
     this.runtimeStatus = options.runtimeStatus ?? { needsBrowserConsent: false };
     this.scheduler = new CommandScheduler({
@@ -269,15 +273,26 @@ export class HttpServer {
       );
       const finish = this.history?.record(request.action ?? "unknown", request, session.id);
       try {
+        const dispatchCtx: DispatchContext = {
+          bindingStore: this.bindingStore ?? undefined,
+          scratchpadManager: this.scratchpadManager ?? undefined,
+        };
         const response = await Promise.race([
-          dispatchRequest(this.cdp, request, session, this.bindingStore ?? undefined),
+          dispatchRequest(this.cdp, request, session, dispatchCtx),
           timeout,
         ]);
         finish?.();
+        // Write journal + scratchpad after successful dispatch
         if (session.agentId && this.journalManager) {
           const tab = typeof request.tabId === "string" ? request.tabId : undefined;
           const url = request.action === "open" ? request.url : undefined;
           this.journalManager.record(session.agentId, request.action, tab, url, response.success !== false);
+        }
+        if (this.scratchpadManager && session.currentTargetId) {
+          const tabState = this.cdp.tabManager.getTab(session.currentTargetId);
+          if (tabState) {
+            this.scratchpadManager.record(tabState.bbTabId, request.action, session.agentId);
+          }
         }
         this.sendJson(res, 200, response);
       } catch (err2) {

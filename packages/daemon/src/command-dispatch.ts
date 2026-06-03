@@ -21,6 +21,12 @@ import { CdpConnection, type CdpTargetInfo } from "./cdp-connection.js";
 import type { TabState } from "./tab-state.js";
 import type { AgentSession } from "./session-state.js";
 import type { BindingStore } from "./binding-store.js";
+import type { ScratchpadManager } from "./scratchpad-manager.js";
+
+export interface DispatchContext {
+  bindingStore?: BindingStore;
+  scratchpadManager?: ScratchpadManager;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -530,8 +536,10 @@ export async function dispatchRequest(
   cdp: CdpConnection,
   request: Request,
   session?: AgentSession,
-  bindingStore?: BindingStore,
+  ctx?: DispatchContext,
 ): Promise<Response> {
+  const bindingStore = ctx?.bindingStore;
+  const scratchpadManager = ctx?.scratchpadManager;
   // Scope enforcement — fast-fail before any CDP work.
   if (session?.scope === "read-only") {
     if (!READ_ONLY_ALLOWED.has(request.action)) {
@@ -553,6 +561,7 @@ export async function dispatchRequest(
     const targets = (await cdp.getTargets()).filter((t) => t.type === "page");
     const tabs = targets.map((t, index) => {
       const tState = cdp.tabManager.getTab(t.id);
+      const recentActivity = tState ? scratchpadManager?.getRecent(tState.bbTabId) : undefined;
       return {
         index,
         url: t.url,
@@ -562,6 +571,7 @@ export async function dispatchRequest(
         tab: tState?.shortId ?? t.id.slice(-4).toLowerCase(),
         owner: tState?.leaseOwner,
         lease: tState?.leaseMode === "exclusive" ? "exclusive" : undefined,
+        ...(recentActivity ? { recentActivity } : {}),
       };
     });
     return ok(request.id, {
@@ -671,11 +681,13 @@ export async function dispatchRequest(
     // -----------------------------------------------------------------------
     case "snapshot": {
       const snapshotData = await buildSnapshot(cdp, target.id, tab, request);
+      const recentActivity = scratchpadManager?.getRecent(tab.bbTabId) ?? undefined;
       return ok(request.id, {
         title: target.title,
         url: target.url,
         snapshotData,
         tab: shortId,
+        ...(recentActivity ? { recentActivity } : {}),
       });
     }
 

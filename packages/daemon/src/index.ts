@@ -29,6 +29,7 @@ import { StateStore } from "./state-store.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { BindingStore } from "./binding-store.js";
 import { JournalManager } from "./agent-journal.js";
+import { ScratchpadManager } from "./scratchpad-manager.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -267,6 +268,7 @@ async function main(): Promise<void> {
   const agentRegistry = new AgentRegistry(stateStore);
   const bindingStore = new BindingStore(stateStore);
   const journalManager = new JournalManager(stateStore);
+  const scratchpadManager = new ScratchpadManager();
 
   // Graceful shutdown handler (guarded against double-call)
   let shuttingDown = false;
@@ -300,6 +302,7 @@ async function main(): Promise<void> {
     agentRegistry,
     bindingStore,
     journalManager,
+    scratchpadManager,
     onShutdown: shutdown,
     runtimeStatus,
   });
