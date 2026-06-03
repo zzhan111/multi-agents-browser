@@ -337,6 +337,15 @@ export const COMMANDS: CommandDef[] = [
       progress: z.string().describe("Free-text progress note, e.g. 'Filled login form, waiting for OTP'"),
     }),
   },
+  {
+    name: "resume",
+    action: "resume",
+    description: "Retrieve this agent's persistent context: active tab bindings (with anchorUrl/intent/progress) and recent activity journal. Call this on connect to resume unfinished tasks across browser restarts.",
+    category: "tab",
+    args: z.object({
+      limit: z.number().optional().describe("Max journal entries to return (default 50)"),
+    }),
+  },
 
   // ---------------------------------------------------------------------------
   // Network / observation

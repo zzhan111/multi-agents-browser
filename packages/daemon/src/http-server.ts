@@ -25,6 +25,7 @@ import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
 import { DAEMON_DIR } from "@bb-browser/shared";
 import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
+import type { JournalManager } from "./agent-journal.js";
 
 /** Parse a positive integer env var, falling back to `fallback` if unset/invalid. */
 function envInt(name: string, fallback: number): number {
@@ -52,6 +53,7 @@ export interface HttpServerOptions {
   history?: CommandHistory;
   agentRegistry?: AgentRegistry;
   bindingStore?: BindingStore;
+  journalManager?: JournalManager;
   onShutdown?: () => void;
   runtimeStatus?: DaemonRuntimeStatus;
 }
@@ -65,6 +67,7 @@ export class HttpServer {
   private readonly history: CommandHistory | null;
   private readonly agentRegistry: AgentRegistry | null;
   private readonly bindingStore: BindingStore | null;
+  private readonly journalManager: JournalManager | null;
   private readonly onShutdown?: () => void;
   private readonly runtimeStatus: DaemonRuntimeStatus;
   private readonly sessions = new SessionManager();
@@ -79,6 +82,7 @@ export class HttpServer {
     this.history = options.history ?? null;
     this.agentRegistry = options.agentRegistry ?? null;
     this.bindingStore = options.bindingStore ?? null;
+    this.journalManager = options.journalManager ?? null;
     this.onShutdown = options.onShutdown;
     this.runtimeStatus = options.runtimeStatus ?? { needsBrowserConsent: false };
     this.scheduler = new CommandScheduler({
@@ -177,6 +181,8 @@ export class HttpServer {
       this.handleLogs(url, res);
     } else if (req.method === "GET" && url.startsWith("/api/sites")) {
       this.handleSites(url, res);
+    } else if (req.method === "GET" && /^\/api\/agents\/[^/]+\/context/.test(url)) {
+      this.handleAgentContext(url, res);
     } else if (req.method === "GET" && url.startsWith("/api/agents")) {
       this.handleAgents(res);
     } else if (req.method === "GET" && url.startsWith("/api/bindings")) {
@@ -194,6 +200,25 @@ export class HttpServer {
     try {
       const body = await this.readBody(req);
       const request = JSON.parse(body) as Request;
+
+      // resume is pure-state — no CDP needed; handle before the CDP wait
+      if (request.action === "resume") {
+        const sessionId = (req.headers["x-bb-session"] as string | undefined) ?? "default";
+        const sessionLabel = req.headers["x-bb-session-label"] as string | undefined;
+        const explicitAgentId = req.headers["x-bb-agent"] as string | undefined;
+        const agentRec = this.agentRegistry?.resolveOrCreate({ sessionId, explicitAgentId, label: sessionLabel });
+        const session = this.sessions.getOrCreate(sessionId, sessionLabel, undefined, agentRec?.agentId);
+        const agentId = session.agentId;
+        if (!agentId) {
+          this.sendJson(res, 200, { id: request.id, success: false, error: "No stable agent identity — set x-bb-agent header or x-bb-session-label" });
+          return;
+        }
+        const limit = typeof request.limit === "number" ? request.limit : 50;
+        const bindings = this.bindingStore?.forAgent(agentId) ?? [];
+        const journal = this.journalManager?.getRecent(agentId, limit) ?? [];
+        this.sendJson(res, 200, { id: request.id, success: true, agentId, bindings, journal });
+        return;
+      }
 
       // Wait for CDP to be ready (two-phase startup)
       if (!this.cdp.connected) {
@@ -249,6 +274,11 @@ export class HttpServer {
           timeout,
         ]);
         finish?.();
+        if (session.agentId && this.journalManager) {
+          const tab = typeof request.tabId === "string" ? request.tabId : undefined;
+          const url = request.action === "open" ? request.url : undefined;
+          this.journalManager.record(session.agentId, request.action, tab, url, response.success !== false);
+        }
         this.sendJson(res, 200, response);
       } catch (err2) {
         finish?.(false);
@@ -358,6 +388,20 @@ export class HttpServer {
   private handleAgents(res: ServerResponse): void {
     const agents = this.agentRegistry?.all() ?? [];
     this.sendJson(res, 200, { agents });
+  }
+
+  // ---------------------------------------------------------------------------
+  // GET /api/agents/:id/context[?limit=N]
+  // ---------------------------------------------------------------------------
+
+  private handleAgentContext(url: string, res: ServerResponse): void {
+    const parts = url.split("?");
+    const segments = parts[0].split("/");
+    const agentId = segments[3] ?? "";
+    const limit = parseInt(new URL(url, "http://localhost").searchParams.get("limit") ?? "50", 10);
+    const bindings = this.bindingStore?.forAgent(agentId) ?? [];
+    const journal = this.journalManager?.getRecent(agentId, Number.isFinite(limit) && limit > 0 ? limit : 50) ?? [];
+    this.sendJson(res, 200, { agentId, bindings, journal });
   }
 
   // ---------------------------------------------------------------------------

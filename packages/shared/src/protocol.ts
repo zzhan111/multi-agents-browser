@@ -32,6 +32,7 @@ export type ActionType =
   | "tab_claim"
   | "tab_release"
   | "task_update"
+  | "resume"
   | "frame"
   | "frame_main"
   | "dialog"

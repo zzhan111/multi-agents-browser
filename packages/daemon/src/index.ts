@@ -28,6 +28,7 @@ import { CommandHistory } from "./command-history.js";
 import { StateStore } from "./state-store.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { BindingStore } from "./binding-store.js";
+import { JournalManager } from "./agent-journal.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -265,6 +266,7 @@ async function main(): Promise<void> {
   const stateStore = new StateStore(path.join(DAEMON_DIR, "state"));
   const agentRegistry = new AgentRegistry(stateStore);
   const bindingStore = new BindingStore(stateStore);
+  const journalManager = new JournalManager(stateStore);
 
   // Graceful shutdown handler (guarded against double-call)
   let shuttingDown = false;
@@ -297,6 +299,7 @@ async function main(): Promise<void> {
     history,
     agentRegistry,
     bindingStore,
+    journalManager,
     onShutdown: shutdown,
     runtimeStatus,
   });
