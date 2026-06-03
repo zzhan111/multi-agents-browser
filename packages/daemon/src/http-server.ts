@@ -24,6 +24,7 @@ import { SessionManager, type SessionScope } from "./session-state.js";
 import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
 import { DAEMON_DIR } from "@bb-browser/shared";
 import type { AgentRegistry } from "./agent-registry.js";
+import type { BindingStore } from "./binding-store.js";
 
 /** Parse a positive integer env var, falling back to `fallback` if unset/invalid. */
 function envInt(name: string, fallback: number): number {
@@ -50,6 +51,7 @@ export interface HttpServerOptions {
   cdp: CdpConnection;
   history?: CommandHistory;
   agentRegistry?: AgentRegistry;
+  bindingStore?: BindingStore;
   onShutdown?: () => void;
   runtimeStatus?: DaemonRuntimeStatus;
 }
@@ -62,6 +64,7 @@ export class HttpServer {
   private readonly cdp: CdpConnection;
   private readonly history: CommandHistory | null;
   private readonly agentRegistry: AgentRegistry | null;
+  private readonly bindingStore: BindingStore | null;
   private readonly onShutdown?: () => void;
   private readonly runtimeStatus: DaemonRuntimeStatus;
   private readonly sessions = new SessionManager();
@@ -75,6 +78,7 @@ export class HttpServer {
     this.cdp = options.cdp;
     this.history = options.history ?? null;
     this.agentRegistry = options.agentRegistry ?? null;
+    this.bindingStore = options.bindingStore ?? null;
     this.onShutdown = options.onShutdown;
     this.runtimeStatus = options.runtimeStatus ?? { needsBrowserConsent: false };
     this.scheduler = new CommandScheduler({
@@ -175,6 +179,8 @@ export class HttpServer {
       this.handleSites(url, res);
     } else if (req.method === "GET" && url.startsWith("/api/agents")) {
       this.handleAgents(res);
+    } else if (req.method === "GET" && url.startsWith("/api/bindings")) {
+      this.handleBindings(url, res);
     } else {
       this.sendJson(res, 404, { error: "Not found" });
     }
@@ -239,7 +245,7 @@ export class HttpServer {
       const finish = this.history?.record(request.action ?? "unknown", request, session.id);
       try {
         const response = await Promise.race([
-          dispatchRequest(this.cdp, request, session),
+          dispatchRequest(this.cdp, request, session, this.bindingStore ?? undefined),
           timeout,
         ]);
         finish?.();
@@ -352,6 +358,17 @@ export class HttpServer {
   private handleAgents(res: ServerResponse): void {
     const agents = this.agentRegistry?.all() ?? [];
     this.sendJson(res, 200, { agents });
+  }
+
+  // ---------------------------------------------------------------------------
+  // GET /api/bindings[?agentId=<id>]
+  // ---------------------------------------------------------------------------
+
+  private handleBindings(url: string, res: ServerResponse): void {
+    const agentId = new URL(url, "http://localhost").searchParams.get("agentId");
+    const all = this.bindingStore?.all() ?? [];
+    const bindings = agentId ? all.filter((b) => b.agentId === agentId) : all;
+    this.sendJson(res, 200, { bindings });
   }
 
   // ---------------------------------------------------------------------------

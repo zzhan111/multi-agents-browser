@@ -310,11 +310,12 @@ export const COMMANDS: CommandDef[] = [
   {
     name: "tab_claim",
     action: "tab_claim",
-    description: "Claim a tab for this session. Use exclusive mode to prevent other agents from using it.",
+    description: "Claim a tab for this session. Use exclusive mode to prevent other agents from using it. Provide intent to persist a task anchor that survives browser restarts.",
     category: "tab",
     args: z.object({
       tab: z.string().optional().describe("Tab short ID (defaults to current tab)"),
       leaseMode: z.enum(["shared", "exclusive"]).default("exclusive").describe("shared: others can still use the tab; exclusive: only this session may use it"),
+      intent: z.string().optional().describe("Task intent description — persisted to disk so the agent can resume after a browser restart"),
     }),
   },
   {
@@ -324,6 +325,16 @@ export const COMMANDS: CommandDef[] = [
     category: "tab",
     args: z.object({
       tab: z.string().optional().describe("Tab short ID (defaults to current tab)"),
+    }),
+  },
+  {
+    name: "task_update",
+    action: "task_update",
+    description: "Update the progress note on a claimed tab's persistent task anchor. The tab must have been claimed with an intent.",
+    category: "tab",
+    args: z.object({
+      tab: z.string().optional().describe("Tab short ID (defaults to current tab)"),
+      progress: z.string().describe("Free-text progress note, e.g. 'Filled login form, waiting for OTP'"),
     }),
   },
 

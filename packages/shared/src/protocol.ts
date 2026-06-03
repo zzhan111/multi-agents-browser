@@ -31,6 +31,7 @@ export type ActionType =
   | "tab_close"
   | "tab_claim"
   | "tab_release"
+  | "task_update"
   | "frame"
   | "frame_main"
   | "dialog"
@@ -119,6 +120,10 @@ export interface Request {
   limit?: number;
   /** 租约模式（tab_claim 命令使用） */
   leaseMode?: "shared" | "exclusive";
+  /** 任务意图描述（tab_claim 命令使用，持久化到 bindings.json） */
+  intent?: string;
+  /** 任务进度备注（task_update 命令使用） */
+  progress?: string;
   /** 是否在响应中附带 base64 data URL（screenshot 命令使用） */
   includeBase64?: boolean;
 }

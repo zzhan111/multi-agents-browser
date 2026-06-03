@@ -27,6 +27,7 @@ import { TabStateManager } from "./tab-state.js";
 import { CommandHistory } from "./command-history.js";
 import { StateStore } from "./state-store.js";
 import { AgentRegistry } from "./agent-registry.js";
+import { BindingStore } from "./binding-store.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -263,6 +264,7 @@ async function main(): Promise<void> {
   const runtimeStatus: DaemonRuntimeStatus = { needsBrowserConsent: false };
   const stateStore = new StateStore(path.join(DAEMON_DIR, "state"));
   const agentRegistry = new AgentRegistry(stateStore);
+  const bindingStore = new BindingStore(stateStore);
 
   // Graceful shutdown handler (guarded against double-call)
   let shuttingDown = false;
@@ -294,6 +296,7 @@ async function main(): Promise<void> {
     cdp,
     history,
     agentRegistry,
+    bindingStore,
     onShutdown: shutdown,
     runtimeStatus,
   });

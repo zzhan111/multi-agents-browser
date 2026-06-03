@@ -20,6 +20,7 @@ import type {
 import { CdpConnection, type CdpTargetInfo } from "./cdp-connection.js";
 import type { TabState } from "./tab-state.js";
 import type { AgentSession } from "./session-state.js";
+import type { BindingStore } from "./binding-store.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -529,6 +530,7 @@ export async function dispatchRequest(
   cdp: CdpConnection,
   request: Request,
   session?: AgentSession,
+  bindingStore?: BindingStore,
 ): Promise<Response> {
   // Scope enforcement — fast-fail before any CDP work.
   if (session?.scope === "read-only") {
@@ -943,7 +945,17 @@ export async function dispatchRequest(
     case "tab_claim": {
       tab.leaseOwner = session?.id;
       tab.leaseMode = (request.leaseMode ?? "exclusive") as "shared" | "exclusive";
-      return ok(request.id, { tab: shortId, lease: tab.leaseMode, owner: tab.leaseOwner });
+      if (request.intent && session?.agentId && bindingStore) {
+        bindingStore.upsert({
+          bbTabId: tab.bbTabId,
+          agentId: session.agentId,
+          anchorUrl: target.url,
+          intent: request.intent,
+          claimedAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+      }
+      return ok(request.id, { tab: shortId, lease: tab.leaseMode, owner: tab.leaseOwner, bbTabId: tab.bbTabId });
     }
 
     case "tab_release": {
@@ -952,7 +964,16 @@ export async function dispatchRequest(
       }
       tab.leaseOwner = undefined;
       tab.leaseMode = "shared";
+      bindingStore?.remove(tab.bbTabId);
       return ok(request.id, { tab: shortId, released: true });
+    }
+
+    case "task_update": {
+      if (!request.progress) return fail(request.id, "Missing progress parameter");
+      if (!bindingStore) return fail(request.id, "Binding store not available");
+      const updated = bindingStore.updateProgress(tab.bbTabId, request.progress);
+      if (!updated) return fail(request.id, `Tab ${shortId} has no persistent binding — claim it with an intent first`);
+      return ok(request.id, { tab: shortId, bbTabId: tab.bbTabId, progress: request.progress });
     }
 
     // -----------------------------------------------------------------------
