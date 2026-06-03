@@ -168,6 +168,15 @@ export class DaemonClient {
     return this._get(`/api/logs?${q}`);
   }
 
+  async getAgents() {
+    return this._get('/api/agents');
+  }
+
+  async getBindings(agentId = '') {
+    const q = agentId ? `?agentId=${encodeURIComponent(agentId)}` : '';
+    return this._get(`/api/bindings${q}`);
+  }
+
   // ── Internal helpers ──────────────────────────────────────
 
   async _get(path, retry = true) {
