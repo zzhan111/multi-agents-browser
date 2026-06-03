@@ -25,6 +25,8 @@ export interface AgentRecord {
   knownSessionIds: string[];
   firstSeen: number;
   lastSeen: number;
+  /** True for cases 1 & 2 (explicit id or label-based) — persisted across restarts. */
+  persistent?: boolean;
 }
 
 const FILENAME = "agents.json";
@@ -106,6 +108,7 @@ export class AgentRegistry {
     const data = this.store.read<{ records: AgentRecord[] }>(FILENAME);
     if (!data?.records) return;
     for (const rec of data.records) {
+      rec.persistent = true; // loaded from disk ⇒ was intentionally saved
       this.records.set(rec.agentId, rec);
       if (rec.label) {
         this.labelIndex.set(slugify(rec.label), rec.agentId);
@@ -114,11 +117,8 @@ export class AgentRegistry {
   }
 
   save(): void {
-    // Only persist named agents (cases 1 & 2); anonymous sessions are in-memory only.
-    const named = Array.from(this.records.values()).filter(
-      (r) => r.agentId !== r.knownSessionIds[0] || r.label,
-    );
-    this.store.write(FILENAME, { records: named });
+    const toSave = Array.from(this.records.values()).filter((r) => r.persistent);
+    this.store.write(FILENAME, { records: toSave });
   }
 
   // ---------------------------------------------------------------------------
@@ -136,8 +136,11 @@ export class AgentRegistry {
     let changed = false;
 
     if (!rec) {
-      rec = { agentId, label, knownSessionIds: [], firstSeen: now, lastSeen: now };
+      rec = { agentId, label, knownSessionIds: [], firstSeen: now, lastSeen: now, persistent: persist };
       this.records.set(agentId, rec);
+      changed = true;
+    } else if (persist && !rec.persistent) {
+      rec.persistent = true;
       changed = true;
     }
 

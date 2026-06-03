@@ -45,13 +45,13 @@ describe("BindingStore", () => {
     assert.equal(all[0].intent, "Fill and submit the form");
   });
 
-  it("overwrites an existing binding on re-upsert", () => {
+  it("overwrites an existing binding on re-upsert (same agentId+anchorUrl)", () => {
     const { bindings, dir } = makeStore();
     dirs.push(dir);
     bindings.upsert(BASE);
-    bindings.upsert({ ...BASE, anchorUrl: "https://example.com/page2" });
+    bindings.upsert({ ...BASE, intent: "Updated intent" });
     assert.equal(bindings.all().length, 1);
-    assert.equal(bindings.all()[0].anchorUrl, "https://example.com/page2");
+    assert.equal(bindings.all()[0].intent, "Updated intent");
   });
 
   it("updateProgress returns true and updates field", () => {

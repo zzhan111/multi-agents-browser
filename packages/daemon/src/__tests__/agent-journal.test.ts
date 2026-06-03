@@ -64,6 +64,7 @@ describe("JournalManager", () => {
     dirs.push(dir);
     manager.record("persist-agent", "open", undefined, "https://example.com", true);
     manager.record("persist-agent", "click", "tab1", undefined, true);
+    manager.flushAll(); // dirty-flag: must flush before simulating restart
 
     const manager2 = new JournalManager(store);
     const entries = manager2.getRecent("persist-agent");
@@ -89,6 +90,7 @@ describe("JournalManager", () => {
     manager.record("seq-persist", "a", undefined, undefined, true);
     manager.record("seq-persist", "b", undefined, undefined, true);
     const lastSeqBefore = manager.getRecent("seq-persist").at(-1)!.seq;
+    manager.flushAll(); // dirty-flag: must flush before simulating restart
 
     const manager2 = new JournalManager(store);
     manager2.record("seq-persist", "c", undefined, undefined, true);

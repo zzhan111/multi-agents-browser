@@ -212,11 +212,9 @@ export class HttpServer {
         const explicitAgentId = req.headers["x-bb-agent"] as string | undefined;
         const agentRec = this.agentRegistry?.resolveOrCreate({ sessionId, explicitAgentId, label: sessionLabel });
         const session = this.sessions.getOrCreate(sessionId, sessionLabel, undefined, agentRec?.agentId);
-        const agentId = session.agentId;
-        if (!agentId) {
-          this.sendJson(res, 200, { id: request.id, success: false, error: "No stable agent identity — set x-bb-agent header or x-bb-session-label" });
-          return;
-        }
+        // agentId is always set (case 3 falls back to sessionId); anonymous agents
+        // get an ephemeral bucket keyed by their sessionId.
+        const agentId = session.agentId ?? sessionId;
         const limit = typeof request.limit === "number" ? request.limit : 50;
         const bindings = this.bindingStore?.forAgent(agentId) ?? [];
         const journal = this.journalManager?.getRecent(agentId, limit) ?? [];
@@ -282,17 +280,11 @@ export class HttpServer {
           timeout,
         ]);
         finish?.();
-        // Write journal + scratchpad after successful dispatch
+        // Write journal after successful dispatch
         if (session.agentId && this.journalManager) {
           const tab = typeof request.tabId === "string" ? request.tabId : undefined;
           const url = request.action === "open" ? request.url : undefined;
           this.journalManager.record(session.agentId, request.action, tab, url, response.success !== false);
-        }
-        if (this.scratchpadManager && session.currentTargetId) {
-          const tabState = this.cdp.tabManager.getTab(session.currentTargetId);
-          if (tabState) {
-            this.scratchpadManager.record(tabState.bbTabId, request.action, session.agentId);
-          }
         }
         this.sendJson(res, 200, response);
       } catch (err2) {

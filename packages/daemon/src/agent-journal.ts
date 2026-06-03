@@ -29,6 +29,7 @@ interface JournalFile {
 class AgentJournal {
   private entries: JournalEntry[] = [];
   private nextSeq = 1;
+  private dirty = false;
 
   constructor(
     readonly agentId: string,
@@ -42,11 +43,20 @@ class AgentJournal {
       this.entries.shift();
     }
     this.entries.push({ seq: this.nextSeq++, ts: Date.now(), action, tab, url, success });
-    this.save();
+    this.dirty = true;
   }
 
   getRecent(limit = 50): JournalEntry[] {
     return this.entries.slice(-limit);
+  }
+
+  flush(): void {
+    if (!this.dirty) return;
+    this.store.write<JournalFile>(this.filename(), {
+      entries: this.entries,
+      nextSeq: this.nextSeq,
+    });
+    this.dirty = false;
   }
 
   private filename(): string {
@@ -59,13 +69,6 @@ class AgentJournal {
       this.entries = data.entries ?? [];
       this.nextSeq = data.nextSeq ?? this.entries.length + 1;
     }
-  }
-
-  private save(): void {
-    this.store.write<JournalFile>(this.filename(), {
-      entries: this.entries,
-      nextSeq: this.nextSeq,
-    });
   }
 }
 
@@ -80,6 +83,13 @@ export class JournalManager {
 
   getRecent(agentId: string, limit = 50): JournalEntry[] {
     return this.getOrCreate(agentId).getRecent(limit);
+  }
+
+  /** Flush all dirty journals to disk. Call periodically and before shutdown. */
+  flushAll(): void {
+    for (const journal of this.journals.values()) {
+      journal.flush();
+    }
   }
 
   private getOrCreate(agentId: string): AgentJournal {

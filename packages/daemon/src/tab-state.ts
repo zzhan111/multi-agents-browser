@@ -347,8 +347,6 @@ export class TabStateManager {
   private tabs = new Map<string, TabState>(); // targetId -> TabState
   private shortToTarget = new Map<string, string>(); // shortId -> targetId
   private targetToShort = new Map<string, string>(); // targetId -> shortId
-  private bbTabIdToTarget = new Map<string, string>(); // bbTabId -> targetId
-
   /** Generate a globally unique short ID for a target. */
   private generateShortId(targetId: string): string {
     for (let len = 4; len <= targetId.length; len++) {
@@ -381,7 +379,6 @@ export class TabStateManager {
     this.tabs.set(targetId, tab);
     this.shortToTarget.set(shortId, targetId);
     this.targetToShort.set(targetId, shortId);
-    this.bbTabIdToTarget.set(tab.bbTabId, targetId);
     return tab;
   }
 
@@ -391,15 +388,9 @@ export class TabStateManager {
     if (!tab) return;
     this.shortToTarget.delete(tab.shortId);
     this.targetToShort.delete(targetId);
-    this.bbTabIdToTarget.delete(tab.bbTabId);
     this.tabs.delete(targetId);
   }
 
-  /** Get tab by stable bbTabId. */
-  resolveByBbTabId(bbTabId: string): TabState | undefined {
-    const targetId = this.bbTabIdToTarget.get(bbTabId);
-    return targetId ? this.tabs.get(targetId) : undefined;
-  }
 
   /** Get tab by targetId. */
   getTab(targetId: string): TabState | undefined {

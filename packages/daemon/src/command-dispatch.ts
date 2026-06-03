@@ -601,7 +601,7 @@ export async function dispatchRequest(
     session,
   );
 
-  return cdp.runOnTab(target.id, async () => {
+  const response = await cdp.runOnTab(target.id, async () => {
   const tab = cdp.tabManager.getTab(target.id);
   if (!tab) throw new Error("Internal error: tab state not found");
 
@@ -1225,4 +1225,11 @@ export async function dispatchRequest(
       return fail(request.id, `Unknown action: ${request.action}`);
   }
   }); // end runOnTab
+
+  // Record write actions against the actual tab that was operated on.
+  if (scratchpadManager) {
+    const tabState = cdp.tabManager.getTab(target.id);
+    if (tabState) scratchpadManager.record(tabState.bbTabId, request.action, session?.agentId);
+  }
+  return response;
 }

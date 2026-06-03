@@ -10,7 +10,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { writeFileSync, unlinkSync, renameSync, readFileSync } from "node:fs";
+import { writeFileSync, renameSync, readFileSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
@@ -178,24 +178,6 @@ function writeTokenFile(token: string): void {
   }
 }
 
-function cleanupDaemonJson(): void {
-  // Only remove daemon.json if it still advertises *this* process. During a
-  // tray-driven restart the replacement daemon can write its own daemon.json
-  // (new pid) before our async shutdown runs; deleting it then would strand a
-  // healthy daemon with no advertisement and make every WSL agent fail to find
-  // it. So we check ownership and skip if we've already been superseded.
-  try {
-    const info = JSON.parse(readFileSync(DAEMON_JSON, "utf8")) as { pid?: number };
-    if (info.pid !== process.pid) return;
-  } catch {
-    // Missing or unparseable — nothing of ours to clean up.
-    return;
-  }
-  try {
-    unlinkSync(DAEMON_JSON);
-  } catch {}
-}
-
 // ---------------------------------------------------------------------------
 // CDP port discovery (simplified — daemon is told the port)
 // ---------------------------------------------------------------------------
@@ -269,8 +251,9 @@ async function main(): Promise<void> {
   const bindingStore = new BindingStore(stateStore);
   const journalManager = new JournalManager(stateStore);
   const scratchpadManager = new ScratchpadManager();
-  // Evict TTL-expired scratchpad entries every minute.
+  // Evict TTL-expired scratchpad entries every minute; flush journals every 2s.
   const scratchpadGcTimer = setInterval(() => scratchpadManager.gc(), 60_000);
+  const journalFlushTimer = setInterval(() => journalManager.flushAll(), 2_000);
 
   // Graceful shutdown handler (guarded against double-call)
   let shuttingDown = false;
@@ -279,6 +262,8 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.error("[Daemon] Shutting down...");
     clearInterval(scratchpadGcTimer);
+    clearInterval(journalFlushTimer);
+    journalManager.flushAll(); // flush any unflushed entries before exit
     cdp.disconnect();
     await httpServer.stop();
     // daemon.json intentionally NOT deleted — a tray-driven restart may already
