@@ -269,6 +269,8 @@ async function main(): Promise<void> {
   const bindingStore = new BindingStore(stateStore);
   const journalManager = new JournalManager(stateStore);
   const scratchpadManager = new ScratchpadManager();
+  // Evict TTL-expired scratchpad entries every minute.
+  const scratchpadGcTimer = setInterval(() => scratchpadManager.gc(), 60_000);
 
   // Graceful shutdown handler (guarded against double-call)
   let shuttingDown = false;
@@ -276,6 +278,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.error("[Daemon] Shutting down...");
+    clearInterval(scratchpadGcTimer);
     cdp.disconnect();
     await httpServer.stop();
     // daemon.json intentionally NOT deleted — a tray-driven restart may already

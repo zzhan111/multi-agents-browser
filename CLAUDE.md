@@ -41,17 +41,48 @@ ExportDialog 新增"智能等待"开关（默认开启）：
 
 ## 后续待改进项
 
-### 🚧 线 C — 状态持久面 (State Persistence Plane)（2026-06-03 敲定方向，待动手）
+（暂无。）
 
-把多 agent 状态从「内存态、易失」升级为「跨浏览器&daemon 重启持久」。让 agent 独占的 tab 能长期绑定、不因浏览器关掉丢任务、一接入就拿回自己的上下文。
+---
 
-**三个已锁决策**：① 绑定语义 = 任务锚 + 主动续做（存 `anchorUrl/intent/progress`，重启后 agent 重开续做）；② 身份 = daemon 协助派生稳定 agentId；③ 存储 = 先 JSON 快照（原子写，`BB_BROWSER_HOME/state/`）。
+## 线 C — 状态持久面 (State Persistence Plane) 实施记录（2026-06-03）
 
-**阶段**：P0 基座（`state-store.ts` + 稳定 `bbTabId` 与 targetId 解耦 + agentId registry，闸门）→ P1 持久绑定/任务锚 → P2 Agent Journal + 接入握手 context → P3 Tab Scratchpad（短 TTL 交接）→ P4 控制面板 Bindings 视图。
+### ✅ P0 基座
 
-> 完整设计（数据模型 / verify 判据 / 新增 MCP+HTTP 面 / 待定缝）见 [docs/vision-and-roadmap-discussion.md](docs/vision-and-roadmap-discussion.md) 第 4 节「线 C」。
+- `state-store.ts` — 原子 JSON R/W（tmp→rename，Windows fallback）
+- `agent-registry.ts` — 稳定 agentId 派生（`x-bb-agent` > label-slug > sessionId），`agents.json` 落盘
+- `tab-state.ts` — `TabState.bbTabId`（`randomUUID()`），与 CDP targetId 解耦；`resolveByBbTabId()`
+- `session-state.ts` — `AgentSession.agentId?` 字段
+- `http-server.ts` — 解析 `x-bb-agent` header，`/status` tabs 加 `bbTabId`，`GET /api/agents`
+- `index.ts` — 实例化 `StateStore` + `AgentRegistry`
 
-> 方向/脑暴讨论留存见 [docs/vision-and-roadmap-discussion.md](docs/vision-and-roadmap-discussion.md)（data & capability plane 主张、多 agent 接入、adapter 发现 —— 含未决岔路口，可随时捡回继续）
+### ✅ P1 持久绑定/任务锚
+
+- `binding-store.ts` — `TabBinding`（bbTabId/agentId/anchorUrl/intent/progress），`bindings.json` 落盘
+- `tab_claim` 新增 `intent?` 参数 → 写入 binding；`tab_release` 删除 binding
+- 新 MCP 命令 `browser_task_update`（更新 progress）
+- `GET /api/bindings[?agentId=X]`
+
+### ✅ P2 Agent Journal + 接入握手
+
+- `agent-journal.ts` — per-agent 200条 ring buffer，`journal-<id>.json` 落盘，seq 跨重启连续
+- 新 MCP 命令 `browser_resume` — 一次调用返回 `{ agentId, bindings, journal }`
+- `GET /api/agents/:id/context[?limit=N]`
+- dispatch 后写 journal（agentId + action + tab + url + success）
+
+### ✅ P3 Tab Scratchpad
+
+- `scratchpad-manager.ts` — 纯内存，10条 ring，TTL 5min（`BB_SCRATCHPAD_TTL_SECS` 可配），60s GC timer
+- `tab_list` 每 tab 附带 `recentActivity?`；`snapshot` 响应附带 `recentActivity?`
+- `DispatchContext` 接口（合并 `bindingStore` + `scratchpadManager`）
+
+### ✅ P4 控制面板 Bindings 视图
+
+- `BindingsPage.jsx` — 5s 轮询，对比实时 bbTabId 判断活跃/待恢复
+- `BindingsPage.module.css` — 绿色（活跃）/ 黄色（待恢复）卡片样式
+- Dashboard 新增「🔗 绑定」tab；`daemon.js` 加 `getAgents()` / `getBindings()`
+
+> 完整设计与背景讨论见 [docs/vision-and-roadmap-discussion.md](docs/vision-and-roadmap-discussion.md) 第 4 节「线 C」。
 
 ---
 
