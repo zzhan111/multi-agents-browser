@@ -18,7 +18,7 @@
  */
 
 import { execSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -32,6 +32,9 @@ export const MANAGED_BROWSER_DIR = path.join(DAEMON_DIR, "browser");
 
 /** File recording the port of the managed browser, if any. */
 export const MANAGED_PORT_FILE = path.join(MANAGED_BROWSER_DIR, "cdp-port");
+
+/** File recording the PID of the managed browser process, if any. */
+export const MANAGED_PID_FILE = path.join(MANAGED_BROWSER_DIR, "browser-pid");
 
 /**
  * Dedicated, persistent profile for the managed debug browser. A distinct
@@ -130,6 +133,49 @@ export function findBrowserExecutable(): string | null {
   return null;
 }
 
+/**
+ * Kill any previously-launched managed browser and all its child processes.
+ * 360ChromeX uses a per-installation singleton check: a new instance that finds
+ * existing (possibly zombie) renderer/GPU children in the same profile sends an
+ * IPC message to them, gets no response, and exits. Killing the full process
+ * tree before each launch prevents this zombie-interference loop.
+ */
+function killPreviousManagedBrowser(): void {
+  let pid: number | null = null;
+  try {
+    const raw = readFileSync(MANAGED_PID_FILE, "utf8").trim();
+    pid = parseInt(raw, 10);
+    if (!Number.isFinite(pid) || pid <= 0) pid = null;
+  } catch {
+    // no PID file — nothing to kill
+  }
+
+  if (pid !== null) {
+    try {
+      if (process.platform === "win32") {
+        execSync(`taskkill /F /PID ${pid} /T`, { stdio: "ignore" });
+      } else {
+        process.kill(-pid, "SIGKILL");
+      }
+    } catch {
+      // best-effort: process may already be gone
+    }
+  }
+
+  // Also sweep for orphaned children matching our managed profile path, which
+  // accumulate when the browser process dies before it can clean them up.
+  if (process.platform === "win32") {
+    try {
+      execSync(
+        `wmic process where "commandline like '%bb-browser%profile%' and name like '%360ChromeX%'" call terminate`,
+        { stdio: "ignore" },
+      );
+    } catch {
+      // best-effort
+    }
+  }
+}
+
 /** Return true if no process is currently bound to `port` on 127.0.0.1. */
 function isPortFree(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -177,6 +223,11 @@ export async function launchManagedBrowser(
     return { host: existing, port };
   }
 
+  // Kill any previous managed browser + its orphaned child processes before
+  // launching a new one. 360ChromeX's singleton enforcement will otherwise find
+  // these zombie renderer/GPU processes and exit instead of starting fresh.
+  killPreviousManagedBrowser();
+
   // The port passed in was free when the Rust tray checked it, but may have been
   // taken by the time we reach here (TOCTOU, or Windows port-exclusion zones that
   // only reject a bind from Chrome's all-interfaces listener). Verify at the Node
@@ -204,12 +255,14 @@ export async function launchManagedBrowser(
     "about:blank",
   ];
 
+  let launchedPid: number | undefined;
   try {
     const child = spawn(executable, args, {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
     });
+    launchedPid = child.pid;
     child.unref();
   } catch {
     return null;
@@ -217,6 +270,9 @@ export async function launchManagedBrowser(
 
   await mkdir(MANAGED_BROWSER_DIR, { recursive: true });
   await writeFile(MANAGED_PORT_FILE, String(launchPort), "utf8");
+  if (launchedPid !== undefined) {
+    await writeFile(MANAGED_PID_FILE, String(launchedPid), "utf8");
+  }
 
   // 360ChromeX + a cold dedicated profile can take a while to bind the port;
   // poll both IPv4 and IPv6 for up to ~25s.
