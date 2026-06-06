@@ -20,6 +20,7 @@
 import { execSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import path from "node:path";
 import { DAEMON_DIR } from "./daemon-client.js";
 
@@ -129,6 +130,27 @@ export function findBrowserExecutable(): string | null {
   return null;
 }
 
+/** Return true if no process is currently bound to `port` on 127.0.0.1. */
+function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const srv = createServer();
+    srv.listen(port, "127.0.0.1", () => {
+      srv.close(() => resolve(true));
+    });
+    srv.on("error", () => resolve(false));
+  });
+}
+
+/** Scan odd-numbered ports starting from `start` and return the first free one. */
+async function findFreeOddPort(start: number): Promise<number> {
+  let port = start % 2 === 0 ? start + 1 : start;
+  while (port <= 65533) {
+    if (await isPortFree(port)) return port;
+    port += 2;
+  }
+  return start;
+}
+
 /**
  * Launch a managed Chromium browser on the given CDP port under a dedicated
  * profile and wait until it is reachable. Writes the resolved port to
@@ -155,10 +177,20 @@ export async function launchManagedBrowser(
     return { host: existing, port };
   }
 
+  // The port passed in was free when the Rust tray checked it, but may have been
+  // taken by the time we reach here (TOCTOU, or Windows port-exclusion zones that
+  // only reject a bind from Chrome's all-interfaces listener). Verify at the Node
+  // level and fall back to the next free odd port to avoid Chrome entering a
+  // restart loop unable to bind --remote-debugging-port.
+  const launchPort = (await isPortFree(port)) ? port : await findFreeOddPort(port + 2);
+  if (launchPort !== port) {
+    console.error(`[browser-launcher] port ${port} is occupied; using ${launchPort} instead`);
+  }
+
   await mkdir(MANAGED_USER_DATA_DIR, { recursive: true });
 
   const args = [
-    `--remote-debugging-port=${port}`,
+    `--remote-debugging-port=${launchPort}`,
     `--user-data-dir=${MANAGED_USER_DATA_DIR}`,
     "--no-first-run",
     "--no-default-browser-check",
@@ -184,15 +216,15 @@ export async function launchManagedBrowser(
   }
 
   await mkdir(MANAGED_BROWSER_DIR, { recursive: true });
-  await writeFile(MANAGED_PORT_FILE, String(port), "utf8");
+  await writeFile(MANAGED_PORT_FILE, String(launchPort), "utf8");
 
   // 360ChromeX + a cold dedicated profile can take a while to bind the port;
   // poll both IPv4 and IPv6 for up to ~25s.
   const deadline = Date.now() + 25000;
   while (Date.now() < deadline) {
-    const host = await probeCdp(port);
+    const host = await probeCdp(launchPort);
     if (host) {
-      return { host, port };
+      return { host, port: launchPort };
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
