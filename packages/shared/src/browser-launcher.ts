@@ -11,10 +11,8 @@
  *
  * The managed browser runs under a DEDICATED, persistent profile, separate
  * from the user's real profile, so it coexists with the user's normal browser
- * without ever closing or disturbing it. (360ChromeX in particular has a
- * stubborn single-instance model that made closing-and-relaunching the real
- * profile unreliable — it looped, repeatedly killing the user's browser.)
- * Agent logins accumulate in this managed profile and persist across runs.
+ * without ever closing or disturbing it. Agent logins accumulate in this
+ * managed profile and persist across runs.
  */
 
 import { execSync, spawn } from "node:child_process";
@@ -45,34 +43,37 @@ export const MANAGED_PID_FILE = path.join(MANAGED_BROWSER_DIR, "browser-pid");
 const MANAGED_USER_DATA_DIR = path.join(MANAGED_BROWSER_DIR, "profile");
 
 /**
- * Hosts to probe for a CDP endpoint. 360ChromeX may bind the debug port on
- * IPv6 (`::1`) rather than IPv4 loopback, so we try both — otherwise a browser
- * that IS debuggable on `::1` looks unreachable and the daemon relaunch-loops.
+ * Hosts to probe for a CDP endpoint. Some browsers may bind the debug port on
+ * IPv6 (`::1`) rather than IPv4 loopback, so we try both to ensure broad
+ * compatibility.
  */
 const PROBE_HOSTS = ["127.0.0.1", "[::1]"];
 
 /**
- * Probe a CDP endpoint on `port` across IPv4 and IPv6. Returns the host (in URL
- * form, e.g. `127.0.0.1` or `[::1]`) that answered `/json/version`, or null.
+ * Probe a CDP endpoint on `port` across IPv4 and IPv6 in parallel. Returns
+ * the host (e.g. `127.0.0.1` or `[::1]`) that answered `/json/version`, or
+ * null. Parallel probing halves worst-case latency vs. serial.
  */
 export async function probeCdp(port: number): Promise<string | null> {
-  for (const host of PROBE_HOSTS) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 1200);
+  const results = await Promise.all(
+    PROBE_HOSTS.map(async (host): Promise<string | null> => {
       try {
-        const response = await fetch(`http://${host}:${port}/json/version`, {
-          signal: controller.signal,
-        });
-        if (response.ok) return host;
-      } finally {
-        clearTimeout(timeout);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 1200);
+        try {
+          const response = await fetch(`http://${host}:${port}/json/version`, {
+            signal: controller.signal,
+          });
+          return response.ok ? host : null;
+        } finally {
+          clearTimeout(timeout);
+        }
+      } catch {
+        return null;
       }
-    } catch {
-      // try next host
-    }
-  }
-  return null;
+    }),
+  );
+  return results.find((h) => h !== null) ?? null;
 }
 
 /** Locate a Chromium-based browser executable for the current platform. */
@@ -111,8 +112,6 @@ export function findBrowserExecutable(): string | null {
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA ?? "";
     const candidates = [
-      // 360ChromeX
-      ...(localAppData ? [`${localAppData}/360ChromeX/Chrome/Application/360ChromeX.exe`] : []),
       // Google Chrome
       "C:/Program Files/Google/Chrome/Application/chrome.exe",
       "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
@@ -135,10 +134,7 @@ export function findBrowserExecutable(): string | null {
 
 /**
  * Kill any previously-launched managed browser and all its child processes.
- * 360ChromeX uses a per-installation singleton check: a new instance that finds
- * existing (possibly zombie) renderer/GPU children in the same profile sends an
- * IPC message to them, gets no response, and exits. Killing the full process
- * tree before each launch prevents this zombie-interference loop.
+ * This prevents zombie processes from interfering with new launches.
  */
 function killPreviousManagedBrowser(): void {
   let pid: number | null = null;
@@ -162,12 +158,14 @@ function killPreviousManagedBrowser(): void {
     }
   }
 
-  // Also sweep for orphaned children matching our managed profile path, which
-  // accumulate when the browser process dies before it can clean them up.
+  // Sweep any orphaned renderer/GPU children that share our managed profile
+  // path — they accumulate when the browser process crashes without cleaning up.
+  // Match by command line only (no name filter) so Chrome, Edge, Brave, etc.
+  // are all covered.
   if (process.platform === "win32") {
     try {
       execSync(
-        `wmic process where "commandline like '%bb-browser%profile%' and name like '%360ChromeX%'" call terminate`,
+        `wmic process where "commandline like '%bb-browser%profile%'" call terminate`,
         { stdio: "ignore" },
       );
     } catch {
@@ -176,11 +174,15 @@ function killPreviousManagedBrowser(): void {
   }
 }
 
-/** Return true if no process is currently bound to `port` on 127.0.0.1. */
+/**
+ * Return true if no process holds `port` on any interface. Binds `0.0.0.0`
+ * to match Chrome's own all-interfaces bind — a port held by a wildcard or
+ * IPv6-only listener is invisible to a `127.0.0.1`-only probe.
+ */
 function isPortFree(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const srv = createServer();
-    srv.listen(port, "127.0.0.1", () => {
+    srv.listen(port, "0.0.0.0", () => {
       srv.close(() => resolve(true));
     });
     srv.on("error", () => resolve(false));
@@ -196,6 +198,13 @@ async function findFreeOddPort(start: number): Promise<number> {
   }
   return start;
 }
+
+// Track the most-recently launched managed browser so we can avoid killing it
+// during its startup window (Chrome can take > 25 s to bind on slow machines).
+let _managedLaunchMs = 0;
+let _managedLaunchPort = 0;
+/** How long to wait for a freshly-launched browser before giving up and killing it. */
+const LAUNCH_GRACE_MS = 60_000;
 
 /**
  * Launch a managed Chromium browser on the given CDP port under a dedicated
@@ -223,9 +232,24 @@ export async function launchManagedBrowser(
     return { host: existing, port };
   }
 
+  // If we launched a managed browser recently, give it more time instead of
+  // killing it and starting over — prevents an infinite kill-restart cycle on
+  // slow machines where Chrome takes longer than the 25s poll window to bind.
+  const age = Date.now() - _managedLaunchMs;
+  if (age < LAUNCH_GRACE_MS && _managedLaunchPort > 0) {
+    // The launcher may have chosen a different port than `port` — probe it too.
+    if (_managedLaunchPort !== port) {
+      const h = await probeCdp(_managedLaunchPort);
+      if (h) return { host: h, port: _managedLaunchPort };
+    }
+    console.error(
+      `[browser-launcher] managed browser launched ${Math.round(age / 1000)}s ago; still starting up (${Math.round((LAUNCH_GRACE_MS - age) / 1000)}s grace remaining)`,
+    );
+    return null;
+  }
+
   // Kill any previous managed browser + its orphaned child processes before
-  // launching a new one. 360ChromeX's singleton enforcement will otherwise find
-  // these zombie renderer/GPU processes and exit instead of starting fresh.
+  // launching a new one to ensure a clean startup.
   killPreviousManagedBrowser();
 
   // The port passed in was free when the Rust tray checked it, but may have been
@@ -268,14 +292,18 @@ export async function launchManagedBrowser(
     return null;
   }
 
+  // Record launch time/port before polling so the grace check works on re-entry.
+  _managedLaunchMs = Date.now();
+  _managedLaunchPort = launchPort;
+
   await mkdir(MANAGED_BROWSER_DIR, { recursive: true });
   await writeFile(MANAGED_PORT_FILE, String(launchPort), "utf8");
   if (launchedPid !== undefined) {
     await writeFile(MANAGED_PID_FILE, String(launchedPid), "utf8");
   }
 
-  // 360ChromeX + a cold dedicated profile can take a while to bind the port;
-  // poll both IPv4 and IPv6 for up to ~25s.
+  // Browsers can take a while to bind the port after launching; poll both
+  // IPv4 and IPv6 for up to ~25s.
   const deadline = Date.now() + 25000;
   while (Date.now() < deadline) {
     const host = await probeCdp(launchPort);

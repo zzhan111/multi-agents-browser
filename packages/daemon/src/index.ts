@@ -10,7 +10,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { writeFileSync, renameSync, readFileSync } from "node:fs";
+import { writeFileSync, renameSync, readFileSync, unlinkSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
@@ -18,6 +18,7 @@ import path from "node:path";
 import {
   DAEMON_PORT,
   DAEMON_HOST,
+  MANAGED_PORT_FILE,
   launchManagedBrowser,
   probeCdp,
 } from "@bb-browser/shared";
@@ -186,15 +187,14 @@ async function discoverCdpPort(
   host: string,
   port: number,
 ): Promise<{ host: string; port: number }> {
-  // Try the configured port first, on both IPv4 and IPv6 (360ChromeX may bind
-  // the debug port on ::1).
+  // Try the configured port first, on both IPv4 and IPv6.
   const direct = await probeCdp(port);
   if (direct) {
     return { host: direct, port };
   }
 
   // Try the port recorded for a previously-launched managed browser.
-  const managedPortFile = path.join(DAEMON_DIR, "browser", "cdp-port");
+  const managedPortFile = MANAGED_PORT_FILE;
   try {
     const managedPort = parseInt(readFileSync(managedPortFile, "utf8").trim(), 10);
     if (Number.isInteger(managedPort) && managedPort > 0) {
@@ -204,6 +204,23 @@ async function discoverCdpPort(
       }
     }
   } catch {}
+
+  // Scan well-known CDP ports plus a wide run of odd ports from the default.
+  // Windows port-exclusion zones (Hyper-V/WSL) can displace the tray's chosen
+  // port by many hops; 20 extra odd ports (40 apart) covers common exclusion
+  // clusters without exhausting the probe budget.
+  const CDP_SCAN_CANDIDATES: number[] = [9222, 9229];
+  for (let p = DEFAULT_CDP_PORT; p <= DEFAULT_CDP_PORT + 40; p += 2) {
+    CDP_SCAN_CANDIDATES.push(p);
+  }
+  for (const candidate of CDP_SCAN_CANDIDATES) {
+    if (candidate === port) continue; // already tried above
+    const h = await probeCdp(candidate);
+    if (h) {
+      console.error(`[Daemon] Found existing browser at ${h}:${candidate}; using it.`);
+      return { host: h, port: candidate };
+    }
+  }
 
   // Last resort: launch a managed browser under a dedicated profile. The CLI
   // pre-launches Chrome before spawning the daemon, but the tray supervisor
@@ -345,6 +362,8 @@ async function main(): Promise<void> {
 
 /** Guards against overlapping bring-up loops (initial start + reconnect). */
 let bringUpInFlight = false;
+/** Resolves the backoff sleep early when a reconnect arrives mid-sleep. */
+let _bringUpWakeUp: (() => void) | null = null;
 
 /**
  * Background loop that resolves a CDP endpoint and connects, retrying with a
@@ -360,14 +379,19 @@ async function bringUpCdp(
   options: DaemonOptions,
   runtimeStatus: DaemonRuntimeStatus,
 ): Promise<void> {
-  // Only one bring-up loop at a time. The initial start and a reconnect after
-  // a drop can both call this; the guard prevents two competing retry loops.
-  if (bringUpInFlight) return;
+  // Only one bring-up loop at a time. If a reconnect fires while the loop is
+  // sleeping in backoff, wake it up so it retries immediately rather than
+  // waiting the full backoff delay.
+  if (bringUpInFlight) {
+    _bringUpWakeUp?.();
+    return;
+  }
   bringUpInFlight = true;
   try {
     await bringUpCdpLoop(cdp, options, runtimeStatus);
   } finally {
     bringUpInFlight = false;
+    _bringUpWakeUp = null;
   }
 }
 
@@ -377,15 +401,10 @@ async function bringUpCdpLoop(
   runtimeStatus: DaemonRuntimeStatus,
 ): Promise<void> {
   let attempt = 0;
-  // Quiet repeated identical failures. A browser that stays non-debuggable (or
-  // an endpoint that never becomes Chrome) would otherwise emit one log line
-  // every 15s forever — hundreds of identical lines that bloat daemon.log. We
-  // log the first occurrence of each distinct error in full, then suppress
-  // repeats, emitting only a periodic heartbeat so the log still shows we're
-  // alive and retrying.
-  let lastLoggedMsg = "";
-  let suppressed = 0;
-  const HEARTBEAT_EVERY = 20; // ~every 5 min at the 15s cap
+  // Log attempt 1 always, then every 20th — avoids log bloat for long outages
+  // and correctly handles alternating error messages (which would never match a
+  // lastLoggedMsg guard and would log every single retry).
+  const HEARTBEAT_EVERY = 20;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -404,31 +423,36 @@ async function bringUpCdpLoop(
       return;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      // The managed browser uses a dedicated profile, so we never need to close
-      // the user's browser — no consent is required. Keep the flag clear.
       runtimeStatus.needsBrowserConsent = false;
       // Capped exponential backoff: 1s, 2s, 4s … max 15s.
       const delayMs = Math.min(15000, 1000 * 2 ** Math.min(attempt - 1, 4));
       const everySecs = Math.round(delayMs / 1000);
-      if (msg !== lastLoggedMsg) {
-        // New/changed failure reason — log it in full once.
-        lastLoggedMsg = msg;
-        suppressed = 0;
+      if (attempt === 1 || attempt % HEARTBEAT_EVERY === 0) {
         console.error(
-          `[Daemon] CDP bring-up attempt ${attempt} failed: ${msg}. Retrying every ${everySecs}s (suppressing repeats)...`,
-        );
-      } else if (++suppressed % HEARTBEAT_EVERY === 0) {
-        // Same reason as before — heartbeat only, no repeated detail.
-        console.error(
-          `[Daemon] CDP bring-up still failing after ${attempt} attempts (same error). Retrying...`,
+          `[Daemon] CDP bring-up attempt ${attempt} failed: ${msg}. Retrying every ${everySecs}s...`,
         );
       }
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      // Interruptible sleep: a reconnect event resolves this early via
+      // _bringUpWakeUp so we retry immediately instead of waiting the full cap.
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, delayMs);
+        _bringUpWakeUp = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      _bringUpWakeUp = null;
     }
   }
 }
 
 main().catch((error) => {
   console.error("[Daemon] Fatal error:", error);
+  // Remove daemon.json so a tray-spawned replacement doesn't find a stale
+  // entry pointing at this now-dead process. (Graceful shutdown intentionally
+  // skips this because a replacement daemon may already have overwritten it.)
+  try {
+    unlinkSync(DAEMON_JSON);
+  } catch {}
   process.exit(1);
 });
