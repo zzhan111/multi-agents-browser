@@ -284,6 +284,10 @@ export interface ResponseData {
   owner?: string;
   /** 是否已释放租约（tab_release 命令返回） */
   released?: boolean;
+  /** 稳定 tab 句柄（tab_claim/task_update 命令返回，跨浏览器重启存活） */
+  bbTabId?: string;
+  /** 任务进度游标（task_update 命令返回） */
+  progress?: string;
   /** 全局操作序号 */
   seq?: number;
   /** 观测查询游标（用于 since 增量查询） */
