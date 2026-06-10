@@ -146,28 +146,65 @@ async function ensureDaemon(): Promise<void> {
 
 async function sendCommand(request: Request): Promise<Response> {
   await ensureDaemon();
-  const info = await getDaemonInfo();
-  if (!info) {
-    return { id: request.id, success: false, error: "No daemon.json found. Is the daemon running?" };
-  }
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), COMMAND_TIMEOUT);
-  try {
-    const response = await fetch(`${daemonBaseUrl(info)}/command`, {
-      method: "POST",
-      headers: daemonHeaders(info),
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-    if (response.status === 503) {
-      return { id: request.id, success: false, error: CHROME_NOT_CONNECTED_HINT };
+
+  // Try twice: a *connection* failure (not a timeout) may mean the daemon
+  // restarted and daemon.json now advertises a new port/token. Drop the cache
+  // and re-read it once before giving up. A timeout never retries here — see
+  // below.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const info = await getDaemonInfo();
+    if (!info) {
+      return { id: request.id, success: false, error: "No daemon.json found. Is the daemon running?" };
     }
-    return (await response.json()) as Response;
-  } catch {
-    clearTimeout(timeoutId);
-    return { id: request.id, success: false, error: "Failed to start daemon. Run manually: ma-browser daemon" };
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), COMMAND_TIMEOUT);
+    try {
+      const response = await fetch(`${daemonBaseUrl(info)}/command`, {
+        method: "POST",
+        headers: daemonHeaders(info),
+        body: JSON.stringify(request),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (response.status === 503) {
+        return { id: request.id, success: false, error: CHROME_NOT_CONNECTED_HINT };
+      }
+      return (await response.json()) as Response;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      // Our AbortController fired: the daemon accepted the connection but did
+      // not respond within the timeout. The daemon is UP — the target tab is
+      // almost certainly wedged (an open JavaScript dialog blocking the
+      // renderer, or a detached/crashed page). Restarting the daemon does NOT
+      // help and harms other agents sharing it, so never suggest that.
+      if ((err as { name?: string })?.name === "AbortError") {
+        return {
+          id: request.id,
+          success: false,
+          error:
+            `Command timed out after ${COMMAND_TIMEOUT / 1000}s. The daemon is running but the target tab did not respond — ` +
+            `it is likely wedged by an open JavaScript dialog or a detached/crashed page. ` +
+            `Do NOT restart the daemon. Try: browser_dialog to dismiss a dialog, browser_tab_select another tab, ` +
+            `or browser_close this tab and reopen it.`,
+        };
+      }
+      // Connection-level failure (refused / network). The cached daemon address
+      // may be stale after a restart — invalidate and re-read once, then retry.
+      if (attempt === 0) {
+        cachedDaemonInfo = null;
+        continue;
+      }
+      return {
+        id: request.id,
+        success: false,
+        error:
+          `Cannot reach the daemon at ${daemonBaseUrl(info)}. It may be down or restarting. ` +
+          `The tray owns the daemon (connect-only mode) — check the tray and retry; do not spawn one here.`,
+      };
+    }
   }
+  // Loop only falls through after a connection failure on the retry attempt.
+  return { id: request.id, success: false, error: "Cannot reach the daemon after re-reading daemon.json." };
 }
 
 // ---------------------------------------------------------------------------
