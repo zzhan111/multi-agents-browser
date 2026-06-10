@@ -292,6 +292,15 @@ fn build_spawn_config(app: &AppHandle) -> Result<SpawnConfig, String> {
     let entry_str = strip_verbatim_prefix(&daemon_entry.to_string_lossy());
     eprintln!("[runner] daemon entry (node arg): {entry_str}");
 
+    // Compute BB_BROWSER_HOME for the daemon process. The daemon uses this to
+    // locate daemon.json, state, and other persistent files. Must match the logic
+    // in daemon_config.rs to ensure tray and daemon agree on the location.
+    let home_env = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .and_then(|h| h.into_string().ok())
+        .ok_or("Cannot determine home directory")?;
+    let bb_home = format!("{}/.bb-browser", home_env.replace("\\", "/"));
+
     Ok(SpawnConfig {
         program: PathBuf::from("node"),
         args: vec![
@@ -309,7 +318,7 @@ fn build_spawn_config(app: &AppHandle) -> Result<SpawnConfig, String> {
             cdp.to_string(),
         ],
         cwd: None,
-        env: Vec::new(),
+        env: vec![("BB_BROWSER_HOME".to_string(), bb_home)],
         ready_timeout: DEFAULT_READY_TIMEOUT,
     })
 }

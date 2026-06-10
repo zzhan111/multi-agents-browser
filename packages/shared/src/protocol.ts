@@ -40,7 +40,12 @@ export type ActionType =
   | "console"
   | "errors"
   | "trace"
-  | "history";
+  | "history"
+  | "site_list"
+  | "site_search"
+  | "site_info"
+  | "site_run"
+  | "site_update";
 
 /** 请求类型 */
 export interface Request {
@@ -127,6 +132,16 @@ export interface Request {
   progress?: string;
   /** 是否在响应中附带 base64 data URL（screenshot 命令使用） */
   includeBase64?: boolean;
+  /** 站点 adapter 名称（site_info / site_run 使用） */
+  name?: string;
+  /** 站点 adapter 位置参数（site_run 使用） */
+  args?: string[];
+  /** 站点 adapter 命名参数（site_run 使用，等价 CLI 的 --key value） */
+  namedArgs?: Record<string, string>;
+  /** 搜索关键词（site_search 使用） */
+  query?: string;
+  /** 域名过滤（site_search 使用） */
+  domain?: string;
 }
 
 /** 元素引用信息 */

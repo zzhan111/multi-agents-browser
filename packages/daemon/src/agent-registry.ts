@@ -31,6 +31,9 @@ export interface AgentRecord {
 
 const FILENAME = "agents.json";
 
+/** Maximum number of anonymous (non-persistent) records kept in memory. */
+const MAX_ANON_RECORDS = 500;
+
 /** Normalise a human label to a stable lookup key (lowercase, trimmed). */
 function slugify(label: string): string {
   return label.trim().toLowerCase();
@@ -93,11 +96,23 @@ export class AgentRegistry {
       lastSeen: now,
     };
     this.records.set(sessionId, rec);
+    this.evictAnonIfNeeded();
     return rec;
   }
 
   all(): AgentRecord[] {
     return Array.from(this.records.values());
+  }
+
+  /** Evict the oldest anonymous records when the cap is exceeded. */
+  private evictAnonIfNeeded(): void {
+    const anon = Array.from(this.records.values()).filter((r) => !r.persistent);
+    if (anon.length <= MAX_ANON_RECORDS) return;
+    anon.sort((a, b) => a.lastSeen - b.lastSeen);
+    const toEvict = anon.slice(0, anon.length - MAX_ANON_RECORDS);
+    for (const r of toEvict) {
+      this.records.delete(r.agentId);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -119,6 +134,28 @@ export class AgentRegistry {
   save(): void {
     const toSave = Array.from(this.records.values()).filter((r) => r.persistent);
     this.store.write(FILENAME, { records: toSave });
+  }
+
+  /**
+   * Rename an existing named agent. Updates the label index so future
+   * connections using the new label resolve to the same agentId.
+   * Returns false if the agentId is not found or is anonymous.
+   */
+  updateLabel(agentId: string, label: string): boolean | "conflict" {
+    const rec = this.records.get(agentId);
+    if (!rec || !rec.persistent) return false;
+    const trimmed = label.trim();
+    if (!trimmed) return false;
+    // Reject if the slug is already claimed by a different agent.
+    const slug = slugify(trimmed);
+    const existing = this.labelIndex.get(slug);
+    if (existing && existing !== agentId) return "conflict";
+    // Remove old label from index, set new one.
+    if (rec.label) this.labelIndex.delete(slugify(rec.label));
+    rec.label = trimmed;
+    this.labelIndex.set(slug, agentId);
+    this.save();
+    return true;
   }
 
   // ---------------------------------------------------------------------------

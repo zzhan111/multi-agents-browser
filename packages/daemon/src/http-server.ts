@@ -146,7 +146,7 @@ export class HttpServer {
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
     // CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-BB-Session, X-BB-Session-Label, X-BB-Session-Scope");
 
     if (req.method === "OPTIONS") {
@@ -187,8 +187,12 @@ export class HttpServer {
       this.handleSites(url, res);
     } else if (req.method === "GET" && /^\/api\/agents\/[^/]+\/context/.test(url)) {
       this.handleAgentContext(url, res);
+    } else if (req.method === "PATCH" && /^\/api\/agents\/[^/]+$/.test(url)) {
+      void this.handleAgentPatch(url, req, res);
     } else if (req.method === "GET" && url.startsWith("/api/agents")) {
       this.handleAgents(res);
+    } else if (req.method === "POST" && /^\/api\/bindings\/[^/]+\/release$/.test(url)) {
+      this.handleBindingRelease(url, res);
     } else if (req.method === "GET" && url.startsWith("/api/bindings")) {
       this.handleBindings(url, res);
     } else {
@@ -218,6 +222,7 @@ export class HttpServer {
         const limit = typeof request.limit === "number" ? request.limit : 50;
         const bindings = this.bindingStore?.forAgent(agentId) ?? [];
         const journal = this.journalManager?.getRecent(agentId, limit) ?? [];
+        this.history?.record("resume", request, session.id)?.();
         this.sendJson(res, 200, { id: request.id, success: true, agentId, bindings, journal });
         return;
       }
@@ -398,6 +403,40 @@ export class HttpServer {
   }
 
   // ---------------------------------------------------------------------------
+  // PATCH /api/agents/:id  — rename an agent
+  // ---------------------------------------------------------------------------
+
+  private async handleAgentPatch(url: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const agentId = url.split("/")[3] ?? "";
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(await this.readBody(req)) as Record<string, unknown>;
+    } catch {
+      this.sendJson(res, 400, { error: "Invalid JSON" });
+      return;
+    }
+    const rawLabel = typeof body.label === "string" ? body.label.trim() : null;
+    if (!rawLabel) {
+      this.sendJson(res, 400, { error: "Missing or invalid 'label' field" });
+      return;
+    }
+    if (!this.agentRegistry) {
+      this.sendJson(res, 503, { error: "Agent registry not available" });
+      return;
+    }
+    const result = this.agentRegistry.updateLabel(agentId, rawLabel);
+    if (result === "conflict") {
+      this.sendJson(res, 409, { error: `Label '${rawLabel}' is already used by another agent` });
+      return;
+    }
+    if (!result) {
+      this.sendJson(res, 404, { error: "Agent not found or anonymous (cannot rename)" });
+      return;
+    }
+    this.sendJson(res, 200, { agentId, label: rawLabel });
+  }
+
+  // ---------------------------------------------------------------------------
   // GET /api/agents/:id/context[?limit=N]
   // ---------------------------------------------------------------------------
 
@@ -420,6 +459,32 @@ export class HttpServer {
     const all = this.bindingStore?.all() ?? [];
     const bindings = agentId ? all.filter((b) => b.agentId === agentId) : all;
     this.sendJson(res, 200, { bindings });
+  }
+
+  // ---------------------------------------------------------------------------
+  // POST /api/bindings/:bbTabId/release  — operator force-release
+  // ---------------------------------------------------------------------------
+
+  private handleBindingRelease(url: string, res: ServerResponse): void {
+    // URL: /api/bindings/<bbTabId>/release
+    const bbTabId = url.split("/")[3] ?? "";
+    if (!bbTabId) {
+      this.sendJson(res, 400, { error: "Missing bbTabId" });
+      return;
+    }
+
+    // Clear the in-memory lease on the live tab (if the tab still exists).
+    const liveTab = this.cdp.tabManager.allTabs().find((t) => t.bbTabId === bbTabId);
+    if (liveTab) {
+      liveTab.leaseOwner = undefined;
+      liveTab.leaseMode = "shared";
+    }
+
+    // Remove the persistent binding (whether or not the tab is live).
+    const removed = this.bindingStore?.all().some((b) => b.bbTabId === bbTabId) ?? false;
+    this.bindingStore?.remove(bbTabId);
+
+    this.sendJson(res, 200, { bbTabId, released: true, wasLive: !!liveTab, hadBinding: removed });
   }
 
   // ---------------------------------------------------------------------------

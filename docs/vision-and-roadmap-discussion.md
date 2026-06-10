@@ -124,8 +124,10 @@ agent 连上 → 标识身份 → 拿到「被允许看到」的 scoped catalog
 
 - [x] ~~是否新增 daemon `/api/sites` 目录端点~~\
   ✅ 已实现。路由 `http-server.ts:159`、处理 `:304`（`GET /api/sites?q=&domain=&invalidate=1`），由 `site-catalog.ts` 驱动。`site_list`/`site_search` MCP 工具优先走 daemon 端点，fallback CLI。
-- [ ] agent 端：做强 `site_search`/`site_recommend` vs 动态注册真工具，二选一或都做
-- [ ] UI 端：面板 Capabilities Tab 的优先级
+- [x] ~~agent 端：做强 `site_search`/`site_recommend` vs 动态注册真工具，二选一或都做~~\
+  ✅ 方向已定（2026-06-04）：两者是依赖关系，非二选一。**路 X（发现增强）是路 Y（动态真工具）的前置地基。** 序见下方「线 D」章节。
+- [x] ~~UI 端：面板 Capabilities Tab 的优先级~~\
+  ✅ 方向已定（2026-06-04）：Capabilities Tab 是线 D 第一步，与发现增强共用同一份 `/api/sites` 数据，见「线 D」章节。
 
 ### 更远（暂未展开，先记下）
 
@@ -213,6 +215,57 @@ interface TabScratchpad {
 1. **agentId 派生指纹粒度** — MCP client name/version 可能粗（同 client 多实例难分），`label` 是主消歧手段，可能要约定 agent 接入时给 label。
 2. **「永久」的边界** — journal 是 capped ring（如 per-agent 2000 条 + 字节上限），不是真无限；与「JSON-first，够痛再迁」一致。
 3. **单写者前提** — 所有持久化写必须走 daemon（单 daemon 独占成立），P0 需复核没有旁路写。
+
+---
+
+## 5. 线 D — 线 A 收尾（发现 → 调用 → 生产）（2026-06-04 敲定方向）
+
+> 结合 `browser-for-agents-vision.md`（2026-06-04 加入 docs/）中的产品方向，对现有线 A 未决项做最终排序与实施路线。
+
+### 5.1 核实的技术现状（2026-06-04 代码复核）
+
+| 模块 | 现状 | 结论 |
+|---|---|---|
+| MCP server 注册机制 | `startMcpServer()` 只做 `connect()`，所有工具**模块加载时一次性静态注册**（含 `for(cmd of COMMANDS)` 循环，`mcp/index.ts:528`） | 路 Y（动态真工具）需新建动态注册机制，非改循环 |
+| MCP SDK 版本 | `@modelcontextprotocol/sdk@^1.12.1`，**支持** `registerTool`/`list_changed` | 动态注册协议上可行，但须 spike 验证 harness 行为 |
+| `site-catalog.ts` | TTL 缓存（60s）+ domain 过滤 + 局部/社区优先级合并，`queryCatalog` 是 **substring 匹配** | 语义/热度排序是 delta，地基已在 |
+| `site_recommend` | 仍走 CLI（`runSiteCli(["recommend", "--json"])`，`mcp/index.ts:671`） | 接 daemon 是一个改动点 |
+| `command-history` 热度数据 | **200 条易失 ring，明确 no file I/O**，跨重启清零 | 热度先用易失 ring（最近热度），不引入新持久计数器 |
+| 一键冻结 adapter | trace 导出系统成熟，但生成的是 **UI 操作脚本**（click/fill），与"network→fetch 封装+响应 schema 推断"不重合 | 冻结器是独立代码生成器，几乎从零，最重 |
+
+### 5.2 关键岔路：路 X vs 路 Y（已定：依赖关系，非二选一）
+
+- **路 X（发现增强）**：保持 `site_run` 泛型派发，把 `site_search`/`site_recommend` 做强（语义 + 域名感知 + 热度排序）。两步走：search → run。不碰工具列表，风险低，地基已在。
+- **路 Y（动态真工具）**：agent 锁定平台后 daemon 推 `twitter_search(query)` 真工具进来，带类型、单步调用。
+
+**已定**：路 X 是路 Y 的必要前置——无论走不走路 Y，agent 都得先"发现该激活哪个 adapter"。路 X 先做，路 Y 先 spike 验证，再决定是否投入完整生命周期。
+
+### 5.3 三步路线（vision 文档排序 1→2→3 颠倒；实际应按地基厚度降序）
+
+| 步 | 内容 | 地基 | 风险 | verify |
+|---|---|---|---|---|
+| **Step 1** ✦ 优先 | 发现强化 + Capabilities Tab | `/api/sites` + `site-catalog.ts` 全在 | 最低 | `site_search("社交")` 按相关度+热度排序；在 twitter.com 活跃 tab 下 `site_recommend` 优先返回 twitter 系；UI 能搜/填表单/跑出 JSON |
+| **Step 2** | 动态真工具 spike（半天）| SDK 1.12.1 支持 `list_changed` | 中（押注 harness 渲染行为）| spike 结论三选一：直接渲染 / deferred 延迟加载 / 不感知（→ 退回路 X 兜底） |
+| **Step 3** ✦ 最后 | 一键冻结 adapter | trace 导出系统成熟但不重合 | 最高 | 等 Step 1 顺畅、Step 2 定形后再决定冻结器吐出的结构 |
+
+### 5.4 Step 1 实施细节
+
+**daemon 侧三个 delta（均在已有地基上）：**
+
+1. `queryCatalog` 排序：在 substring 过滤后，按"最近调用频率"重排。热度来源：`command-history` 的 200 条易失 ring 足够（语义正确：推荐**最近**在用的）；不引入持久计数器，与"够痛再迁"一致。
+2. `site_recommend` 接 daemon：从 `runSiteCli(["recommend"])` 改为走 `getCatalog` + 按**当前活跃 tab domain** 过滤（`site-catalog.ts:queryCatalog` 的 domain 参数已在）。
+3. 语义搜索：103 个 adapter 的小目录，**先不上向量检索**；把 `queryCatalog` 的 substring 扩成"分词 + 别名匹配"通常就够。不被 vision 文档"语义搜索"四字诱导过早上重武器。
+
+**UI 侧：新 Capabilities Tab**
+- 新 `CapabilitiesPage.jsx`，消费 `/api/sites`（端点已在）。
+- 按平台分组，显示签名 / 示例 / `readOnly` / local-vs-community / 最近调用状态。
+- `@meta.args` 渲染成表单 → 一键调 `site_run` → 内联看 JSON（adapter 版 Postman）。
+- 复用 `BindingsPage` / `ActivityPage` 的 Dashboard tab 框架，不引入新路由。
+
+### 5.5 待定细节（Step 2 spike 完再定）
+
+- **路 Y 的激活/回收生命周期**：激活时机（agent 锁定域名？主动声明？）、回收时机（`tab_release` 时？idle 超时？）。依赖 harness 渲染行为的 spike 结论。
+- **动态工具 schema 从哪来**：`@meta.args`（当前是文本描述、无类型）→ zod schema 的推断/人工补全策略。
 
 ---
 

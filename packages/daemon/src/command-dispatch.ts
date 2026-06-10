@@ -22,6 +22,15 @@ import type { TabState } from "./tab-state.js";
 import type { AgentSession } from "./session-state.js";
 import type { BindingStore } from "./binding-store.js";
 import type { ScratchpadManager } from "./scratchpad-manager.js";
+import {
+  listAdapters,
+  searchAdapters,
+  findAdapter,
+  fuzzyAdapterNames,
+  prepareAdapterScript,
+  matchTabOrigin,
+  updateAdapters,
+} from "./site-runner.js";
 
 export interface DispatchContext {
   bindingStore?: BindingStore;
@@ -522,14 +531,140 @@ const READ_ONLY_ALLOWED = new Set([
   "tab_list",
   "history",
   "wait",
+  // Lease management is exempt: a session must always be able to release or
+  // reclaim the tab it holds, regardless of scope.
+  "tab_release", "tab_claim",
+  // Site adapter discovery is pure catalog reads (no browser side effects).
+  // site_run is intentionally excluded — it runs arbitrary adapter JS.
+  "site_list", "site_search", "site_info",
 ]);
 
 /** Returns true if the request involves running JavaScript via Runtime.evaluate. */
 function isEvalLike(request: Request): boolean {
   return (
     request.action === "eval" ||
+    // site_run executes adapter JS via eval, so it requires eval permission.
+    request.action === "site_run" ||
     (request.action === "trace" && request.traceCommand === "start")
   );
+}
+
+// ---------------------------------------------------------------------------
+// Site adapter execution
+// ---------------------------------------------------------------------------
+
+/**
+ * Poll a freshly-opened tab until the document is ready (best-effort).
+ * Adapters typically fetch the site's own API, which needs the document to
+ * exist for the origin's cookies — so "interactive" is sufficient.
+ */
+async function waitForTabReady(
+  cdp: CdpConnection,
+  targetId: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const rs = await cdp.evaluate<string>(targetId, "document.readyState", false);
+      if (rs === "complete" || rs === "interactive") return;
+    } catch {
+      // target may not be attached yet — retry
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+/**
+ * Execute a site adapter: resolve the adapter + its target tab, run the adapter
+ * JS via eval, and normalise the result. The adapter runs in the page context
+ * of a tab on the adapter's domain so its fetch() calls carry real cookies.
+ */
+async function handleSiteRun(
+  cdp: CdpConnection,
+  request: Request,
+  session?: AgentSession,
+): Promise<Response> {
+  if (!request.name) return fail(request.id, "Missing 'name' parameter for site_run");
+
+  const adapter = findAdapter(request.name);
+  if (!adapter) {
+    const fuzzy = fuzzyAdapterNames(request.name);
+    const hint = fuzzy.length
+      ? ` Did you mean: ${fuzzy.join(", ")}?`
+      : " Run site_list to see available adapters.";
+    return fail(request.id, `Site adapter '${request.name}' not found.${hint}`);
+  }
+
+  const prep = prepareAdapterScript(adapter, request.args ?? [], request.namedArgs ?? {});
+  if ("error" in prep) return fail(request.id, prep.error);
+
+  // Resolve target tab: explicit tabId > domain match > new domain tab > active.
+  let targetId: string;
+  if (request.tabId !== undefined) {
+    targetId = (await cdp.ensurePageTarget(String(request.tabId), session)).id;
+  } else if (adapter.domain) {
+    const pages = (await cdp.getTargets()).filter((t) => t.type === "page");
+    // Skip tabs exclusively held by another session — can't run adapter there.
+    const match = pages.find((t) => {
+      if (!matchTabOrigin(t.url, adapter.domain)) return false;
+      const ts = cdp.tabManager.getTab(t.id);
+      return !ts || ts.leaseMode !== "exclusive" || ts.leaseOwner === session?.id;
+    });
+    if (match) {
+      targetId = match.id;
+      await cdp.attachAndEnable(targetId);
+    } else {
+      const created = await cdp.browserCommand<{ targetId: string }>(
+        "Target.createTarget",
+        { url: `https://${adapter.domain}`, background: true },
+      );
+      targetId = created.targetId;
+      await cdp.attachAndEnable(targetId);
+      await waitForTabReady(cdp, targetId);
+    }
+  } else {
+    targetId = (await cdp.ensurePageTarget(undefined, session)).id;
+  }
+
+  return cdp.runOnTab(targetId, async () => {
+    const tab = cdp.tabManager.getTab(targetId);
+    // Exclusive-lease enforcement (mirrors the main dispatch path).
+    if (
+      tab &&
+      tab.leaseMode === "exclusive" &&
+      tab.leaseOwner &&
+      tab.leaseOwner !== session?.id
+    ) {
+      return fail(request.id, `Tab ${tab.shortId} is exclusively held by another session`);
+    }
+    tab?.recordAction();
+
+    let raw: unknown;
+    try {
+      raw = await cdp.evaluate<unknown>(targetId, prep.script, true);
+    } catch (e) {
+      return fail(request.id, `Adapter execution failed: ${buildRequestError(e).message}`);
+    }
+
+    let parsed: unknown = raw;
+    if (typeof raw === "string") {
+      try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+    }
+
+    // Adapters signal failure by returning an { error } object.
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "error" in parsed) {
+      const eo = parsed as { error?: unknown; hint?: unknown };
+      const base = String(eo.error ?? "adapter error");
+      const hint = eo.hint ? ` (${String(eo.hint)})` : "";
+      const login = adapter.domain
+        ? ` — make sure you are logged in to ${adapter.domain} in Chrome`
+        : "";
+      return fail(request.id, `${base}${hint}${login}`);
+    }
+
+    return ok(request.id, parsed as unknown as ExtResponseData);
+  });
 }
 
 export async function dispatchRequest(
@@ -587,6 +722,7 @@ export async function dispatchRequest(
       { url, background: true },
     );
     await cdp.attachAndEnable(created.targetId);
+    if (session) session.currentTargetId = created.targetId;
     const newTab = cdp.tabManager.getTab(created.targetId);
     return ok(request.id, {
       tabId: created.targetId,
@@ -594,6 +730,33 @@ export async function dispatchRequest(
       tab: newTab?.shortId ?? created.targetId.slice(-4).toLowerCase(),
       seq: newTab?.recordAction(),
     });
+  }
+
+  // Site adapters. Discovery (list/search/info) needs no page target; site_run
+  // resolves/creates its own domain-matched tab, so all are handled before
+  // ensurePageTarget() (which would throw when no page exists yet).
+  if (request.action === "site_list") {
+    return ok(request.id, listAdapters() as unknown as ExtResponseData);
+  }
+  if (request.action === "site_search") {
+    return ok(
+      request.id,
+      searchAdapters(request.query, request.domain) as unknown as ExtResponseData,
+    );
+  }
+  if (request.action === "site_info") {
+    if (!request.name) return fail(request.id, "Missing 'name' parameter for site_info");
+    const adapter = findAdapter(request.name);
+    if (!adapter) return fail(request.id, `Site adapter '${request.name}' not found`);
+    return ok(request.id, adapter as unknown as ExtResponseData);
+  }
+  if (request.action === "site_run") {
+    return handleSiteRun(cdp, request, session);
+  }
+  if (request.action === "site_update") {
+    const result = updateAdapters();
+    if ("error" in result) return fail(request.id, `${result.error} — manual fix: ${result.action}`);
+    return ok(request.id, result as unknown as ExtResponseData);
   }
 
   const target = await cdp.ensurePageTarget(
@@ -981,7 +1144,7 @@ export async function dispatchRequest(
     }
 
     case "task_update": {
-      if (!request.progress) return fail(request.id, "Missing progress parameter");
+      if (request.progress == null) return fail(request.id, "Missing progress parameter");
       if (!bindingStore) return fail(request.id, "Binding store not available");
       const updated = bindingStore.updateProgress(tab.bbTabId, request.progress);
       if (!updated) return fail(request.id, `Tab ${shortId} has no persistent binding — claim it with an intent first`);

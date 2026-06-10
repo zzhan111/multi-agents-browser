@@ -180,6 +180,103 @@
   flex-shrink: 0;
 }
 
+/* ── Inline name editor ── */
+.nameEditor {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nameInput {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 6px;
+  outline: none;
+  width: 140px;
+}
+
+.nameErr {
+  font-size: 10px;
+  color: #f85149;
+}
+
+/* ── Exclusive lease badge ── */
+.exclusiveBadge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #e3a853;
+  background: rgba(227, 168, 83, 0.15);
+  border: 1px solid rgba(227, 168, 83, 0.30);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+/* ── Release button ── */
+.releaseBtn {
+  font-size: 10px;
+  color: #f85149;
+  background: none;
+  border: 1px solid rgba(248, 81, 73, 0.35);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 1px 6px;
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.releaseBtn:hover { background: rgba(248, 81, 73, 0.10); }
+
+.releaseConfirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.releaseYes {
+  font-size: 10px;
+  color: #f85149;
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid rgba(248, 81, 73, 0.40);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 1px 6px;
+}
+.releaseYes:disabled { opacity: 0.5; cursor: default; }
+
+.releaseNo {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  padding: 1px 6px;
+}
+.releaseNo:hover { background: var(--bg-hover); }
+
+/* ── Copy config button ── */
+.copyBtn {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 3px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.copyBtn:hover { background: var(--bg-hover); color: var(--text-primary); }
+
 /* ── Legend ── */
 .legend {
   font-size: 11px;

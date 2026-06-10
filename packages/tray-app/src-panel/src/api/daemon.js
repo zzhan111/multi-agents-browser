@@ -177,6 +177,29 @@ export class DaemonClient {
     return this._get(`/api/bindings${q}`);
   }
 
+  async releaseBinding(bbTabId) {
+    const headers = {};
+    if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+    const res = await fetch(
+      `${this._baseUrl()}/api/bindings/${encodeURIComponent(bbTabId)}/release`,
+      { method: 'POST', headers },
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async renameAgent(agentId, label) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+    const res = await fetch(`${this._baseUrl()}/api/agents/${encodeURIComponent(agentId)}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ label }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
   // ── Internal helpers ──────────────────────────────────────
 
   async _get(path, retry = true) {

@@ -36,3 +36,12 @@ coverage/
 
 # Scratch / verification dumps
 temp_*.json
+*.diff
+
+# Build outputs (daemon bundle)
+/daemon/
+/resources/daemon/
+
+# Local agent configs
+.claude/
+.reasonix/
