@@ -296,8 +296,8 @@ export interface ResponseData {
   snapshotData?: SnapshotData;
   /** 获取的文本或属性值（get 操作返回） */
   value?: string;
-  /** 截图路径（screenshot 操作返回） */
-  screenshotPath?: string;
+  /** 截图路径（screenshot 操作返回，daemon 实际以 `path` 键返回） */
+  path?: string;
   /** 截图 data URL（screenshot 操作返回） */
   dataUrl?: string;
   /** eval 执行结果 */
