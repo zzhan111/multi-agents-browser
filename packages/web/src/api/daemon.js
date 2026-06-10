@@ -1,6 +1,6 @@
 /**
  * Daemon HTTP 客户端
- * 连接 bb-browser daemon，发送命令并接收响应
+ * 连接 ma-browser daemon，发送命令并接收响应
  */
 
 const DAEMON_HOST = 'localhost';

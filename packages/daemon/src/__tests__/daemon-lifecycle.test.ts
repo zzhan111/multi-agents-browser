@@ -26,7 +26,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ---------------------------------------------------------------------------
 
 // Use isolated temp dir to avoid conflicts with parallel test suites
-const TEST_HOME = path.join(os.tmpdir(), `bb-browser-test-lifecycle-${process.pid}`);
+const TEST_HOME = path.join(os.tmpdir(), `ma-browser-test-lifecycle-${process.pid}`);
 mkdirSync(TEST_HOME, { recursive: true });
 process.env.BB_BROWSER_HOME = TEST_HOME;
 const DAEMON_JSON = path.join(TEST_HOME, "daemon.json");

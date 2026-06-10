@@ -2,7 +2,7 @@
  * Shared daemon HTTP client utilities.
  *
  * Used by CLI (daemon-manager), MCP server, and Edge Clip provider
- * to communicate with the bb-browser daemon process.
+ * to communicate with the ma-browser daemon process.
  */
 
 import { readFile } from "node:fs/promises";

@@ -1,5 +1,5 @@
 /**
- * bb-browser 共享常量
+ * ma-browser 共享常量
  */
 
 /** Daemon HTTP 服务端口 */

@@ -11,7 +11,7 @@
 import { readFileSync, mkdirSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import path from "node:path";
-import { DAEMON_DIR } from "@bb-browser/shared";
+import { DAEMON_DIR } from "@ma-browser/shared";
 import { getCatalog, queryCatalog, invalidateCatalog, type SiteAdapter } from "./site-catalog.js";
 
 const COMMUNITY_REPO = "https://github.com/epiral/bb-sites.git";

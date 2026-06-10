@@ -1,5 +1,5 @@
 /**
- * bb-browser-provider — Edge Clip provider for Pinix Hub
+ * ma-browser-provider — Edge Clip provider for Pinix Hub
  *
  * Uses @pinixai/hub-client + @bufbuild/protobuf for typed ProviderStream.
  * Registers a "browser" clip (core commands) plus one clip per site platform.
@@ -57,9 +57,9 @@ declare const process: {
 // Constants
 // ---------------------------------------------------------------------------
 
-const LOG_PREFIX = "[bb-browser-provider]";
+const LOG_PREFIX = "[ma-browser-provider]";
 const DEFAULT_HUB_URL = "http://127.0.0.1:9000";
-const PROVIDER_NAME = "bb-browser";
+const PROVIDER_NAME = "ma-browser";
 const BROWSER_CLIP_ALIAS = "browser";
 const BROWSER_CLIP_PACKAGE = "browser";
 const BROWSER_CLIP_DOMAIN = "浏览器";
@@ -367,7 +367,7 @@ function encodeOutput(value: unknown): Uint8Array {
 /** Run a site adapter via CLI */
 function runSiteCli(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile("bb-browser", ["site", ...args], { timeout: 30000, encoding: "utf8" }, (err, stdout, stderr) => {
+    execFile("ma-browser", ["site", ...args], { timeout: 30000, encoding: "utf8" }, (err, stdout, stderr) => {
       if (err) {
         const distPath = new URL("../dist/cli.js", import.meta.url).pathname;
         execFile("node", [distPath, "site", ...args], { timeout: 30000, encoding: "utf8" }, (err2, stdout2, stderr2) => {
@@ -778,7 +778,7 @@ function parseArgs(argv: string[]): string {
       if (!val || val.startsWith("--")) throw new Error(`Missing value for ${arg}`);
       hubUrl = val; i++;
     } else if (arg === "--help" || arg === "-h") {
-      console.log(`Usage: bb-browser-provider [--hub-url <url>]\n\nOptions:\n  --hub-url <url>  Hub gRPC URL (default: ${DEFAULT_HUB_URL})`);
+      console.log(`Usage: ma-browser-provider [--hub-url <url>]\n\nOptions:\n  --hub-url <url>  Hub gRPC URL (default: ${DEFAULT_HUB_URL})`);
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${arg}`);

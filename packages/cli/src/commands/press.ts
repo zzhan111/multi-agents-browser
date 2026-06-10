@@ -1,13 +1,13 @@
 /**
  * press 命令 - 发送键盘按键
- * 用法：bb-browser press <key>
+ * 用法：ma-browser press <key>
  *
  * key 支持格式：
  *   - 单键："Enter", "Tab", "Escape", "Backspace", "ArrowUp" 等
  *   - 组合键："Control+a", "Control+c", "Control+v"（用 + 分隔）
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

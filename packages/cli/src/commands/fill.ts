@@ -1,12 +1,12 @@
 /**
  * fill 命令 - 填充输入框
- * 用法：bb-browser fill <ref> <text>
+ * 用法：ma-browser fill <ref> <text>
  * 
  * ref 支持格式：
  *   - "@5" 或 "5"：使用 snapshot 返回的 ref ID
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

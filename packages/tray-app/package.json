@@ -1,8 +1,8 @@
 {
-  "name": "@bb-browser/tray-app",
+  "name": "@ma-browser/tray-app",
   "version": "0.0.1",
   "private": true,
-  "description": "Windows system tray daemon UI for bb-browser",
+  "description": "Windows system tray daemon UI for ma-browser",
   "type": "module",
   "scripts": {
     "panel:dev":   "cd src-panel && npm run dev",

@@ -1,10 +1,10 @@
-# @bb-browser/tray-app
+# @ma-browser/tray-app
 
-Windows system tray daemon UI for bb-browser.
+Windows system tray daemon UI for ma-browser.
 
 ## Architecture
 
-A **Tauri v2** application that owns the Windows tray presence and supervises the bb-browser daemon (Node subprocess).
+A **Tauri v2** application that owns the Windows tray presence and supervises the ma-browser daemon (Node subprocess).
 
 ```
 packages/tray-app/

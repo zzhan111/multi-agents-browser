@@ -14,13 +14,13 @@
 
 ```bash
 # 清空旧记录
-bb-browser network clear --tab <tabId>
+ma-browser network clear --tab <tabId>
 
 # 刷新页面触发请求
-bb-browser refresh --tab <tabId>
+ma-browser refresh --tab <tabId>
 
 # 查看 API 请求（filter 是位置参数，不是 --filter）
-bb-browser network requests "api" --with-body --json --tab <tabId>
+ma-browser network requests "api" --with-body --json --tab <tabId>
 ```
 
 重点关注：
@@ -32,7 +32,7 @@ bb-browser network requests "api" --with-body --json --tab <tabId>
 
 ```bash
 # 直接在浏览器中测试 fetch（Tier 1 验证）
-bb-browser eval "fetch('/api/endpoint',{credentials:'include'}).then(r=>r.json())" --tab <tabId>
+ma-browser eval "fetch('/api/endpoint',{credentials:'include'}).then(r=>r.json())" --tab <tabId>
 ```
 
 根据结果判断复杂度：
@@ -58,7 +58,7 @@ bb-browser eval "fetch('/api/endpoint',{credentials:'include'}).then(r=>r.json()
   },
   "capabilities": ["search"],
   "readOnly": true,
-  "example": "bb-browser site platform/command value"
+  "example": "ma-browser site platform/command value"
 }
 */
 async function(args) {
@@ -87,7 +87,7 @@ async function(args) {
 // @description 功能描述
 // @domain www.example.com
 // @args query,filter
-// @example bb-browser site platform/command value
+// @example ma-browser site platform/command value
 ```
 
 <!-- 证据来源：site.ts:100-117 旧格式解析 -->
@@ -106,7 +106,7 @@ async function(args) {
   "domain": "www.reddit.com",
   "args": {"query": {"required": true, "description": "Search query"}},
   "readOnly": true,
-  "example": "bb-browser site reddit/search 'local LLM'"
+  "example": "ma-browser site reddit/search 'local LLM'"
 }
 */
 async function(args) {
@@ -278,10 +278,10 @@ const fiber = document.querySelector('#App')._reactRootContainer?._internalRoot?
 # 文件路径：~/.bb-browser/sites/platform/command.js
 
 # 测试运行
-bb-browser site platform/command "test query" --json
+ma-browser site platform/command "test query" --json
 
 # 验证输出格式
-bb-browser site platform/command "test query"
+ma-browser site platform/command "test query"
 ```
 
 ## Step 5：贡献社区
@@ -294,13 +294,13 @@ git checkout -b feat-platform
 git push -u origin feat-platform
 gh pr create --repo epiral/bb-sites
 
-# 方式 B：使用 bb-browser 自身
-bb-browser site github/fork epiral/bb-sites
+# 方式 B：使用 ma-browser 自身
+ma-browser site github/fork epiral/bb-sites
 git clone https://github.com/YOUR_USER/bb-sites && cd bb-sites
 git checkout -b feat-platform
 # 添加 adapter 文件
 git push -u origin feat-platform
-bb-browser site github/pr-create epiral/bb-sites --title "feat(platform): add adapters" --head "YOUR_USER:feat-platform"
+ma-browser site github/pr-create epiral/bb-sites --title "feat(platform): add adapters" --head "YOUR_USER:feat-platform"
 ```
 
 ## 错误处理规范
@@ -328,6 +328,6 @@ return {error: 'Rate limited', hint: 'Try again in 60 seconds'};
 # 通过 gh CLI
 gh issue create --repo epiral/bb-sites --title "[adapter-name] 描述"
 
-# 通过 bb-browser
-bb-browser site github/issue-create epiral/bb-sites --title "[adapter-name] 描述"
+# 通过 ma-browser
+ma-browser site github/issue-create epiral/bb-sites --title "[adapter-name] 描述"
 ```

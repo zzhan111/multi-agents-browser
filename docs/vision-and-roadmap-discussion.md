@@ -1,4 +1,4 @@
-# bb-browser / bb-tray 方向讨论记录
+# ma-browser / bb-tray 方向讨论记录
 
 > 这是一份**脑暴/方向讨论的留存**，不是已定方案。目的是不让讨论丢失，以后可随时从"未决岔路口"接着展开。
 > 起始日期：2026-06-01
@@ -7,7 +7,7 @@
 
 ## 0. 一句话主张
 
-> **bb-browser 正在从"一个 agent 能驱动的浏览器"，进化成"夹在所有 agent 和 web 之间的数据与能力中枢（data & capability plane）"。**
+> **ma-browser 正在从"一个 agent 能驱动的浏览器"，进化成"夹在所有 agent 和 web 之间的数据与能力中枢（data & capability plane）"。**
 
 中枢上只活着四类东西：
 
@@ -42,7 +42,7 @@ agent 浏览(④)  →  抓到底层 API(①)  →  固化成命名能力(②)
 - 36 平台 / 103 命令，每个一个 JS 文件，带 `/* @meta */`（name / description / domain / args / capabilities / readOnly）
 - 复用真实浏览器登录态，返回结构化 JSON
 - 开发流程本身就是"浏览器即 API"：`network` 逆向 → `eval` 验证 → 写 adapter
-- 证据：`packages/cli/src/commands/site.ts`、`skills/bb-browser/references/{site-system,adapter-development}.md`
+- 证据：`packages/cli/src/commands/site.ts`、`skills/ma-browser/references/{site-system,adapter-development}.md`
 
 ### 距离"晋升 MCP 工具"的三个差距
 
@@ -65,7 +65,7 @@ agent 浏览(④)  →  抓到底层 API(①)  →  固化成命名能力(②)
 **关键洞察：一份元数据，两个渲染。** `@meta` 已存在每个 adapter 里，缺的是 daemon 侧的**目录端点**（现有 `/api/overview` `/api/commands` `/api/logs`，**没有 `/api/sites`**）。补上后 agent 端（MCP）和人/UI 端（Tauri）消费同一份目录。
 
 - **给 agent**：别把 103 个都注册成原生工具（context 会爆，选工具准确率下降）。
-  - 旁证：当前 Claude 环境就把 bb-browser 工具 **deferred + ToolSearch** 延迟加载。
+  - 旁证：当前 Claude 环境就把 ma-browser 工具 **deferred + ToolSearch** 延迟加载。
   - 正确形态 = **search-first / 按需加载**：把 `site_search`/`site_recommend` 做强（语义 + 按当前 tab 域名/历史排序）；agent 锁定平台后再动态注册 `twitter/*` 为真工具，用完回收。
 - **给人（UI）**：面板加 **Capabilities Tab** —— 可搜索目录（按平台分组、签名/示例/readOnly/本地 vs 社区/健康状态/最近使用），把 `@meta.args` 渲染成表单 → 一键跑 → 内联看 JSON（adapter 版 Postman/Swagger UI）。顺便是 ③ 操作台入口。
 
@@ -275,4 +275,4 @@ interface TabScratchpad {
 - `packages/cli/src/commands/site.ts` — adapter 目录/解析/运行逻辑
 - `packages/daemon/src/http-server.ts` — 现有 `/api/*` 端点（缺 `/api/sites`）
 - `packages/daemon/src/command-history.ts` — 审计雏形
-- `skills/bb-browser/references/{site-system,adapter-development}.md` — adapter 体系文档
+- `skills/ma-browser/references/{site-system,adapter-development}.md` — adapter 体系文档

@@ -165,7 +165,7 @@ function killPreviousManagedBrowser(): void {
   if (process.platform === "win32") {
     try {
       execSync(
-        `wmic process where "commandline like '%bb-browser%profile%'" call terminate`,
+        `wmic process where "commandline like '%ma-browser%profile%'" call terminate`,
         { stdio: "ignore" },
       );
     } catch {

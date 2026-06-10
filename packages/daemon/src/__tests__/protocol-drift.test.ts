@@ -2,7 +2,7 @@
  * Protocol Drift Tests — verify daemon HTTP responses match protocol.ts shapes.
  *
  * These tests start a real daemon, send HTTP commands, and check that response
- * shapes match the types defined in @bb-browser/shared (protocol.ts).
+ * shapes match the types defined in @ma-browser/shared (protocol.ts).
  *
  * Requirements:
  *   - Chrome running with --remote-debugging-port=<CDP_PORT>

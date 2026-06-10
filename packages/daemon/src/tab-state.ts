@@ -18,7 +18,7 @@ import type {
   JSErrorInfo,
   RefInfo,
   TraceEvent,
-} from "@bb-browser/shared";
+} from "@ma-browser/shared";
 import { RingBuffer } from "./ring-buffer.js";
 
 // ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ export class TabState {
     ) {
       this.traceOverflowWarned = true;
       console.warn(
-        `[bb-browser] trace buffer full for tab ${this.shortId} (cap=${this.traceEvents.capacity}); oldest events will be discarded. Set BB_TRACE_CAPACITY to raise the limit.`,
+        `[ma-browser] trace buffer full for tab ${this.shortId} (cap=${this.traceEvents.capacity}); oldest events will be discarded. Set BB_TRACE_CAPACITY to raise the limit.`,
       );
     }
     this.traceEvents.push({ ...info, seq });

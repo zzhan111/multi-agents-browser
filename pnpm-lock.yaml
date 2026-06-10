@@ -63,7 +63,7 @@ importers:
 
   packages/cli:
     dependencies:
-      '@bb-browser/shared':
+      '@ma-browser/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
@@ -85,7 +85,7 @@ importers:
 
   packages/daemon:
     dependencies:
-      '@bb-browser/shared':
+      '@ma-browser/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
@@ -107,7 +107,7 @@ importers:
 
   packages/mcp:
     dependencies:
-      '@bb-browser/shared':
+      '@ma-browser/shared':
         specifier: workspace:*
         version: link:../shared
       '@modelcontextprotocol/sdk':
@@ -155,7 +155,7 @@ importers:
 
   packages/web:
     dependencies:
-      '@bb-browser/shared':
+      '@ma-browser/shared':
         specifier: workspace:*
         version: link:../shared
       react:

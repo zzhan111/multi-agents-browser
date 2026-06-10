@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "bb-browser Tray",
+  "productName": "ma-browser Tray",
   "version": "0.0.1",
-  "identifier": "com.bb-browser.tray",
+  "identifier": "com.ma-browser.tray",
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "popup",
-        "title": "bb-browser",
+        "title": "ma-browser",
         "url": "index.html",
         "width": 360,
         "height": 360,
@@ -30,7 +30,7 @@
       },
       {
         "label": "control-panel",
-        "title": "bb-browser 控制面板",
+        "title": "ma-browser 控制面板",
         "url": "panel.html",
         "width": 960,
         "height": 680,

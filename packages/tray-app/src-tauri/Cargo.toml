@@ -1,19 +1,19 @@
 [package]
-name = "bb-browser-tray"
+name = "ma-browser-tray"
 version = "0.0.1"
-description = "Windows system tray daemon UI for bb-browser"
+description = "Windows system tray daemon UI for ma-browser"
 authors = ["epiral"]
 edition = "2021"
 rust-version = "1.80"
 
 # Library — contains all the testable, Tauri-free logic.
 [lib]
-name = "bb_browser_tray"
+name = "ma_browser_tray"
 path = "src/lib.rs"
 
 # Binary — thin wrapper that wires the library into the Tauri shell.
 [[bin]]
-name = "bb-browser-tray"
+name = "ma-browser-tray"
 path = "src/main.rs"
 
 [dependencies]

@@ -7,7 +7,7 @@
 //! Each test passes a small inline script via `node -e "…"` that simulates
 //! one of the daemon startup paths (ready, exit, malformed, slow).
 
-use bb_browser_tray::daemon_spawner::{
+use ma_browser_tray::daemon_spawner::{
     DaemonProcess, ReadyInfo, SpawnConfig, SpawnOutcome, DEFAULT_READY_TIMEOUT,
 };
 use std::path::PathBuf;

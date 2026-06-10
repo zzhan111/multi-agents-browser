@@ -8,5 +8,5 @@ export default defineConfig({
   sourcemap: true,
   target: "node18",
   banner: { js: "#!/usr/bin/env node" },
-  noExternal: [/@bb-browser\/.*/],
+  noExternal: [/@ma-browser\/.*/],
 });

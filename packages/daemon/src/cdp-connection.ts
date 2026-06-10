@@ -9,7 +9,7 @@
 
 import { request as httpRequest } from "node:http";
 import WebSocket from "ws";
-import type { TraceEvent } from "@bb-browser/shared";
+import type { TraceEvent } from "@ma-browser/shared";
 import { TabStateManager } from "./tab-state.js";
 import { TRACE_INJECTION_SCRIPT, TRACE_PREFIX } from "./trace-inject.js";
 import type { AgentSession } from "./session-state.js";

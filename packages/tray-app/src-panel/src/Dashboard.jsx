@@ -76,7 +76,7 @@ export default function Dashboard() {
             data-color={connected ? 'green' : 'red'}
             title={connected ? '已连接' : '未连接'}
           />
-          <span className={styles.titlebarTitle}>bb-browser 控制面板</span>
+          <span className={styles.titlebarTitle}>ma-browser 控制面板</span>
         </div>
         <button className={styles.closeBtn} onClick={closeWindow} title="关闭 (Esc)">
           ✕

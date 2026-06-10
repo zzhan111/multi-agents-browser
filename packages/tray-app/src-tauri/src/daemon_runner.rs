@@ -18,17 +18,17 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use bb_browser_tray::daemon_config::{
+use ma_browser_tray::daemon_config::{
     daemon_config_path, decide_reap, kill_process, read_config, remove_config, DaemonConfig,
 };
-use bb_browser_tray::daemon_spawner::{
+use ma_browser_tray::daemon_spawner::{
     DaemonProcess, ReadyInfo, SpawnConfig, SpawnOutcome, DEFAULT_READY_TIMEOUT,
 };
-use bb_browser_tray::port_discovery::{
+use ma_browser_tray::port_discovery::{
     find_even_port, find_odd_port, OsPortChecker, DEFAULT_CDP_PORT, DEFAULT_DAEMON_PORT,
 };
-use bb_browser_tray::supervisor::Event;
-use bb_browser_tray::tray_state::CdpState;
+use ma_browser_tray::supervisor::Event;
+use ma_browser_tray::tray_state::CdpState;
 use tauri::{AppHandle, Manager};
 
 /// Owns the side-band kill signal for the active daemon (if any). The
@@ -256,7 +256,7 @@ fn daemon_confirmed_gone(host: &str, port: u16, token: &str) -> bool {
 /// Locate `node` + `packages/daemon/dist/index.js` and build a SpawnConfig.
 ///
 /// Probes for a free even/odd port pair before launching — this lets the
-/// daemon dodge already-bound ports (e.g. another bb-browser instance, or
+/// daemon dodge already-bound ports (e.g. another ma-browser instance, or
 /// Windows port reservations) without changing the daemon code.
 fn build_spawn_config(app: &AppHandle) -> Result<SpawnConfig, String> {
     // Verify node is installed (clear error if not). We then spawn it by the
@@ -635,8 +635,8 @@ mod tests {
     #[test]
     fn strips_plain_verbatim_prefix() {
         assert_eq!(
-            strip_verbatim_prefix(r"\\?\Z:\Apps\bb-browser-tray\daemon\index.js"),
-            r"Z:\Apps\bb-browser-tray\daemon\index.js"
+            strip_verbatim_prefix(r"\\?\Z:\Apps\ma-browser-tray\daemon\index.js"),
+            r"Z:\Apps\ma-browser-tray\daemon\index.js"
         );
     }
 

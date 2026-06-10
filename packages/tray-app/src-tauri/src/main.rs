@@ -18,7 +18,7 @@ fn main() {
 #[cfg(not(feature = "tauri-app"))]
 fn main() {
     eprintln!(
-        "bb-browser-tray was built without the `tauri-app` feature. \
+        "ma-browser-tray was built without the `tauri-app` feature. \
          Rebuild with `cargo build --features tauri-app` to produce the GUI binary."
     );
     std::process::exit(2);

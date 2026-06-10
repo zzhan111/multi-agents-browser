@@ -1,12 +1,12 @@
 /**
  * click 命令 - 点击元素
- * 用法：bb-browser click <ref>
+ * 用法：ma-browser click <ref>
  * 
  * ref 支持格式：
  *   - "@5" 或 "5"：使用 snapshot 返回的 ref ID
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

@@ -1,10 +1,10 @@
 {
-  "name": "@bb-browser/daemon",
+  "name": "@ma-browser/daemon",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "bin": {
-    "bb-browser-daemon": "./dist/index.js"
+    "ma-browser-daemon": "./dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@bb-browser/shared": "workspace:*"
+    "@ma-browser/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

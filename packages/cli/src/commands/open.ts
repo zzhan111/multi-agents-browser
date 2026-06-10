@@ -2,12 +2,12 @@
  * open 命令 - 打开指定 URL
  * 
  * 用法：
- *   bb-browser open <url>                # 在新 tab 中打开
- *   bb-browser open <url> --tab current  # 在当前 tab 中打开
- *   bb-browser open <url> --tab 123      # 在指定 tabId 的 tab 中打开
+ *   ma-browser open <url>                # 在新 tab 中打开
+ *   ma-browser open <url> --tab current  # 在当前 tab 中打开
+ *   ma-browser open <url> --tab 123      # 在指定 tabId 的 tab 中打开
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 import { getSiteHintForDomain } from "./site.js";

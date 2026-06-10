@@ -1,4 +1,4 @@
-// bb-browser tray popup — frontend logic.
+// ma-browser tray popup — frontend logic.
 //
 // Talks to the Rust shell via Tauri IPC (commands defined in app.rs):
 //   get_status() -> { color, status_text, daemon_port, cdp_port, token,
@@ -35,7 +35,7 @@ function render(s) {
   dot.classList.add(s.color || "red");
 
   document.getElementById("statusText").textContent =
-    `bb-browser · ${s.status_text || "未运行"}`;
+    `ma-browser · ${s.status_text || "未运行"}`;
 
   // Chrome info
   document.getElementById("chromeInfo").textContent =

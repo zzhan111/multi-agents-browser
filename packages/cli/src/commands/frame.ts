@@ -1,11 +1,11 @@
 /**
  * frame 命令 - 切换到 iframe 或返回主 frame
  * 用法：
- *   bb-browser frame <selector>   切换到指定 iframe
- *   bb-browser frame main         返回主 frame
+ *   ma-browser frame <selector>   切换到指定 iframe
+ *   ma-browser frame main         返回主 frame
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

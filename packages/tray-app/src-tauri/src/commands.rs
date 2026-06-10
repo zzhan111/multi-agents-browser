@@ -6,8 +6,8 @@
 //! it as a contract.
 
 use crate::app::AppState;
-use bb_browser_tray::supervisor::Event;
-use bb_browser_tray::tray_state::TrayColor;
+use ma_browser_tray::supervisor::Event;
+use ma_browser_tray::tray_state::TrayColor;
 
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -132,13 +132,13 @@ pub fn quit_app(app: tauri::AppHandle, state: State<'_, AppState>) {
 /// Read current autostart state.
 #[tauri::command]
 pub fn get_autostart() -> bool {
-    bb_browser_tray::autostart::is_enabled()
+    ma_browser_tray::autostart::is_enabled()
 }
 
 /// Enable or disable autostart.
 #[tauri::command]
 pub fn set_autostart(enabled: bool) -> Result<(), String> {
-    bb_browser_tray::autostart::set_enabled(enabled)
+    ma_browser_tray::autostart::set_enabled(enabled)
 }
 
 // ---------------------------------------------------------------------------

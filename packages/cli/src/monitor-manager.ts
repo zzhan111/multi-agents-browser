@@ -15,7 +15,7 @@ import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Request, Response } from "@bb-browser/shared";
+import type { Request, Response } from "@ma-browser/shared";
 import { discoverCdpPort } from "./cdp-discovery.js";
 
 // ---------------------------------------------------------------------------

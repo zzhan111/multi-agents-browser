@@ -1,4 +1,4 @@
-/* bb-browser tray popup — Acrylic-style, three-section layout.
+/* ma-browser tray popup — Acrylic-style, three-section layout.
    Per docs/system-tray-design.md §4.2 / §4.3.
    On Win10 < 1903 the Acrylic falls back to a semi-opaque background — the
    inner CSS rgba()s ensure we stay readable in both modes. */

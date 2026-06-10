@@ -1,9 +1,9 @@
 /**
  * close 命令 - 关闭当前标签页
- * 用法：bb-browser close
+ * 用法：ma-browser close
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

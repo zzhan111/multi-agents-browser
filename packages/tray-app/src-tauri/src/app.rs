@@ -1,7 +1,7 @@
 //! Tauri application shell.
 //!
 //! This module is only compiled with `--features tauri-app`. It wires the
-//! pure-logic library (`bb_browser_tray::*`) into the Tauri runtime:
+//! pure-logic library (`ma_browser_tray::*`) into the Tauri runtime:
 //!
 //! - Phase 2.1: bootstrap the Tauri app + register a tray icon
 //! - Phase 2.2: 3-color PNG icons
@@ -12,9 +12,9 @@
 
 use std::sync::Mutex;
 
-use bb_browser_tray::controller::TrayController;
-use bb_browser_tray::supervisor::{Event, SupervisorAction};
-use bb_browser_tray::tray_state::TrayColor;
+use ma_browser_tray::controller::TrayController;
+use ma_browser_tray::supervisor::{Event, SupervisorAction};
+use ma_browser_tray::tray_state::TrayColor;
 
 use crate::daemon_runner::DaemonRunner;
 use crate::notifier;
@@ -153,7 +153,7 @@ fn apply_popup_effects(app: &AppHandle) {
 ///   ☑ 通知开关
 /// 调试 / 状态模拟 ▸                          [Phase 2.3 临时]
 /// ───
-/// 关于 bb-browser
+/// 关于 ma-browser
 /// 退出                                          Ctrl+Q
 /// ```
 fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)> {
@@ -186,7 +186,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)>
     let sep3 = PredefinedMenuItem::separator(app)?;
 
     // --- Group 4: settings submenu ---
-    let autostart_checked = bb_browser_tray::autostart::is_enabled();
+    let autostart_checked = ma_browser_tray::autostart::is_enabled();
     let autostart = CheckMenuItem::with_id(
         app,
         ID_AUTOSTART,
@@ -213,7 +213,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)>
     let sep4 = PredefinedMenuItem::separator(app)?;
 
     // --- Group 5: about / quit ---
-    let about = MenuItem::with_id(app, ID_ABOUT, "关于 bb-browser", true, None::<&str>)?;
+    let about = MenuItem::with_id(app, ID_ABOUT, "关于 ma-browser", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, ID_QUIT, "退出", true, Some("Ctrl+Q"))?;
 
     let menu = Menu::with_items(
@@ -247,7 +247,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let _tray = TrayIconBuilder::with_id("main-tray")
         .icon(icon)
-        .tooltip("bb-browser · 未运行")
+        .tooltip("ma-browser · 未运行")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(handle_menu_event)
@@ -299,9 +299,9 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
         // --- Settings ---
         ID_AUTOSTART => {
-            let currently = bb_browser_tray::autostart::is_enabled();
+            let currently = ma_browser_tray::autostart::is_enabled();
             let want = !currently;
-            if let Err(e) = bb_browser_tray::autostart::set_enabled(want) {
+            if let Err(e) = ma_browser_tray::autostart::set_enabled(want) {
                 eprintln!("[tray] autostart set failed: {e}");
             } else {
                 eprintln!("[tray] autostart -> {want}");
@@ -335,11 +335,11 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             app.dialog()
                 .message(concat!(
                     "版本: 0.0.1\n\n",
-                    "bb-browser 让 AI 通过 Chrome DevTools Protocol\n",
+                    "ma-browser 让 AI 通过 Chrome DevTools Protocol\n",
                     "直接控制你真实的 Chrome 浏览器。\n\n",
-                    "GitHub: github.com/anthropics/bb-browser"
+                    "GitHub: github.com/anthropics/ma-browser"
                 ))
-                .title("关于 bb-browser")
+                .title("关于 ma-browser")
                 .kind(MessageDialogKind::Info)
                 .show(|_| {});
         }

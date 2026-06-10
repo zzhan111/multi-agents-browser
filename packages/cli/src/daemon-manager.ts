@@ -7,7 +7,7 @@ import { unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
-import type { Request, Response } from "@bb-browser/shared";
+import type { Request, Response } from "@ma-browser/shared";
 import {
   COMMAND_TIMEOUT,
   DAEMON_JSON,
@@ -15,7 +15,7 @@ import {
   readDaemonJson,
   isProcessAlive,
   httpJson,
-} from "@bb-browser/shared";
+} from "@ma-browser/shared";
 import { discoverCdpPort } from "./cdp-discovery.js";
 
 // ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ export async function ensureDaemon(): Promise<void> {
   const cdpInfo = await discoverCdpPort();
   if (!cdpInfo) {
     throw new Error(
-      "bb-browser: Cannot find a Chromium-based browser.\n\n" +
+      "ma-browser: Cannot find a Chromium-based browser.\n\n" +
       "Please do one of the following:\n" +
       "  1. Install Google Chrome, Edge, or Brave\n" +
       "  2. Start Chrome with: google-chrome --remote-debugging-port=19825\n" +
@@ -143,9 +143,9 @@ export async function ensureDaemon(): Promise<void> {
   }
 
   throw new Error(
-    "bb-browser: Daemon did not start in time.\n\n" +
+    "ma-browser: Daemon did not start in time.\n\n" +
     "Chrome CDP is reachable, but the daemon process failed to initialize.\n" +
-    "Try: bb-browser daemon status",
+    "Try: ma-browser daemon status",
   );
 }
 

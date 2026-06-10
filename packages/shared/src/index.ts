@@ -1,5 +1,5 @@
 /**
- * @bb-browser/shared
+ * @ma-browser/shared
  * 共享类型和工具函数
  */
 

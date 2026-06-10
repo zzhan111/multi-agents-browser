@@ -1,14 +1,14 @@
 /**
  * check/uncheck 命令 - 勾选/取消勾选复选框
  * 用法：
- *   bb-browser check <ref>   勾选复选框
- *   bb-browser uncheck <ref> 取消勾选复选框
+ *   ma-browser check <ref>   勾选复选框
+ *   ma-browser uncheck <ref> 取消勾选复选框
  * 
  * ref 支持格式：
  *   - "@5" 或 "5"：使用 snapshot 返回的 ref ID
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

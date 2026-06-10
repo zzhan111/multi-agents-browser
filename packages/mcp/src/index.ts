@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { COMMAND_TIMEOUT, COMMANDS, generateId, readDaemonJson, DAEMON_DIR } from "@bb-browser/shared";
-import type { CommandDef, Request, Response, DaemonInfo } from "@bb-browser/shared";
+import { COMMAND_TIMEOUT, COMMANDS, generateId, readDaemonJson, DAEMON_DIR } from "@ma-browser/shared";
+import type { CommandDef, Request, Response, DaemonInfo } from "@ma-browser/shared";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -16,7 +16,7 @@ const CHROME_NOT_CONNECTED_HINT = [
   "Chrome is not connected to the daemon.",
   "",
   "Make sure Chrome is running and the daemon can connect to it via CDP.",
-  "Run: bb-browser daemon --help for details.",
+  "Run: ma-browser daemon --help for details.",
 ].join("\n");
 
 const sessionOpenedTabs = new Set<string>();
@@ -152,7 +152,7 @@ async function sendCommand(request: Request): Promise<Response> {
     return (await response.json()) as Response;
   } catch {
     clearTimeout(timeoutId);
-    return { id: request.id, success: false, error: "Failed to start daemon. Run manually: bb-browser daemon" };
+    return { id: request.id, success: false, error: "Failed to start daemon. Run manually: ma-browser daemon" };
   }
 }
 
@@ -265,7 +265,7 @@ function formatSiteCliError(value: unknown, stderr: string, stdout: string): str
   }
 
   const fallback = [stderr.trim(), stdout.trim()].find(Boolean);
-  return fallback || "bb-browser site command failed";
+  return fallback || "ma-browser site command failed";
 }
 
 async function runSiteCli(args: string[]): Promise<unknown> {
@@ -308,8 +308,8 @@ async function runSiteCli(args: string[]): Promise<unknown> {
 // ---------------------------------------------------------------------------
 
 const server = new McpServer(
-  { name: "bb-browser", version: __BB_BROWSER_VERSION__ },
-  { instructions: `bb-browser lets you control the user's real Chrome browser via CDP (Chrome DevTools Protocol).
+  { name: "ma-browser", version: __BB_BROWSER_VERSION__ },
+  { instructions: `ma-browser lets you control the user's real Chrome browser via CDP (Chrome DevTools Protocol).
 
 Your browser is the API. No headless browser, no cookie extraction, no anti-bot bypass.
 
@@ -322,7 +322,7 @@ Key capabilities:
 - browser_errors: Read JavaScript errors. Supports since/limit
 - browser_screenshot: Visual page capture
 - browser_tab_list/tab_new: Multi-tab support — use tab parameter (short ID like "c416") for concurrent operations
-- browser_close_all: Close tabs opened by bb-browser during the current MCP session
+- browser_close_all: Close tabs opened by ma-browser during the current MCP session
 
 Tab management:
 - Tab IDs are short hex strings (e.g. "c416") returned by tab_list or open commands
@@ -336,7 +336,7 @@ Site adapters (pre-built commands for popular sites):
 - site_update: Pull the community adapter repository
 - Available: reddit, twitter, github, hackernews, xiaohongshu, zhihu, bilibili, weibo, douban, youtube
 
-To create a new site adapter, run: bb-browser guide` },
+To create a new site adapter, run: ma-browser guide` },
 );
 
 // ---------------------------------------------------------------------------
@@ -551,7 +551,7 @@ for (const cmd of COMMANDS) {
 
 server.tool(
   "browser_close_all",
-  "Close tabs opened by bb-browser during the current MCP session",
+  "Close tabs opened by ma-browser during the current MCP session",
   {},
   async () => {
     const closedTabs: string[] = [];

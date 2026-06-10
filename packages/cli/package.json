@@ -1,12 +1,12 @@
 {
-  "name": "@bb-browser/cli",
+  "name": "@ma-browser/cli",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "bb-browser": "./dist/index.js"
+    "ma-browser": "./dist/index.js"
   },
   "scripts": {
     "build": "tsup",
@@ -14,7 +14,7 @@
     "test": "tsx --test src/openclaw-json.test.ts src/openclaw-bridge.test.ts src/__tests__/daemon-startup.test.ts"
   },
   "dependencies": {
-    "@bb-browser/shared": "workspace:*"
+    "@ma-browser/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

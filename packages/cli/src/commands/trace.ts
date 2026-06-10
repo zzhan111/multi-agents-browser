@@ -2,12 +2,12 @@
  * trace 命令 - 录制用户操作
  * 
  * 用法：
- *   bb-browser trace start   开始录制
- *   bb-browser trace stop    停止录制，输出事件列表
- *   bb-browser trace status  查看录制状态
+ *   ma-browser trace start   开始录制
+ *   ma-browser trace stop    停止录制，输出事件列表
+ *   ma-browser trace status  查看录制状态
  */
 
-import { generateId } from "@bb-browser/shared";
+import { generateId } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 
 interface TraceOptions {
@@ -42,7 +42,7 @@ export async function traceCommand(
       const status = data?.traceStatus;
       console.log("开始录制用户操作");
       console.log(`标签页 ID: ${status?.tabId || 'N/A'}`);
-      console.log("\n在浏览器中进行操作，完成后运行 'bb-browser trace stop' 停止录制");
+      console.log("\n在浏览器中进行操作，完成后运行 'ma-browser trace stop' 停止录制");
       break;
     }
 

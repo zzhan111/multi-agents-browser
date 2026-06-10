@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a reproducible problem in bb-browser
+about: Report a reproducible problem in ma-browser
 title: "[Bug] "
 labels: ["bug"]
 ---
@@ -14,7 +14,7 @@ Describe the problem in one or two sentences.
 ## Command / 复现命令
 
 ```bash
-bb-browser ...
+ma-browser ...
 ```
 
 If relevant, include the exact command you ran and whether you used `--json`, `--openclaw`, or `--mcp`.
@@ -41,7 +41,7 @@ What actually happened?
 
 ## Environment / 环境信息
 
-- `bb-browser` version:
+- `ma-browser` version:
 - Install method (`npm -g`, `npx`, local build, MCP, other):
 - OS:
 - Node.js version:

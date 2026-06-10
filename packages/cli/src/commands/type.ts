@@ -1,6 +1,6 @@
 /**
  * type 命令 - 在元素中逐字符输入文本（不清空原有内容）
- * 用法：bb-browser type <ref> <text>
+ * 用法：ma-browser type <ref> <text>
  * 
  * 与 fill 命令的区别：
  *   - fill：先清空再填入
@@ -10,7 +10,7 @@
  *   - "@5" 或 "5"：使用 snapshot 返回的 ref ID
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

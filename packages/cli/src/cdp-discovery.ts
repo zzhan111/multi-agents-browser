@@ -2,14 +2,14 @@ import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { MANAGED_PORT_FILE, launchManagedBrowser } from "@bb-browser/shared";
+import { MANAGED_PORT_FILE, launchManagedBrowser } from "@ma-browser/shared";
 import { parseOpenClawJson } from "./openclaw-json.js";
 
-// Browser-launch helpers live in @bb-browser/shared so the daemon can reuse
+// Browser-launch helpers live in @ma-browser/shared so the daemon can reuse
 // them. Re-export findBrowserExecutable to preserve this module's public API.
-export { findBrowserExecutable } from "@bb-browser/shared";
+export { findBrowserExecutable } from "@ma-browser/shared";
 
-const CDP_CACHE_FILE = path.join(os.tmpdir(), "bb-browser-cdp-cache.json");
+const CDP_CACHE_FILE = path.join(os.tmpdir(), "ma-browser-cdp-cache.json");
 const CACHE_TTL_MS = 30000; // 缓存有效期 30 秒
 
 function execFileAsync(command: string, args: string[], timeout: number): Promise<string> {

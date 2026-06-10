@@ -1,9 +1,9 @@
 /**
  * snapshot 命令 - 获取当前页面快照
- * 用法：bb-browser snapshot [-i|--interactive] [-c|--compact] [-d|--depth N] [-s|--selector SEL]
+ * 用法：ma-browser snapshot [-i|--interactive] [-c|--compact] [-d|--depth N] [-s|--selector SEL]
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

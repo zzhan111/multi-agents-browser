@@ -1,6 +1,6 @@
 /**
  * select 命令 - 在下拉框中选择选项
- * 用法：bb-browser select <ref> <value>
+ * 用法：ma-browser select <ref> <value>
  * 
  * ref 支持格式：
  *   - "@5" 或 "5"：使用 snapshot 返回的 ref ID
@@ -8,7 +8,7 @@
  * value：选项的 value 属性值或显示文本（label）
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

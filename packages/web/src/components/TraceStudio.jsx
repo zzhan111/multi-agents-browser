@@ -162,7 +162,7 @@ function TraceStudio() {
   return (
     <div className="trace-studio">
       <header className="studio-header">
-        <h1 className="studio-title">BB Browser Trace Studio</h1>
+        <h1 className="studio-title">MultiAgentsBrowser Trace Studio</h1>
         <ConnectionPanel />
       </header>
 

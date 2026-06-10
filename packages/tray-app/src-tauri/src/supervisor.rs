@@ -1,6 +1,6 @@
 //! Supervisor state machine for the daemon subprocess.
 //!
-//! Models the lifecycle of the bb-browser daemon as observed by the tray
+//! Models the lifecycle of the ma-browser daemon as observed by the tray
 //! app:
 //!
 //! ```text

@@ -1,12 +1,12 @@
 ---
-name: bb-browser-openclaw
+name: ma-browser-openclaw
 description: Turn any website into a CLI command. 36 platforms, 103 commands — Twitter, Reddit, GitHub, YouTube, Zhihu, Bilibili, Weibo, and more. Uses OpenClaw's browser directly, no extra extension needed.
 requires:
-  bins: bb-browser
-allowed-tools: Bash(bb-browser:*)
+  bins: ma-browser
+allowed-tools: Bash(ma-browser:*)
 ---
 
-# bb-browser sites — The web as CLI
+# ma-browser sites — The web as CLI
 
 36 platforms, 103 commands. One-liner structured data from any website using your login state.
 
@@ -16,64 +16,64 @@ allowed-tools: Bash(bb-browser:*)
 
 ```bash
 # First time: pull community adapters
-bb-browser site update
+ma-browser site update
 
 # See what's available
-bb-browser site list
+ma-browser site list
 
 # See which adapters match your browsing habits
-bb-browser site recommend
+ma-browser site recommend
 
 # Run any adapter via OpenClaw's browser
-bb-browser site reddit/hot --openclaw
-bb-browser site hackernews/top 5 --openclaw
-bb-browser site v2ex/hot --openclaw
+ma-browser site reddit/hot --openclaw
+ma-browser site hackernews/top 5 --openclaw
+ma-browser site v2ex/hot --openclaw
 ```
 
 ## IMPORTANT: Always use --openclaw
 
-Every `bb-browser site` command MUST include `--openclaw` to use OpenClaw's browser:
+Every `ma-browser site` command MUST include `--openclaw` to use OpenClaw's browser:
 
 ```bash
 # Correct
-bb-browser site twitter/search "AI agent" --openclaw
-bb-browser site zhihu/hot 10 --openclaw --json
-bb-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePercent}'
+ma-browser site twitter/search "AI agent" --openclaw
+ma-browser site zhihu/hot 10 --openclaw --json
+ma-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePercent}'
 
 # Wrong (requires separate Chrome extension)
-bb-browser site twitter/search "AI agent"
+ma-browser site twitter/search "AI agent"
 ```
 
 ## Data Extraction (most common use)
 
 ```bash
 # Social media
-bb-browser site twitter/search "OpenClaw" --openclaw
-bb-browser site twitter/thread <tweet-url> --openclaw
-bb-browser site reddit/thread <post-url> --openclaw
-bb-browser site weibo/hot --openclaw
-bb-browser site xiaohongshu/search "query" --openclaw
+ma-browser site twitter/search "OpenClaw" --openclaw
+ma-browser site twitter/thread <tweet-url> --openclaw
+ma-browser site reddit/thread <post-url> --openclaw
+ma-browser site weibo/hot --openclaw
+ma-browser site xiaohongshu/search "query" --openclaw
 
 # Developer
-bb-browser site github/repo owner/repo --openclaw
-bb-browser site github/issues owner/repo --openclaw
-bb-browser site hackernews/top 10 --openclaw
-bb-browser site stackoverflow/search "async await" --openclaw
-bb-browser site arxiv/search "transformer" --openclaw
+ma-browser site github/repo owner/repo --openclaw
+ma-browser site github/issues owner/repo --openclaw
+ma-browser site hackernews/top 10 --openclaw
+ma-browser site stackoverflow/search "async await" --openclaw
+ma-browser site arxiv/search "transformer" --openclaw
 
 # Finance
-bb-browser site xueqiu/stock SH600519 --openclaw
-bb-browser site xueqiu/hot-stock 5 --openclaw
-bb-browser site eastmoney/stock "茅台" --openclaw
+ma-browser site xueqiu/stock SH600519 --openclaw
+ma-browser site xueqiu/hot-stock 5 --openclaw
+ma-browser site eastmoney/stock "茅台" --openclaw
 
 # News & Knowledge
-bb-browser site zhihu/hot --openclaw
-bb-browser site 36kr/newsflash --openclaw
-bb-browser site wikipedia/summary "Python" --openclaw
+ma-browser site zhihu/hot --openclaw
+ma-browser site 36kr/newsflash --openclaw
+ma-browser site wikipedia/summary "Python" --openclaw
 
 # Video
-bb-browser site youtube/transcript VIDEO_ID --openclaw
-bb-browser site bilibili/search "query" --openclaw
+ma-browser site youtube/transcript VIDEO_ID --openclaw
+ma-browser site bilibili/search "query" --openclaw
 ```
 
 ## Filtering with --jq
@@ -82,23 +82,23 @@ Use `--jq` to extract specific fields (no need for `--json`, it's implied):
 
 ```bash
 # Just stock names
-bb-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[].name'
+ma-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[].name'
 
 # Specific fields as objects
-bb-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePercent, heat}'
+ma-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePercent, heat}'
 
 # Filter results
-bb-browser site reddit/hot --openclaw --jq '.posts[] | {title, score}'
+ma-browser site reddit/hot --openclaw --jq '.posts[] | {title, score}'
 ```
 
 ## View adapter details
 
 ```bash
 # Check what args an adapter takes
-bb-browser site info xueqiu/stock
+ma-browser site info xueqiu/stock
 
 # Search adapters by keyword
-bb-browser site search reddit
+ma-browser site search reddit
 ```
 
 ## Login State
@@ -119,9 +119,9 @@ Turn any website into a CLI command:
 
 ```bash
 # Read the guide
-bb-browser guide
+ma-browser guide
 
-# Or just tell me: "turn notion.so into a bb-browser adapter"
+# Or just tell me: "turn notion.so into a ma-browser adapter"
 # I'll reverse-engineer the API, write the adapter, test it, and submit a PR.
 ```
 

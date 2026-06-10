@@ -1,12 +1,12 @@
 /**
  * 导航命令 - back/forward/refresh
  * 用法：
- *   bb-browser back      后退
- *   bb-browser forward   前进
- *   bb-browser refresh   刷新页面
+ *   ma-browser back      后退
+ *   ma-browser forward   前进
+ *   ma-browser refresh   刷新页面
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

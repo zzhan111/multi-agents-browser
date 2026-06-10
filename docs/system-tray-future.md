@@ -1,4 +1,4 @@
-# bb-browser System Tray — 暂不实现的设计候选
+# ma-browser System Tray — 暂不实现的设计候选
 
 本文档收录原详细设计中 **暂时不做** 的特性。每节注明：
 
@@ -19,7 +19,7 @@
 **是什么**：
 
 ```
-bb-browser daemon start --shared
+ma-browser daemon start --shared
 
 特性:
 - 多 token 管理（每个团队成员一个，可吊销）
@@ -37,7 +37,7 @@ bb-browser daemon start --shared
 **为什么暂不做**：
 
 - 多 token、权限分级、速率限制、时间片、审计日志 —— **这是企业 SaaS 思维**
-- bb-browser 当前用户基本是单人单机
+- ma-browser 当前用户基本是单人单机
 - 没有任何真实团队用户提过共享需求
 - 即使有，shared mode 引入的攻击面（多 token 泄露、权限提升 bug）反而比 MVP 风险高
 
@@ -53,7 +53,7 @@ bb-browser daemon start --shared
 **是什么**：
 
 ```
-bb-browser daemon start --headless
+ma-browser daemon start --headless
 
 特性:
 - 不创建托盘 / 不发系统通知
@@ -82,7 +82,7 @@ bb-browser daemon start --headless
 **是什么**：
 
 ```
-bb-browser daemon start --host 0.0.0.0 --tls
+ma-browser daemon start --host 0.0.0.0 --tls
 
 特性:
 - bind 0.0.0.0
@@ -114,7 +114,7 @@ daemon 实例 1: --cdp-port 19825 → Chrome A（日常）
 daemon 实例 2: --cdp-port 19827 → Chrome B（沙盒）
 
 托盘:
-  🟢 bb-browser × 2
+  🟢 ma-browser × 2
     ├─ 实例 1 (port 19824) — Chrome A · 6 tabs
     └─ 实例 2 (port 19826) — Chrome B · 3 tabs
 
@@ -147,7 +147,7 @@ daemon 实例 2: --cdp-port 19827 → Chrome B（沙盒）
 
 三个备选方案：
 - **A**：mDNS — `hostname.local`（Win11 22H2+）
-- **B**：`bb-browser wsl-probe` 命令在 WSL 内自动探测 Windows IP（读 `/etc/resolv.conf` → 扫端口 → 写配置）
+- **B**：`ma-browser wsl-probe` 命令在 WSL 内自动探测 Windows IP（读 `/etc/resolv.conf` → 扫端口 → 写配置）
 - **C**：daemon 检测 WSL 存在则自动 bind 0.0.0.0 + 启动时打印 Windows IP + Token
 
 **为什么暂不做（但优先级靠前，可能 MVP 2 末就做）**：

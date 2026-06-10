@@ -1,5 +1,5 @@
 {
-  "name": "@bb-browser/web",
+  "name": "@ma-browser/web",
   "private": true,
   "version": "0.0.1",
   "type": "module",
@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@bb-browser/shared": "workspace:*",
+    "@ma-browser/shared": "workspace:*",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "zustand": "^5.0.13"

@@ -705,7 +705,7 @@ describe("TabStateManager + TabState contract tests", () => {
 // ---------------------------------------------------------------------------
 
 /**
- * Mirrors the isProcessAlive helper from @bb-browser/cli daemon-manager.
+ * Mirrors the isProcessAlive helper from @ma-browser/cli daemon-manager.
  * Uses signal 0 which doesn't actually send a signal — just checks existence.
  */
 function isProcessAlive(pid: number): boolean {
@@ -718,7 +718,7 @@ function isProcessAlive(pid: number): boolean {
 }
 
 describe("daemon.json PID strategy", () => {
-  const testDir = path.join(os.tmpdir(), "bb-browser-test-" + process.pid);
+  const testDir = path.join(os.tmpdir(), "ma-browser-test-" + process.pid);
   const testDaemonJson = path.join(testDir, "daemon.json");
 
   beforeEach(() => {

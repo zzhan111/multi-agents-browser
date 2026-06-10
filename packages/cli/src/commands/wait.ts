@@ -1,11 +1,11 @@
 /**
  * wait 命令 - 等待指定时间或元素出现
  * 用法：
- *   bb-browser wait <ms>   等待指定毫秒数
- *   bb-browser wait @<ref> 等待元素出现（最多 10 秒）
+ *   ma-browser wait <ms>   等待指定毫秒数
+ *   ma-browser wait @<ref> 等待元素出现（最多 10 秒）
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

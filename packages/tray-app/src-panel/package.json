@@ -1,5 +1,5 @@
 {
-  "name": "@bb-browser/tray-panel",
+  "name": "@ma-browser/tray-panel",
   "private": true,
   "version": "0.0.1",
   "type": "module",

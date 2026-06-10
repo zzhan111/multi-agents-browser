@@ -12,9 +12,9 @@
 //! | 🔴 Red    | Failure             | daemon not running / CDP down long  |
 //!
 //! Tooltip format (§3.3):
-//! - `bb-browser · 已连接 · :19826`
-//! - `bb-browser · 重连中 · :19826`
-//! - `bb-browser · 未运行`
+//! - `ma-browser · 已连接 · :19826`
+//! - `ma-browser · 重连中 · :19826`
+//! - `ma-browser · 未运行`
 
 use crate::supervisor::DaemonState;
 
@@ -83,8 +83,8 @@ fn build_tooltip(status: &str, port: Option<u16>, daemon: DaemonState) -> String
         DaemonState::Running | DaemonState::Starting
     );
     match (running, port) {
-        (true, Some(p)) => format!("bb-browser · {status} · :{p}"),
-        _ => format!("bb-browser · {status}"),
+        (true, Some(p)) => format!("ma-browser · {status} · :{p}"),
+        _ => format!("ma-browser · {status}"),
     }
 }
 
@@ -101,7 +101,7 @@ mod tests {
         let snap = calculate(DaemonState::Running, CdpState::Connected, Some(19826));
         assert_eq!(snap.color, TrayColor::Green);
         assert_eq!(snap.status_text, "已连接");
-        assert_eq!(snap.tooltip, "bb-browser · 已连接 · :19826");
+        assert_eq!(snap.tooltip, "ma-browser · 已连接 · :19826");
     }
 
     #[test]
@@ -109,14 +109,14 @@ mod tests {
         let snap = calculate(DaemonState::Running, CdpState::Reconnecting, Some(19826));
         assert_eq!(snap.color, TrayColor::Yellow);
         assert_eq!(snap.status_text, "重连中");
-        assert_eq!(snap.tooltip, "bb-browser · 重连中 · :19826");
+        assert_eq!(snap.tooltip, "ma-browser · 重连中 · :19826");
     }
 
     #[test]
     fn running_and_disconnected_long_is_red() {
         let snap = calculate(DaemonState::Running, CdpState::Disconnected, Some(19826));
         assert_eq!(snap.color, TrayColor::Red);
-        assert_eq!(snap.tooltip, "bb-browser · Chrome 已断开 · :19826");
+        assert_eq!(snap.tooltip, "ma-browser · Chrome 已断开 · :19826");
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(snap.color, TrayColor::Red);
         assert_eq!(snap.status_text, "未运行");
         // Port is omitted when daemon isn't running — matches §3.3 example.
-        assert_eq!(snap.tooltip, "bb-browser · 未运行");
+        assert_eq!(snap.tooltip, "ma-browser · 未运行");
     }
 
     #[test]
@@ -141,7 +141,7 @@ mod tests {
         // appear in the tooltip so the user sees which port we're trying.
         let snap = calculate(DaemonState::Starting, CdpState::Disconnected, Some(19826));
         assert_eq!(snap.color, TrayColor::Yellow);
-        assert_eq!(snap.tooltip, "bb-browser · 重连中 · :19826");
+        assert_eq!(snap.tooltip, "ma-browser · 重连中 · :19826");
     }
 
     #[test]
@@ -149,7 +149,7 @@ mod tests {
         let snap = calculate(DaemonState::FailedToStart, CdpState::Disconnected, None);
         assert_eq!(snap.color, TrayColor::Red);
         assert_eq!(snap.status_text, "启动失败");
-        assert_eq!(snap.tooltip, "bb-browser · 启动失败");
+        assert_eq!(snap.tooltip, "ma-browser · 启动失败");
     }
 
     #[test]
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn tooltip_omits_port_when_none_provided() {
         let snap = calculate(DaemonState::Running, CdpState::Connected, None);
-        assert_eq!(snap.tooltip, "bb-browser · 已连接");
+        assert_eq!(snap.tooltip, "ma-browser · 已连接");
     }
 
     #[test]
@@ -183,6 +183,6 @@ mod tests {
         // Even if a port is "remembered", we don't expose it once the
         // daemon stops — it would be misleading.
         let snap = calculate(DaemonState::Stopped, CdpState::Disconnected, Some(19826));
-        assert_eq!(snap.tooltip, "bb-browser · 未运行");
+        assert_eq!(snap.tooltip, "ma-browser · 未运行");
     }
 }

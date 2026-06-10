@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "Starting BB Browser Trace Studio..."
+echo "Starting MultiAgentsBrowser Trace Studio..."
 echo ""
 
 cd "$(dirname "$0")"

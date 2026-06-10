@@ -210,7 +210,7 @@ mod tests {
     fn temp_dir(name: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("bb-browser-test-{pid}-{n}-{name}"));
+        let dir = std::env::temp_dir().join(format!("ma-browser-test-{pid}-{n}-{name}"));
         std::fs::create_dir_all(&dir).expect("mkdir");
         dir
     }

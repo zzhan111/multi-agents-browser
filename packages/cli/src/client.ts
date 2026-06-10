@@ -2,7 +2,7 @@
  * Client — routes all commands through the daemon HTTP API
  */
 
-import type { Request, Response } from "@bb-browser/shared";
+import type { Request, Response } from "@ma-browser/shared";
 import { applyJq } from "./jq.js";
 import { daemonCommand, ensureDaemon } from "./daemon-manager.js";
 

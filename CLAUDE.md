@@ -14,7 +14,7 @@
 ### ✅ P1: 选择器可移植性
 
 ExportDialog 提供三个模式：
-- **Auto**：`ref` → `cssSelector` → `xpath`（保留 bb-browser ref 优先级）
+- **Auto**：`ref` → `cssSelector` → `xpath`（保留 ma-browser ref 优先级）
 - **CSS**：`cssSelector` → `xpath`，便于在标准 Playwright/Selenium 环境运行
 - **XPath**：仅用 `xpath`，跨 DOM 变化更稳定
 
@@ -34,7 +34,7 @@ ExportDialog 新增"智能等待"开关（默认开启）：
 
 `TRACE_CAPACITY` 通过 `BB_TRACE_CAPACITY` 环境变量配置（默认 1000，最小 100）。缓冲首次写满时打印一次性 warning 到 daemon stderr：
 ```
-[bb-browser] trace buffer full for tab <shortId> (cap=1000); oldest events will be discarded. Set BB_TRACE_CAPACITY to raise the limit.
+[ma-browser] trace buffer full for tab <shortId> (cap=1000); oldest events will be discarded. Set BB_TRACE_CAPACITY to raise the limit.
 ```
 
 ---

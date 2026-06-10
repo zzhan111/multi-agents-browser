@@ -1,10 +1,10 @@
-# Privacy Policy — bb-browser
+# Privacy Policy — ma-browser
 
 **Last updated:** 2026-03-14
 
-## What bb-browser does
+## What ma-browser does
 
-bb-browser is a browser automation tool that lets AI agents control your Chrome browser via the Chrome DevTools Protocol (CDP). It consists of a CLI, an MCP server, a local HTTP daemon, and a Chrome extension.
+ma-browser is a browser automation tool that lets AI agents control your Chrome browser via the Chrome DevTools Protocol (CDP). It consists of a CLI, an MCP server, a local HTTP daemon, and a Chrome extension.
 
 ## Data handling
 
@@ -18,7 +18,7 @@ AI Agent ↔ CLI/MCP ↔ localhost:19824 (daemon) ↔ Chrome Extension
 
 ## What data is accessed
 
-When you use bb-browser, the extension may access the following data **locally**:
+When you use ma-browser, the extension may access the following data **locally**:
 
 | Data type | How it's used | Stored? |
 |-----------|---------------|---------|
@@ -42,14 +42,14 @@ All data exists only in memory during the browser session. No data is written to
 
 ## Third parties
 
-bb-browser does not share any data with third parties. The extension communicates exclusively with a daemon process running on localhost.
+ma-browser does not share any data with third parties. The extension communicates exclusively with a daemon process running on localhost.
 
 ## Open source
 
-bb-browser is fully open source. You can audit the code at:
-https://github.com/epiral/bb-browser
+ma-browser is fully open source. You can audit the code at:
+https://github.com/zzhan111/multi-agents-browser
 
 ## Contact
 
 For privacy questions, open an issue at:
-https://github.com/epiral/bb-browser/issues
+https://github.com/zzhan111/multi-agents-browser/issues

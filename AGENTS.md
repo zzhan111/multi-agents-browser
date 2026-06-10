@@ -1,4 +1,4 @@
-# bb-browser Agent 开发规范
+# ma-browser Agent 开发规范
 
 ## 架构
 
@@ -58,7 +58,7 @@ MCP (packages/mcp) ──HTTP──┘       │
 
 ## UX 规范（Agent 和人类双用户）
 
-bb-browser 有两类用户：**人类**（直接用 CLI）和 **AI Agent**（通过 bash/MCP 调用）。Agent 是桥梁 — 读取 bb-browser 输出并翻译给人类。每个文本表面都要同时服务两者。
+ma-browser 有两类用户：**人类**（直接用 CLI）和 **AI Agent**（通过 bash/MCP 调用）。Agent 是桥梁 — 读取 ma-browser 输出并翻译给人类。每个文本表面都要同时服务两者。
 
 ### `site list` 描述
 
@@ -99,7 +99,7 @@ Agent 的函数签名。暴露完整 @meta：
 {
   "error": "HTTP 401",
   "hint": "需要先登录雪球，请先在浏览器中打开 xueqiu.com 并登录",
-  "action": "bb-browser open https://xueqiu.com"
+  "action": "ma-browser open https://xueqiu.com"
 }
 ```
 
@@ -113,7 +113,7 @@ Agent 的函数签名。暴露完整 @meta：
 
 ```
 # site update 之后：
-💡 运行 bb-browser site recommend 看看哪些和你的浏览习惯匹配
+💡 运行 ma-browser site recommend 看看哪些和你的浏览习惯匹配
 ```
 
 ### `--help` 分组

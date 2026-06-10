@@ -1,4 +1,4 @@
-//! Port discovery for bb-browser daemon.
+//! Port discovery for ma-browser daemon.
 //!
 //! Two independent port chains:
 //!  - daemon HTTP: 19824, 19826, 19828, ... (even)

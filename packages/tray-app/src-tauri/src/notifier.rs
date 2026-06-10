@@ -49,7 +49,7 @@ fn send(app: &AppHandle, title: &str, body: &str) {
 pub fn port_fallback(app: &AppHandle, original: u16, used: u16) {
     send(
         app,
-        "bb-browser · 端口已切换",
+        "ma-browser · 端口已切换",
         &format!("daemon 改用端口 {used}（{original} 被占用）"),
     );
 }
@@ -58,7 +58,7 @@ pub fn port_fallback(app: &AppHandle, original: u16, used: u16) {
 pub fn auto_restart(app: &AppHandle, count: usize) {
     send(
         app,
-        "bb-browser · daemon 已重启",
+        "ma-browser · daemon 已重启",
         &format!("daemon 已自动重启（第 {count} 次）"),
     );
 }
@@ -67,7 +67,7 @@ pub fn auto_restart(app: &AppHandle, count: usize) {
 pub fn cdp_disconnected(app: &AppHandle) {
     send(
         app,
-        "bb-browser · Chrome 连接断开",
+        "ma-browser · Chrome 连接断开",
         "Chrome 调试连接已断开 30 秒。检查 Chrome 是否还在运行。",
     );
 }
@@ -76,7 +76,7 @@ pub fn cdp_disconnected(app: &AppHandle) {
 pub fn gave_up(app: &AppHandle, crashes: usize) {
     send(
         app,
-        "bb-browser · 已暂停自动重启",
+        "ma-browser · 已暂停自动重启",
         &format!(
             "daemon 5 分钟内崩溃 {crashes} 次，已暂停自动重启。\
              右键托盘 → 重启 daemon 可手动重启。"

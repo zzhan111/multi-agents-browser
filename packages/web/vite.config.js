@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@bb-browser/shared': resolve(__dirname, '../../shared/src'),
+      '@ma-browser/shared': resolve(__dirname, '../../shared/src'),
     },
   },
   server: {

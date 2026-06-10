@@ -189,7 +189,7 @@ mod tests {
         let snap = c.snapshot();
         assert_eq!(snap.color, TrayColor::Red);
         assert_eq!(snap.status_text, "未运行");
-        assert_eq!(snap.tooltip, "bb-browser · 未运行");
+        assert_eq!(snap.tooltip, "ma-browser · 未运行");
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests {
         let snap = c.snapshot();
         assert_eq!(c.daemon_state(), DaemonState::Running);
         assert_eq!(snap.color, TrayColor::Green);
-        assert_eq!(snap.tooltip, "bb-browser · 已连接 · :19826");
+        assert_eq!(snap.tooltip, "ma-browser · 已连接 · :19826");
     }
 
     #[test]
@@ -256,7 +256,7 @@ mod tests {
         c.set_cdp_state(CdpState::Reconnecting);
         let snap = c.snapshot();
         assert_eq!(snap.color, TrayColor::Yellow);
-        assert_eq!(snap.tooltip, "bb-browser · 重连中 · :19826");
+        assert_eq!(snap.tooltip, "ma-browser · 重连中 · :19826");
     }
 
     #[test]
@@ -407,10 +407,10 @@ mod tests {
 
         // No port yet: tooltip omits it.
         c.set_daemon_port(None);
-        assert_eq!(c.snapshot().tooltip, "bb-browser · 已连接");
+        assert_eq!(c.snapshot().tooltip, "ma-browser · 已连接");
 
         // Port arrives.
         c.set_daemon_port(Some(19828));
-        assert_eq!(c.snapshot().tooltip, "bb-browser · 已连接 · :19828");
+        assert_eq!(c.snapshot().tooltip, "ma-browser · 已连接 · :19828");
     }
 }

@@ -16,7 +16,7 @@ import type {
   RefInfo,
   SnapshotData,
   TraceStatus,
-} from "@bb-browser/shared";
+} from "@ma-browser/shared";
 import { CdpConnection, type CdpTargetInfo } from "./cdp-connection.js";
 import type { TabState } from "./tab-state.js";
 import type { AgentSession } from "./session-state.js";

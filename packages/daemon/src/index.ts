@@ -1,5 +1,5 @@
 /**
- * bb-browser Daemon — CDP-direct backend
+ * ma-browser Daemon — CDP-direct backend
  *
  * Unified daemon that handles ALL browser commands (operations + observation)
  * via direct Chrome DevTools Protocol connection.
@@ -21,7 +21,7 @@ import {
   MANAGED_PORT_FILE,
   launchManagedBrowser,
   probeCdp,
-} from "@bb-browser/shared";
+} from "@ma-browser/shared";
 import { HttpServer, installLogInterceptor, type DaemonRuntimeStatus } from "./http-server.js";
 import { CdpConnection } from "./cdp-connection.js";
 import { TabStateManager } from "./tab-state.js";
@@ -90,10 +90,10 @@ function parseOptions(): DaemonOptions {
 
   if (values.help) {
     console.error(`
-bb-browser-daemon — CDP-direct backend for bb-browser
+ma-browser-daemon — CDP-direct backend for ma-browser
 
 Usage:
-  bb-browser-daemon [options]
+  ma-browser-daemon [options]
 
 Options:
   -H, --host <host>          HTTP server host (default: ${DAEMON_HOST})

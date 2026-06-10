@@ -1,11 +1,11 @@
 /**
  * dialog 命令 - 处理浏览器对话框（alert/confirm/prompt）
  * 用法：
- *   bb-browser dialog accept [text]  接受对话框，可传入 prompt 文本
- *   bb-browser dialog dismiss        拒绝/关闭对话框
+ *   ma-browser dialog accept [text]  接受对话框，可传入 prompt 文本
+ *   ma-browser dialog dismiss        拒绝/关闭对话框
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

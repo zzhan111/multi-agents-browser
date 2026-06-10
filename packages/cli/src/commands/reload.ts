@@ -1,6 +1,6 @@
 /**
  * reload 命令 - 通过 CDP 重载扩展
- * 用法：bb-browser reload
+ * 用法：ma-browser reload
  * 
  * 需要 Chrome 以 --remote-debugging-port=9222 启动
  * 并且 chrome://extensions 页面需要打开
@@ -13,7 +13,7 @@ export interface ReloadOptions {
   port?: number;
 }
 
-const EXTENSION_NAME = "bb-browser";
+const EXTENSION_NAME = "ma-browser";
 
 export async function reloadCommand(
   options: ReloadOptions = {}
@@ -52,7 +52,7 @@ export async function reloadCommand(
       }, 10000);
       
       ws.on("open", () => {
-        // 通过 developerPrivate API 查找 bb-browser 扩展并重载
+        // 通过 developerPrivate API 查找 ma-browser 扩展并重载
         const script = `
           (async function() {
             if (!chrome || !chrome.developerPrivate) {

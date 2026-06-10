@@ -2,12 +2,12 @@
  * history 命令 - 查询 Chrome 浏览历史
  *
  * 用法：
- *   bb-browser history search [query]   搜索历史记录
- *   bb-browser history domains          查看访问最多的域名
+ *   ma-browser history search [query]   搜索历史记录
+ *   ma-browser history domains          查看访问最多的域名
  */
 
 import { getHistoryDomains, searchHistory } from "../history-sqlite.js";
-import { generateId } from "@bb-browser/shared";
+import { generateId } from "@ma-browser/shared";
 
 interface HistoryOptions {
   json?: boolean;

@@ -1,4 +1,4 @@
-//! bb-browser tray-app library crate.
+//! ma-browser tray-app library crate.
 //!
 //! Most logic lives here so it is unit-testable without spinning up Tauri.
 //! `main.rs` is a thin entry that wires this library into the Tauri shell.

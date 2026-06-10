@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 /**
- * bb-browser 通信协议 — CLI/MCP ↔ Daemon ↔ Chrome CDP
+ * ma-browser 通信协议 — CLI/MCP ↔ Daemon ↔ Chrome CDP
  */
 
 /** 支持的操作类型 */

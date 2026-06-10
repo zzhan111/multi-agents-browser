@@ -17,8 +17,8 @@ function q(str) {
  * Pick the locator for a trace event under the chosen selector mode.
  * Returns `{ value, kind }` where kind is 'css' | 'xpath' | null.
  * Modes:
- *   - auto:  ref → css → xpath (default, matches bb-browser priority)
- *   - css:   cssSelector → xpath (portable, no bb-browser attr dependency)
+ *   - auto:  ref → css → xpath (default, matches ma-browser priority)
+ *   - css:   cssSelector → xpath (portable, no ma-browser attr dependency)
  *   - xpath: xpath only (most stable across DOM changes)
  */
 function pickSelector(event, mode) {
@@ -325,7 +325,7 @@ function ExportDialog() {
 
           <div className="export-options" style={{ marginTop: 8 }}>
             <span style={{ marginRight: 8, opacity: 0.7 }}>选择器:</span>
-            <label title="ref (bb-browser) → CSS → XPath">
+            <label title="ref (ma-browser) → CSS → XPath">
               <input
                 type="radio"
                 value="auto"

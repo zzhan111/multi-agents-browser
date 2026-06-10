@@ -1,5 +1,5 @@
 /**
- * Unified command registry — single source of truth for all bb-browser commands.
+ * Unified command registry — single source of truth for all ma-browser commands.
  *
  * CLI, MCP, and Edge Clip can auto-generate their interfaces from this registry.
  * This module is metadata only — it does not execute anything.

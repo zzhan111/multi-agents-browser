@@ -1,9 +1,9 @@
 /**
  * eval 命令 - 在当前页面执行 JavaScript
- * 用法：bb-browser eval "<js>"
+ * 用法：ma-browser eval "<js>"
  */
 
-import { generateId, type Request, type Response } from "@bb-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 

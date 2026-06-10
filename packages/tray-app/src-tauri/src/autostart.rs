@@ -7,7 +7,7 @@ mod inner {
     use std::path::PathBuf;
 
     const REG_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    const APP_NAME: &str = "bb-browser-tray";
+    const APP_NAME: &str = "ma-browser-tray";
 
     /// Read the HKCU Run key and return true if our entry is present.
     pub fn is_enabled() -> bool {

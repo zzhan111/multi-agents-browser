@@ -1,4 +1,4 @@
-//! Spawn and supervise the bb-browser daemon as a Node subprocess.
+//! Spawn and supervise the ma-browser daemon as a Node subprocess.
 //!
 //! The daemon writes a single READY line to stdout in the form
 //! `BB_DAEMON_READY {"daemonPort":N,"cdpPort":M,"token":"..."}` after it

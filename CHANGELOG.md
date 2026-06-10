@@ -1,5 +1,10 @@
 # Changelog
 
+> **Legacy notice (2026-06-10):** entries below predate the rename to
+> **MultiAgentsBrowser (`ma-browser`)** and intentionally keep their original
+> `bb-browser` wording and upstream links (github.com/epiral/bb-browser) for
+> historical accuracy. New entries use the new names.
+
 ## [Unreleased]
 
 ### Features

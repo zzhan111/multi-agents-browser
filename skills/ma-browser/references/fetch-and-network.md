@@ -10,22 +10,22 @@
 
 ```bash
 # GET 请求（绝对路径）
-bb-browser fetch https://www.reddit.com/api/me.json
+ma-browser fetch https://www.reddit.com/api/me.json
 
 # GET 请求（相对路径，使用当前 tab 的 origin）
-bb-browser fetch /api/me.json
+ma-browser fetch /api/me.json
 
 # POST 请求
-bb-browser fetch https://api.example.com/data --method POST --body '{"key":"value"}'
+ma-browser fetch https://api.example.com/data --method POST --body '{"key":"value"}'
 
 # 自定义请求头
-bb-browser fetch https://api.example.com/data --headers '{"Authorization":"Bearer token"}'
+ma-browser fetch https://api.example.com/data --headers '{"Authorization":"Bearer token"}'
 
 # 保存到文件
-bb-browser fetch https://api.example.com/data --output response.json
+ma-browser fetch https://api.example.com/data --output response.json
 
 # JSON 格式输出
-bb-browser fetch https://www.reddit.com/api/me.json --json
+ma-browser fetch https://www.reddit.com/api/me.json --json
 ```
 
 ### 完整选项
@@ -65,19 +65,19 @@ fetch 命令会自动处理 tab 匹配：
 
 ```bash
 # 检查登录状态
-bb-browser fetch https://www.reddit.com/api/me.json
+ma-browser fetch https://www.reddit.com/api/me.json
 
 # 调用内部 API
-bb-browser fetch https://internal.company.com/api/dashboard --json
+ma-browser fetch https://internal.company.com/api/dashboard --json
 
 # 提交表单数据
-bb-browser fetch https://api.example.com/submit \
+ma-browser fetch https://api.example.com/submit \
   --method POST \
   --body '{"name":"test","value":123}' \
   --headers '{"Content-Type":"application/json"}'
 
 # 下载数据到文件
-bb-browser fetch https://api.example.com/export.csv --output data.csv
+ma-browser fetch https://api.example.com/export.csv --output data.csv
 ```
 
 ---
@@ -90,38 +90,38 @@ bb-browser fetch https://api.example.com/export.csv --output data.csv
 
 ```bash
 # 查看网络请求
-bb-browser network requests [filter] [--with-body] [--json]
+ma-browser network requests [filter] [--with-body] [--json]
 
 # 拦截请求（阻止）
-bb-browser network route <url> --abort
+ma-browser network route <url> --abort
 
 # 拦截请求（mock 响应）
-bb-browser network route <url> --body '{"mock":"data"}'
+ma-browser network route <url> --body '{"mock":"data"}'
 
 # 移除指定拦截规则
-bb-browser network unroute <url>
+ma-browser network unroute <url>
 
 # 移除所有拦截规则
-bb-browser network unroute
+ma-browser network unroute
 
 # 清空请求记录
-bb-browser network clear
+ma-browser network clear
 ```
 
 ### network requests 详解
 
 ```bash
 # 查看所有请求
-bb-browser network requests
+ma-browser network requests
 
 # 按关键词过滤（匹配 URL）
-bb-browser network requests "api"
+ma-browser network requests "api"
 
 # 包含完整请求/响应体
-bb-browser network requests --with-body
+ma-browser network requests --with-body
 
 # 组合使用
-bb-browser network requests "api" --with-body --json
+ma-browser network requests "api" --with-body --json
 ```
 
 输出格式：
@@ -141,14 +141,14 @@ GET https://api.example.com/data
 
 ```bash
 # 阻止广告/追踪请求
-bb-browser network route "*analytics*" --abort
+ma-browser network route "*analytics*" --abort
 
 # Mock API 响应（用于测试）
-bb-browser network route "*/api/user" --body '{"name":"test","role":"admin"}'
+ma-browser network route "*/api/user" --body '{"name":"test","role":"admin"}'
 
 # 添加多条规则
-bb-browser network route "*tracker*" --abort
-bb-browser network route "*/api/config" --body '{"feature_flag":true}'
+ma-browser network route "*tracker*" --abort
+ma-browser network route "*/api/config" --body '{"feature_flag":true}'
 ```
 
 <!-- 证据来源：network.ts:79-92 route 输出逻辑 -->
@@ -157,10 +157,10 @@ bb-browser network route "*/api/config" --body '{"feature_flag":true}'
 
 ```bash
 # 移除指定规则
-bb-browser network unroute "*analytics*"
+ma-browser network unroute "*analytics*"
 
 # 移除所有规则
-bb-browser network unroute
+ma-browser network unroute
 ```
 
 <!-- 证据来源：network.ts:94-101 unroute 输出逻辑 -->
@@ -169,7 +169,7 @@ bb-browser network unroute
 
 ```bash
 # 清空请求记录（重新开始监控）
-bb-browser network clear
+ma-browser network clear
 ```
 
 <!-- 证据来源：network.ts:103-106 clear 输出逻辑 -->
@@ -180,16 +180,16 @@ bb-browser network clear
 
 ```bash
 # 1. 清空旧记录
-bb-browser network clear
+ma-browser network clear
 
 # 2. 刷新页面触发请求
-bb-browser refresh
+ma-browser refresh
 
 # 3. 查看 API 请求（过滤 + 完整体）
-bb-browser network requests "api" --with-body --json
+ma-browser network requests "api" --with-body --json
 
 # 4. 找到目标 API 后，用 fetch 测试
-bb-browser fetch /api/discovered-endpoint --json
+ma-browser fetch /api/discovered-endpoint --json
 
 # 5. 确认可行后，编写 site adapter
 # 参见 adapter-development.md
@@ -200,7 +200,7 @@ bb-browser fetch /api/discovered-endpoint --json
 所有 network 子命令都支持 `--tab <tabId>`，指定监控哪个 tab 的网络活动：
 
 ```bash
-bb-browser network requests --tab 123
-bb-browser network route "*api*" --abort --tab 456
-bb-browser network clear --tab 123
+ma-browser network requests --tab 123
+ma-browser network route "*api*" --abort --tab 456
+ma-browser network clear --tab 123
 ```

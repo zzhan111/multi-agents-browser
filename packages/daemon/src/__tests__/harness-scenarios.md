@@ -1,11 +1,11 @@
-# bb-browser Harness Test Scenarios
+# ma-browser Harness Test Scenarios
 
-这些场景用于验证 bb-browser 对 AI Agent 的可用性。每次大改后应该让 Agent 执行这些场景。
+这些场景用于验证 ma-browser 对 AI Agent 的可用性。每次大改后应该让 Agent 执行这些场景。
 
 ## 前提条件
 
 - Chrome 已启动并开启 CDP: `--remote-debugging-port=19222`
-- Daemon 已运行: `bb-browser-daemon --cdp-port 19222`
+- Daemon 已运行: `ma-browser-daemon --cdp-port 19222`
 - 或者直接使用 `bb` CLI（内部会自动管理 daemon）
 
 ## 场景 1: 搜索工作流
@@ -133,7 +133,7 @@
 
 ## 如何执行
 
-用 AI Agent（Claude Code、Codex、Gemini CLI 等）执行以上场景，使用 bb-browser daemon HTTP API。
+用 AI Agent（Claude Code、Codex、Gemini CLI 等）执行以上场景，使用 ma-browser daemon HTTP API。
 
 ```bash
 # 启动 Chrome（如果没有运行）
@@ -141,8 +141,8 @@
   --remote-debugging-port=19222 &
 
 # 启动 daemon
-cd /path/to/bb-browser
-pnpm --filter @bb-browser/daemon build
+cd /path/to/ma-browser
+pnpm --filter @ma-browser/daemon build
 node packages/daemon/dist/daemon.js --cdp-port 19222
 
 # 让 Agent 通过 HTTP 执行场景
@@ -164,7 +164,7 @@ Agent 的反馈即 harness 改进方向。常见改进信号：
 1. 启动 daemon，确认 `~/.bb-browser/daemon.json` 存在
 2. `kill -9 <daemon-pid>` 强制杀进程
 3. 确认 `daemon.json` 残留（未被正常清理）
-4. 运行 `bb-browser eval "1+1"` — CLI 应检测到 PID 不存活，删除旧文件，重新 spawn daemon
+4. 运行 `ma-browser eval "1+1"` — CLI 应检测到 PID 不存活，删除旧文件，重新 spawn daemon
 5. 验证命令正常返回结果
 
 **验证点：**

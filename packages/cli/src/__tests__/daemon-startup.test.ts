@@ -21,7 +21,7 @@ import http from "node:http";
 // ---------------------------------------------------------------------------
 
 // Use isolated temp dir to avoid conflicts with parallel test suites
-const DAEMON_DIR = path.join(os.tmpdir(), `bb-browser-test-startup-${process.pid}`);
+const DAEMON_DIR = path.join(os.tmpdir(), `ma-browser-test-startup-${process.pid}`);
 mkdirSync(DAEMON_DIR, { recursive: true });
 process.env.BB_BROWSER_HOME = DAEMON_DIR;
 const DAEMON_JSON = path.join(DAEMON_DIR, "daemon.json");

@@ -14,14 +14,14 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { createWriteStream, mkdirSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Request } from "@bb-browser/shared";
-import { COMMAND_TIMEOUT, DAEMON_PORT } from "@bb-browser/shared";
+import type { Request } from "@ma-browser/shared";
+import { COMMAND_TIMEOUT, DAEMON_PORT } from "@ma-browser/shared";
 import { CdpConnection } from "./cdp-connection.js";
 import type { CommandHistory } from "./command-history.js";
 import { CommandScheduler } from "./command-scheduler.js";
 import { SessionManager, type SessionScope } from "./session-state.js";
 import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
-import { DAEMON_DIR } from "@bb-browser/shared";
+import { DAEMON_DIR } from "@ma-browser/shared";
 import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
 import type { JournalManager } from "./agent-journal.js";
@@ -244,7 +244,7 @@ export class HttpServer {
             success: false,
             error: `Chrome not connected (CDP at ${cdpTarget})`,
             reason,
-            hint: "Make sure Chrome is running. Try: bb-browser daemon shutdown && bb-browser tab list",
+            hint: "Make sure Chrome is running. Try: ma-browser daemon shutdown && ma-browser tab list",
           });
           return;
         }
@@ -635,7 +635,7 @@ export function installLogInterceptor(logFilePath?: string): void {
       const stream = createWriteStream(logFilePath, { flags: "a" });
       fileSink = stream;
       stream.write(
-        `\n===== bb-browser daemon started ${new Date().toISOString()} (pid ${process.pid}) =====\n`,
+        `\n===== ma-browser daemon started ${new Date().toISOString()} (pid ${process.pid}) =====\n`,
       );
     } catch {
       // Best-effort: if we can't open the log file, keep logging to stderr.
