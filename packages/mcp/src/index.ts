@@ -27,6 +27,15 @@ const BB_SESSION_ID = process.env.BB_SESSION_ID ?? generateId();
 const BB_SESSION_LABEL = process.env.BB_SESSION_LABEL;
 const BB_SESSION_SCOPE = process.env.BB_SESSION_SCOPE; // "read-only" | "no-eval" | unset
 
+// Connect-only mode: never spawn a daemon, only connect to an
+// externally-managed one. Set this for MCP clients that must defer daemon
+// ownership to the Windows tray (which binds 0.0.0.0 so WSL agents can reach
+// it). Without it, ensureDaemon() auto-spawns a daemon bound to 127.0.0.1,
+// which races the tray and breaks WSL connectivity (see daemon.json/topology).
+const MA_BROWSER_CONNECT_ONLY =
+  process.env.MA_BROWSER_CONNECT_ONLY === "1" ||
+  process.env.MA_BROWSER_CONNECT_ONLY === "true";
+
 let cachedDaemonInfo: DaemonInfo | null = null;
 
 async function getDaemonInfo(): Promise<DaemonInfo | null> {
@@ -89,6 +98,11 @@ async function isDaemonRunning(): Promise<boolean> {
 
 async function ensureDaemon(): Promise<void> {
   if (await isDaemonRunning()) return;
+
+  // Connect-only: defer daemon ownership to the tray. Don't spawn — a
+  // 127.0.0.1-bound daemon here would race the tray's 0.0.0.0 daemon and
+  // break WSL access. sendCommand surfaces a clear "no daemon" error instead.
+  if (MA_BROWSER_CONNECT_ONLY) return;
 
   // Invalidate cache — daemon is not running so cached info is stale
   cachedDaemonInfo = null;
