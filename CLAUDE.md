@@ -1,5 +1,17 @@
 # CLAUDE.md
 
+## 项目改名 → MultiAgentsBrowser / `ma-browser`（2026-06-10）
+
+本项目由 **bb-browser**（fork 自 epiral/bb-browser）改名为 **MultiAgentsBrowser**，CLI/MCP 名 **`ma-browser`**，迁到独立仓库 **github.com/zzhan111/multi-agents-browser**（保留 epiral credit，见 README/LICENSE）。本地工作目录仍是 `Z:\Apps\bb-browser`。
+
+**作为历史兼容层有意保留、改动代码时勿动**：
+- `BB_*` 环境变量（`BB_BROWSER_HOME` / `BB_SESSION_*` / `BB_TRACE_CAPACITY` 等）
+- `~/.bb-browser` 数据目录、`x-bb-*` HTTP 头、`bbTabId` 协议字段
+- `Z:\Apps\bb-browser-tray` 部署目录名（exe 已改 `ma-browser-tray.exe`）
+- `epiral/bb-sites` 社区适配器仓库链接、CHANGELOG.md（带 legacy 注的历史条目）
+
+新增改动应使用 `ma-browser` 命名。运维链路细节见用户记忆 `project-rename-ma-browser` / `bb-chain-guard` / `deployment-after-commit`。
+
 ## Trace Export — 已完成改进（2026-05-18）
 
 以下原 roadmap 项已全部实现，记录于此供历史回溯。当前如需新增改进，请在文末"后续待改进项"追加。
