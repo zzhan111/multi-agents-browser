@@ -22,13 +22,13 @@ export async function networkCommand(
   options: NetworkOptions = {}
 ): Promise<void> {
   // Parse since: if numeric string, convert to number
-  let since: string | number | undefined;
+  let since: number | "last_action" | undefined;
   if (subCommand === "requests" && options.since) {
     const num = parseInt(options.since, 10);
-    since = (!isNaN(num) && String(num) === options.since) ? num : options.since;
+    since = (!isNaN(num) && String(num) === options.since) ? num : (options.since as "last_action");
   }
 
-  const request: Request & { since?: string | number; method?: string; status?: string } = {
+  const request: Request = {
     id: generateId(),
     action: "network",
     networkCommand: subCommand as "requests" | "route" | "unroute" | "clear",

@@ -655,7 +655,7 @@ async function siteRun(
   await ensureDaemonRunning();
 
   // 确定目标 tab
-  let targetTabId: number | undefined = options.tabId;
+  let targetTabId: string | number | undefined = options.tabId;
 
   // 如果用户没指定 --tab，自动查找匹配域名的 tab
   if (!targetTabId && site.domain) {
