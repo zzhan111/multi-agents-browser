@@ -370,16 +370,19 @@ export class CdpConnection {
     const tab = this.tabManager.getTab(targetId);
     if (!tab) return;
 
-    // Dialog handling
+    // Dialog handling. An open JavaScript dialog blocks the page's renderer
+    // thread, so every subsequent CDP command to this target hangs until the
+    // dialog is resolved. Always resolve it: use the tab's explicit handler if
+    // set, otherwise dismiss (accept:false) — the Playwright-like safe default
+    // that unblocks the tab without confirming a destructive action.
     if (method === "Page.javascriptDialogOpening") {
-      if (tab.dialogHandler) {
-        await this.sessionCommand(targetId, "Page.handleJavaScriptDialog", {
-          accept: tab.dialogHandler.accept,
-          ...(tab.dialogHandler.promptText !== undefined
-            ? { promptText: tab.dialogHandler.promptText }
-            : {}),
-        });
-      }
+      const handler = tab.dialogHandler ?? { accept: false };
+      await this.sessionCommand(targetId, "Page.handleJavaScriptDialog", {
+        accept: handler.accept,
+        ...(handler.promptText !== undefined
+          ? { promptText: handler.promptText }
+          : {}),
+      }).catch(() => {});
       return;
     }
 

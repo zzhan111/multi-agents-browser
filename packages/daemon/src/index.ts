@@ -406,7 +406,6 @@ async function bringUpCdpLoop(
   // lastLoggedMsg guard and would log every single retry).
   const HEARTBEAT_EVERY = 20;
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     // If something reconnected us already, stop.
     if (cdp.connected) return;

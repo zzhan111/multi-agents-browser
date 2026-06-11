@@ -59,7 +59,7 @@ describe("ScratchpadManager", () => {
     assert.equal(entries!.length, 10);
   });
 
-  it("gc removes entries whose last write is older than TTL", (t) => {
+  it("gc removes entries whose last write is older than TTL", () => {
     // Cannot easily control time without mocking, so just verify gc() doesn't
     // throw and doesn't remove fresh entries.
     const mgr = new ScratchpadManager();

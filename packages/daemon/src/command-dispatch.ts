@@ -906,7 +906,8 @@ export async function dispatchRequest(
           // Non-critical — click via CDP events already fired
         }
       }
-      return ok(request.id, { tab: shortId, seq });
+      const ref = tab.refs[request.ref];
+      return ok(request.id, { tab: shortId, seq, role: ref?.role, name: ref?.name });
     }
 
     case "fill":
@@ -916,10 +917,13 @@ export async function dispatchRequest(
       const seq = tab.recordAction();
       const backendNodeId = await parseRef(cdp, target.id, tab, request.ref);
       await insertTextIntoNode(cdp, target.id, backendNodeId, request.text, request.action === "fill");
+      const ref = tab.refs[request.ref];
       return ok(request.id, {
         value: request.text,
         tab: shortId,
         seq,
+        role: ref?.role,
+        name: ref?.name,
       });
     }
 
@@ -934,11 +938,20 @@ export async function dispatchRequest(
         "DOM.resolveNode",
         { backendNodeId },
       );
-      await cdp.sessionCommand(target.id, "Runtime.callFunctionOn", {
+      const priorState = await cdp.sessionCommand<{ result: { value: boolean } }>(target.id, "Runtime.callFunctionOn", {
         objectId: resolved.object.objectId,
-        functionDeclaration: `function() { this.checked = ${desired}; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); }`,
+        functionDeclaration: `function() { const was = this.checked; this.checked = ${desired}; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); return was; }`,
+        returnByValue: true,
       });
-      return ok(request.id, { tab: shortId, seq });
+      const wasChecked = priorState?.result?.value ?? false;
+      const ref = tab.refs[request.ref];
+      return ok(request.id, {
+        tab: shortId,
+        seq,
+        role: ref?.role,
+        name: ref?.name,
+        ...(desired ? { wasAlreadyChecked: wasChecked } : { wasAlreadyUnchecked: !wasChecked }),
+      });
     }
 
     case "select": {
@@ -950,14 +963,20 @@ export async function dispatchRequest(
         "DOM.resolveNode",
         { backendNodeId },
       );
-      await cdp.sessionCommand(target.id, "Runtime.callFunctionOn", {
+      const labelResult = await cdp.sessionCommand<{ result: { value: string | null } }>(target.id, "Runtime.callFunctionOn", {
         objectId: resolved.object.objectId,
-        functionDeclaration: `function() { this.value = ${JSON.stringify(request.value)}; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); }`,
+        functionDeclaration: `function() { this.value = ${JSON.stringify(request.value)}; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); return this.options && this.selectedIndex >= 0 ? this.options[this.selectedIndex].text : null; }`,
+        returnByValue: true,
       });
+      const ref = tab.refs[request.ref];
       return ok(request.id, {
         value: request.value,
         tab: shortId,
         seq,
+        role: ref?.role,
+        name: ref?.name,
+        selectedValue: request.value,
+        ...(labelResult?.result?.value != null ? { selectedLabel: labelResult.result.value } : {}),
       });
     }
 

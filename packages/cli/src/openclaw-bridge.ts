@@ -62,7 +62,9 @@ export function ocFindTabByDomain(tabs: OCTab[], domain: string): OCTab | undefi
 export function ocOpenTab(url: string): string {
   const raw = runOpenClaw(["open", url, "--json"], 30000);
   const data = parseOpenClawJson<{ id?: string; targetId?: string }>(raw);
-  return data.id || data.targetId;
+  const id = data.id || data.targetId;
+  if (!id) throw new Error("openclaw open 未返回 tab id");
+  return id;
 }
 
 export function ocEvaluate(targetId: string, fn: string): unknown {

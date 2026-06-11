@@ -284,6 +284,10 @@ export interface ResponseData {
   owner?: string;
   /** 是否已释放租约（tab_release 命令返回） */
   released?: boolean;
+  /** 稳定 tab 句柄（tab_claim/task_update 命令返回，跨浏览器重启存活） */
+  bbTabId?: string;
+  /** 任务进度游标（task_update 命令返回） */
+  progress?: string;
   /** 全局操作序号 */
   seq?: number;
   /** 观测查询游标（用于 since 增量查询） */
@@ -292,8 +296,20 @@ export interface ResponseData {
   snapshotData?: SnapshotData;
   /** 获取的文本或属性值（get 操作返回） */
   value?: string;
-  /** 截图路径（screenshot 操作返回） */
-  screenshotPath?: string;
+  /** 元素可访问性角色（click/hover/fill/check/select 等交互命令返回） */
+  role?: string;
+  /** 元素可访问名称（click/hover/fill/check/select 等交互命令返回） */
+  name?: string;
+  /** select 命令选中的 value */
+  selectedValue?: string;
+  /** select 命令选中项的可见文本 */
+  selectedLabel?: string;
+  /** check 命令：元素之前是否已勾选 */
+  wasAlreadyChecked?: boolean;
+  /** uncheck 命令：元素之前是否已取消勾选 */
+  wasAlreadyUnchecked?: boolean;
+  /** 截图路径（screenshot 操作返回，daemon 实际以 `path` 键返回） */
+  path?: string;
   /** 截图 data URL（screenshot 操作返回） */
   dataUrl?: string;
   /** eval 执行结果 */
