@@ -15,6 +15,7 @@ import TabPanel from '../components/TabPanel.jsx';
 import TraceControls from '../components/TraceControls.jsx';
 import TraceTimeline from '../components/TraceTimeline.jsx';
 import RealtimeMonitor from '../components/RealtimeMonitor.jsx';
+import CommandLog from '../components/CommandLog.jsx';
 import ExportDialog from '../components/ExportDialog.jsx';
 
 import styles from './TracePage.module.css';
@@ -34,6 +35,10 @@ export default function TracePage() {
     setTraceEvents,
     addTraceEvent,
     lastUpdated,
+    commands,
+    setCommands,
+    recordWindow,
+    setRecordWindow,
   } = useStore();
 
   const lastEventCursorRef = useRef(null);
@@ -69,14 +74,35 @@ export default function TracePage() {
     };
   }, [setConnected, setConnecting, setConnectionError]);
 
-  // Reset cursor only when recording flips false→true.
+  // Reset cursor only when recording flips false→true; stamp the record window
+  // (used to highlight which MCP commands fall inside the recording span).
   const wasRecordingRef = useRef(false);
   useEffect(() => {
     if (traceRecording && !wasRecordingRef.current) {
       lastEventCursorRef.current = null;
+      setRecordWindow({ start: Date.now(), end: null });
+    } else if (!traceRecording && wasRecordingRef.current) {
+      if (recordWindow.start != null) setRecordWindow({ ...recordWindow, end: Date.now() });
     }
     wasRecordingRef.current = traceRecording;
-  }, [traceRecording]);
+  }, [traceRecording, recordWindow, setRecordWindow]);
+
+  // Poll the daemon command history (continuous; NOT cleared on record start).
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await daemon.getCommands(100);
+        if (!cancelled && res?.commands) setCommands(res.commands);
+      } catch (err) {
+        console.error('[TracePage] commands poll error:', err);
+      }
+    };
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [connected, setCommands]);
 
   // Recording poll (Web Worker timer to avoid throttling when tab is hidden).
   useEffect(() => {
@@ -168,17 +194,26 @@ export default function TracePage() {
               <div className={styles.controls}>
                 <TraceControls />
               </div>
-              <div className={styles.timeline}>
-                {traceRecording && (
-                  <div className={styles.recordingIndicator}>
-                    <span className={styles.recDot} />
-                    <span>正在录制中…</span>
-                    <span className={styles.recNote}>
-                      {lastUpdated ? '最近有更新' : '等待操作'}
-                    </span>
-                  </div>
-                )}
-                <TraceTimeline />
+              <div className={styles.split}>
+                <div className={styles.commandPane}>
+                  <CommandLog
+                    commands={commands}
+                    tabShort={activeTab?.tab}
+                    recordWindow={recordWindow}
+                  />
+                </div>
+                <div className={styles.timeline}>
+                  {traceRecording && (
+                    <div className={styles.recordingIndicator}>
+                      <span className={styles.recDot} />
+                      <span>正在录制中…</span>
+                      <span className={styles.recNote}>
+                        {lastUpdated ? '最近有更新' : '等待操作'}
+                      </span>
+                    </div>
+                  )}
+                  <TraceTimeline />
+                </div>
               </div>
             </main>
           </div>

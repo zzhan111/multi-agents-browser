@@ -284,7 +284,7 @@ export class HttpServer {
           dispatchRequest(this.cdp, request, session, dispatchCtx),
           timeout,
         ]);
-        finish?.();
+        finish?.(response.success !== false, response.data?.tab);
         // Write journal after successful dispatch
         if (session.agentId && this.journalManager) {
           const tab = typeof request.tabId === "string" ? request.tabId : undefined;

@@ -21,6 +21,8 @@ export interface CommandRecord {
   status: "ok" | "error" | "inflight";
   /** Session ID of the calling agent (undefined for unauthenticated calls). */
   sessionId?: string;
+  /** Short id of the tab the command resolved to (undefined if none). */
+  tab?: string;
 }
 
 const CAPACITY = 200;
@@ -32,7 +34,7 @@ export class CommandHistory {
    * Record the start of a command and return a finish callback.
    * Call `finish(ok)` when the command completes (or errors).
    */
-  record(tool: string, args: unknown, sessionId?: string): (ok?: boolean) => void {
+  record(tool: string, args: unknown, sessionId?: string): (ok?: boolean, tab?: string) => void {
     const rec: CommandRecord = {
       tool,
       argsSummary: summarise(args),
@@ -43,9 +45,10 @@ export class CommandHistory {
     };
     this.buf.push(rec);
     const start = rec.ts;
-    return (ok = true) => {
+    return (ok = true, tab?: string) => {
       rec.durationMs = Date.now() - start;
       rec.status = ok ? "ok" : "error";
+      if (tab) rec.tab = tab;
     };
   }
 
