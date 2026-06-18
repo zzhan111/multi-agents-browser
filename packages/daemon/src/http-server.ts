@@ -359,12 +359,13 @@ export class HttpServer {
   }
 
   // ---------------------------------------------------------------------------
-  // GET /api/commands?limit=50
+  // GET /api/commands?limit=50&since=0
   // ---------------------------------------------------------------------------
 
   private handleCommands(url: string, res: ServerResponse): void {
     const limit = parseIntParam(url, "limit", 50);
-    const records = this.history ? this.history.recent(limit) : [];
+    const since = parseIntParam(url, "since", 0);
+    const records = this.history ? this.history.recent(limit, since) : [];
     this.sendJson(res, 200, { commands: records });
   }
 

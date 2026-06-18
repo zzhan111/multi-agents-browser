@@ -157,8 +157,8 @@ export class DaemonClient {
     return this._get('/api/overview');
   }
 
-  async getCommands(limit = 50) {
-    return this._get(`/api/commands?limit=${limit}`);
+  async getCommands(limit = 50, since = 0) {
+    return this._get(`/api/commands?limit=${limit}&since=${since}`);
   }
 
   async getLogs(level = '', limit = 200) {

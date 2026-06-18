@@ -9,6 +9,8 @@
 import { RingBuffer } from "./ring-buffer.js";
 
 export interface CommandRecord {
+  /** Monotonically increasing sequence number (stable unique key). */
+  seq: number;
   /** Tool name, e.g. "browser_click". */
   tool: string;
   /** Short human-readable argument summary (≤ 80 chars). */
@@ -29,6 +31,7 @@ const CAPACITY = 200;
 
 export class CommandHistory {
   private readonly buf = new RingBuffer<CommandRecord>(CAPACITY);
+  private nextSeq = 1;
 
   /**
    * Record the start of a command and return a finish callback.
@@ -36,6 +39,7 @@ export class CommandHistory {
    */
   record(tool: string, args: unknown, sessionId?: string): (ok?: boolean, tab?: string) => void {
     const rec: CommandRecord = {
+      seq: this.nextSeq++,
       tool,
       argsSummary: summarise(args),
       ts: Date.now(),
@@ -53,10 +57,10 @@ export class CommandHistory {
   }
 
   /**
-   * Return up to `limit` most-recent records, newest first.
+   * Return up to `limit` most-recent records with seq > `since`, newest first.
    */
-  recent(limit = 50): CommandRecord[] {
-    const all = this.buf.toArray();
+  recent(limit = 50, since = 0): CommandRecord[] {
+    const all = this.buf.toArray().filter((r) => r.seq > since);
     return all.slice(-limit).reverse();
   }
 }

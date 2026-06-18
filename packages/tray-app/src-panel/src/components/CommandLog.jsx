@@ -76,7 +76,7 @@ export default function CommandLog({ commands, tabShort, recordWindow }) {
             const recorded = inWindow(cmd.ts);
             return (
               <div
-                key={`cmd-${cmd.ts}-${i}`}
+                key={`cmd-${cmd.seq}`}
                 className={`cmdlog-row ${recorded ? 'cmdlog-row--recorded' : ''}`}
                 title={recorded ? '此命令在录制窗口内' : undefined}
               >

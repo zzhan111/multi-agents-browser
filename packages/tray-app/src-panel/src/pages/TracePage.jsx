@@ -77,24 +77,40 @@ export default function TracePage() {
   // Reset cursor only when recording flips false→true; stamp the record window
   // (used to highlight which MCP commands fall inside the recording span).
   const wasRecordingRef = useRef(false);
+  const recordWindowRef = useRef(recordWindow);
+  recordWindowRef.current = recordWindow;
   useEffect(() => {
     if (traceRecording && !wasRecordingRef.current) {
       lastEventCursorRef.current = null;
       setRecordWindow({ start: Date.now(), end: null });
     } else if (!traceRecording && wasRecordingRef.current) {
-      if (recordWindow.start != null) setRecordWindow({ ...recordWindow, end: Date.now() });
+      const rw = recordWindowRef.current;
+      if (rw.start != null) setRecordWindow({ ...rw, end: Date.now() });
     }
     wasRecordingRef.current = traceRecording;
-  }, [traceRecording, recordWindow, setRecordWindow]);
+  }, [traceRecording, setRecordWindow]);
 
-  // Poll the daemon command history (continuous; NOT cleared on record start).
+  // Poll the daemon command history (incremental via since=seq).
+  const lastCommandSeqRef = useRef(0);
   useEffect(() => {
     if (!connected) return;
     let cancelled = false;
     const poll = async () => {
       try {
-        const res = await daemon.getCommands(100);
-        if (!cancelled && res?.commands) setCommands(res.commands);
+        const res = await daemon.getCommands(100, lastCommandSeqRef.current);
+        if (!cancelled && res?.commands?.length) {
+          const cmds = res.commands;
+          const maxSeq = cmds.reduce((m, c) => Math.max(m, c.seq), 0);
+          if (maxSeq > lastCommandSeqRef.current) lastCommandSeqRef.current = maxSeq;
+          setCommands((prev) => {
+            // Merge: keep old commands not in the new batch, append new ones
+            const existingSeqs = new Set(cmds.map((c) => c.seq));
+            const merged = [...prev.filter((c) => !existingSeqs.has(c.seq)), ...cmds];
+            // Keep newest first, cap at 200
+            merged.sort((a, b) => b.seq - a.seq);
+            return merged.slice(0, 200);
+          });
+        }
       } catch (err) {
         console.error('[TracePage] commands poll error:', err);
       }
