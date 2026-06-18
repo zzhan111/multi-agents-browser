@@ -837,12 +837,30 @@ export async function siteCommand(
   }
 
   // 静默后台更新社区 adapter
-  silentUpdate();
+  silentUpdate(options);
 }
 
-function silentUpdate(): void {
+/**
+ * 后台快进更新社区 adapter 库。
+ *
+ * pull 是 detached + unref 的 fire-and-forget，拿不到退出码；但「结构性」故障
+ * （分支没跟踪上游 / 本地领先无法快进 / 工作区脏）会让后台 pull 永远静默空转，
+ * 社区 adapter 长期停更而用户无感知。这里先做一次纯本地（无网络）前置检查，
+ * 命中就在 stderr 提示一行并跳过注定失败的 pull。
+ */
+function silentUpdate(options: SiteOptions = {}): void {
   const gitDir = join(COMMUNITY_SITES_DIR, ".git");
   if (!existsSync(gitDir)) return;
+
+  const blocker = communityUpdateBlocker();
+  if (blocker) {
+    if (!options.json) {
+      console.error(`[ma-browser] 社区 adapter 自动更新已停止：${blocker}`);
+      console.error(`  修复后运行 ma-browser site update（库目录 ${COMMUNITY_SITES_DIR}）`);
+    }
+    return;
+  }
+
   import("node:child_process").then(({ spawn }) => {
     const child = spawn("git", ["pull", "--ff-only"], {
       cwd: COMMUNITY_SITES_DIR,
@@ -851,4 +869,33 @@ function silentUpdate(): void {
     });
     child.unref();
   }).catch(() => {});
+}
+
+/**
+ * 纯本地检查社区库能否 `git pull --ff-only`。返回阻塞原因，或 null（健康）。
+ * 不触发网络；检查自身的任何异常都返回 null，绝不因健康检查而打断 CLI。
+ */
+function communityUpdateBlocker(): string | null {
+  const run = (cmd: string): string =>
+    execSync(cmd, { cwd: COMMUNITY_SITES_DIR, stdio: ["pipe", "pipe", "pipe"], timeout: 3000 })
+      .toString()
+      .trim();
+  try {
+    let upstream: string;
+    try {
+      upstream = run("git rev-parse --abbrev-ref --symbolic-full-name @{u}");
+    } catch {
+      return "当前分支未跟踪上游（无法 git pull）";
+    }
+    const ahead = run("git rev-list --count @{u}..HEAD");
+    if (ahead !== "0") {
+      return `本地领先 ${upstream} ${ahead} 个提交，--ff-only 无法快进`;
+    }
+    if (run("git status --porcelain")) {
+      return "工作区有未提交改动，会阻塞快进";
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
