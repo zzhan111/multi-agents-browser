@@ -712,11 +712,27 @@ server.tool(
 
 server.tool(
   "site_recommend",
-  "Recommend adapters based on recent browsing history",
+  "Recommend adapters based on current open tabs (mode='current') or browsing history (mode='history'). Default 'current' queries the daemon for adapters matching the domains of currently open page tabs; 'history' reads Chrome browsing history to suggest adapters for frequently visited sites.",
   {
-    days: z.number().int().positive().optional().describe("How many recent days of history to inspect"),
+    mode: z.enum(["current", "history"]).optional().describe("Recommendation source: 'current' (open tabs, via daemon) or 'history' (browsing history, via CLI). Defaults to 'current'."),
+    days: z.number().int().positive().optional().describe("How many recent days of history to inspect (only used when mode='history')"),
   },
-  async ({ days }) => {
+  async ({ mode, days }) => {
+    const wantHistory = mode === "history";
+    if (!wantHistory) {
+      // mode='current' (default): ask the daemon which adapters match open tabs.
+      try {
+        const resp = await runCommand({ action: "site_recommend" });
+        if (resp.success && resp.data?.siteRecommendations) {
+          return textResult(resp.data.siteRecommendations);
+        }
+        // Daemon reachable but returned no data (e.g. no open tabs matched) —
+        // fall through to history so the agent still gets something useful.
+      } catch {
+        // Daemon unreachable — fall through to history fallback.
+      }
+    }
+    // mode='history', or 'current' fallback when daemon unavailable.
     try {
       const args = ["recommend", "--json"];
       if (days !== undefined) {

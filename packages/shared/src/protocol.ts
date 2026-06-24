@@ -45,7 +45,8 @@ export type ActionType =
   | "site_search"
   | "site_info"
   | "site_run"
-  | "site_update";
+  | "site_update"
+  | "site_recommend";
 
 /** 请求类型 */
 export interface Request {
@@ -362,6 +363,20 @@ export interface ResponseData {
     domain: string;
     visits: number;
     titles: string[];
+  }>;
+  /** site_recommend：基于当前活跃 tab 的 adapter 推荐 */
+  siteRecommendations?: Array<{
+    /** tab 短 ID */
+    tab: string;
+    /** tab 当前 URL */
+    url: string;
+    /** 匹配到的 adapter 列表 */
+    adapters: Array<{
+      name: string;
+      description: string;
+      domain: string;
+      example?: string;
+    }>;
   }>;
 }
 

@@ -536,7 +536,7 @@ const READ_ONLY_ALLOWED = new Set([
   "tab_release", "tab_claim",
   // Site adapter discovery is pure catalog reads (no browser side effects).
   // site_run is intentionally excluded — it runs arbitrary adapter JS.
-  "site_list", "site_search", "site_info",
+  "site_list", "site_search", "site_info", "site_recommend",
 ]);
 
 /** Returns true if the request involves running JavaScript via Runtime.evaluate. */
@@ -749,6 +749,30 @@ export async function dispatchRequest(
     const adapter = findAdapter(request.name);
     if (!adapter) return fail(request.id, `Site adapter '${request.name}' not found`);
     return ok(request.id, adapter as unknown as ExtResponseData);
+  }
+  if (request.action === "site_recommend") {
+    // Recommend adapters whose domain matches any currently open page tab.
+    // Mirrors the tab-origin matching used by site_run, so recommendations are
+    // immediately runnable. Pure read (getTargets + catalog) — no side effects.
+    const targets = (await cdp.getTargets()).filter((t) => t.type === "page");
+    const adapters = listAdapters();
+    const recommendations = targets
+      .map((t) => {
+        const tState = cdp.tabManager.getTab(t.id);
+        const matched = adapters.filter((a) => matchTabOrigin(t.url, a.domain));
+        return {
+          tab: tState?.shortId ?? t.id.slice(-4).toLowerCase(),
+          url: t.url,
+          adapters: matched.map((a) => ({
+            name: a.name,
+            description: a.description,
+            domain: a.domain,
+            ...(a.example ? { example: a.example } : {}),
+          })),
+        };
+      })
+      .filter((r) => r.adapters.length > 0);
+    return ok(request.id, { siteRecommendations: recommendations });
   }
   if (request.action === "site_run") {
     return handleSiteRun(cdp, request, session);
