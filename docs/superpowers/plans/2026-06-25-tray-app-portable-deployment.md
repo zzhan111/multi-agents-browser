@@ -1970,3 +1970,5 @@ git commit -m "chore(tray-app): portable deployment build verified"
 ```
 
 The portable zip is now built. The remaining verification (clean-environment smoke test per `docs/tray-app-smoke-test.md`) is a manual, pre-release step — not part of this implementation plan.
+
+> **Implementation note (post-execution):** During execution the full `pnpm package:win` could not be run because the real WebView2 Evergreen Bootstrapper (`MicrosoftEdgeWebview2Setup.exe`, ~2MB) requires a manual download from Microsoft and was represented by a placeholder. Verified instead: `pnpm build` produces the daemon + mcp bundles (consumed by the script), all 87 lib unit tests pass (including the 13 new `version` + `mcp_config` tests), and `cargo build --features tauri-app` succeeds with the staged placeholder resources. To complete Task 13, a human must place the real bootstrapper at `packages/tray-app/vendor/MicrosoftEdgeWebview2Setup.exe` and run `pnpm package:win`.
