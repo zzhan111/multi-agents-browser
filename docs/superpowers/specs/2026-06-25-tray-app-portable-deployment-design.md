@@ -41,12 +41,16 @@ Current state (verified in `packages/tray-app/src-tauri/`):
 | Auto-update version source | **Unified to `package.json`** (eliminates hardcoded `0.0.1`) |
 | Auto-update timing | **Startup (background) + manual menu item** |
 | Auto-update notification | **Menu text label only** |
+| MCP entry layout | **Dedicated `mcp/` subdirectory** (sibling to `daemon/`) |
+| MCP ↔ daemon relation | **Connect-only** (`MA_BROWSER_CONNECT_ONLY=1`); tray owns the daemon |
+| MCP config delivery | **Dual-track**: machine-readable `mcp-config.json` in zip root (agent self-configures) + tray "Copy MCP config" menu (human manual fallback) |
+| Agent discovery | **`mcp-config.json` + README instruction** (agent reads the file at the extracted dir) |
 
 ## 3. Product — Target & Artifact Layout
 
 ### 3.1 Target
 
-One portable zip. End user on Win10+ clean machine: extract → double-click `ma-browser-tray.exe` → built-in Node daemon starts → connects to user's Chrome → tray icon turns green. No pre-installed Node, no admin, no networking except first-run WebView2 bootstrap.
+One portable zip. End user on Win10+ clean machine: extract → double-click `ma-browser-tray.exe` → built-in Node daemon starts → connects to user's Chrome → tray icon turns green → a coding agent can then read `mcp-config.json` from the extracted dir and self-configure its MCP client to drive the browser. No pre-installed Node, no admin, no networking except first-run WebView2 bootstrap.
 
 ### 3.2 Zip Layout
 
@@ -62,6 +66,9 @@ ma-browser-tray-portable-v{VERSION}.zip
     │   ├── buildDomTree.js               # runtime-required dynamic script
     │   └── node_modules/
     │       └── ws/                       # only runtime dep that can't be inlined
+    ├── mcp/
+    │   └── mcp.js                        # MCP server bundle (tsup); runs connect-only
+    ├── mcp-config.json                   # machine-readable MCP config (agent self-configures)
     ├── icons/
     │   ├── tray-green.png
     │   ├── tray-red.png
@@ -70,9 +77,9 @@ ma-browser-tray-portable-v{VERSION}.zip
     └── README-EN.txt                     # English quick-start
 ```
 
-**Estimated size:** ~55MB (node.exe 40 + daemon bundle 1 + ws 0.5 + webview2 bootstrapper 2 + exe 10 + icons). Acceptable.
+**Estimated size:** ~56MB (node.exe 40 + daemon bundle 1 + mcp bundle 1 + ws 0.5 + webview2 bootstrapper 2 + exe 10 + icons). Acceptable.
 
-**Key:** `node/`, `daemon/`, `MicrosoftEdgeWebview2Setup.exe` are all Tauri resources, located at runtime via `resource_dir()` — consistent with `daemon_runner.rs` existing `locate_daemon_entry` logic.
+**Key:** `node/`, `daemon/`, `mcp/`, `mcp-config.json`, `MicrosoftEdgeWebview2Setup.exe` are all Tauri resources, located at runtime via `resource_dir()` — consistent with `daemon_runner.rs` existing `locate_daemon_entry` logic.
 
 ## 4. Code Changes
 
@@ -579,7 +586,104 @@ function syncVersion() {
 | `docs/tray-app-packaging.md` | add release flow section |
 | `docs/tray-app-smoke-test.md` | add update + version check steps |
 
-## 9. Out of Scope (MVP)
+## 9. Portable MCP Access (Coding-Agent Onboarding)
+
+> Added in a third brainstorming pass. The portable zip bundles the MCP server and a machine-readable config so a coding agent (Claude Code / Cursor / Cline) can discover and self-configure its MCP client by reading files in the extracted directory — no manual config pasting required, while still offering a manual "copy config" fallback.
+
+### 9.1 The Gap This Closes
+
+Without this section, the portable zip can control Chrome (daemon works) but **coding agents cannot connect to it**: (a) there is no global `ma-browser` on PATH, so the npm `npx -y ma-browser --mcp` config does not work; (b) the MCP server bundle (`mcp.js`) was not in the zip; (c) no "Copy MCP config" menu item exists in `app.rs` (the earlier plan assumed it did). The fix bundles `mcp.js`, generates a machine-readable `mcp-config.json`, and adds the menu item.
+
+### 9.2 Confirmed Decisions
+
+| Decision | Choice |
+|----------|--------|
+| MCP entry layout | **Dedicated `mcp/` subdirectory** (sibling to `daemon/`) |
+| MCP ↔ daemon relation | **Connect-only** (`MA_BROWSER_CONNECT_ONLY=1`); the tray is the sole daemon owner |
+| Config delivery | **Dual-track**: `mcp-config.json` (agent self-configures) + tray "Copy MCP config" menu (human fallback) |
+| Agent discovery | **`mcp-config.json` + README instruction** |
+
+### 9.3 mcp-config.json — Machine-Readable Access Descriptor
+
+**Template (written at packaging time, contains a placeholder):**
+
+```json
+{
+  "mcpServers": {
+    "ma-browser": {
+      "command": "<APP_DIR>\\node\\node.exe",
+      "args": ["<APP_DIR>\\mcp\\mcp.js"],
+      "env": { "MA_BROWSER_CONNECT_ONLY": "1" }
+    }
+  },
+  "_meta": {
+    "description": "ma-browser MCP server (connect-only; connects to the tray-owned daemon via ~/.bb-browser/daemon.json)",
+    "app_dir_placeholder": "<APP_DIR>",
+    "requires_daemon_running": true,
+    "daemon_status_hint": "Tray icon must be green (daemon running) before MCP calls will succeed"
+  }
+}
+```
+
+**Runtime placeholder fill:** on first startup the tray reads `mcp-config.json` from `resource_dir()`, replaces `<APP_DIR>` with the actual extraction root (`current_exe().parent()`), and writes it back to the same file. After this, the file a coding agent reads contains directly-usable absolute paths — the agent does not need to substitute anything.
+
+**Coding-agent onboarding flow:**
+1. User tells the coding agent "use ma-browser" and points it at the extraction directory.
+2. The agent reads `<extracted-dir>/mcp-config.json`, parses `mcpServers.ma-browser`.
+3. The agent writes that server config into its own MCP config file (Claude Code's `claude_desktop_config.json`, Cursor's `.cursor/mcp.json`, etc.).
+4. The agent launches the MCP server via the config's `command`/`args`; the server runs with `MA_BROWSER_CONNECT_ONLY=1` and connects to the tray-owned daemon via `~/.bb-browser/daemon.json`.
+
+### 9.4 Tray "Copy MCP config" Menu (Human Fallback)
+
+New menu item `copy_mcp_config`: on click, calls the existing `copy_text` IPC command with the `mcpServers` portion of the (already-filled) `mcp-config.json` as the clipboard payload. Lets a user manually paste the config into their agent's config file.
+
+Menu position (next to "检查更新"):
+```
+  ─────────────
+  状态: 运行中
+  ─────────────
+  复制 MCP 配置        ← copy_mcp_config (new)
+  检查更新
+  🆕 有新版本 vX.Y.Z
+  关于
+  退出
+```
+
+### 9.5 Code Changes
+
+| File | Change |
+|------|--------|
+| `scripts/package-win.mjs` | Phase 2: copy `dist/mcp.js` → `staging/mcp/mcp.js`; write `mcp-config.json` template (with `<APP_DIR>` placeholder) to staging root. `verifyStructure`: add `mcp/mcp.js` + `mcp-config.json` to required list. |
+| `src-tauri/src/mcp_config.rs` | **New** — `fill_placeholders(app)`: read `resource_dir/mcp-config.json`, replace `<APP_DIR>` → actual path, write back. `mcp_servers_json(app)`: return the filled `mcpServers` JSON string for clipboard copy. |
+| `src-tauri/src/app.rs` | New `ID_COPY_MCP_CONFIG` menu item + handler (reads filled mcp-config.json, copies mcpServers via `copy_text`); call `mcp_config::fill_placeholders` at startup. |
+| `src-tauri/src/main.rs` | Declare `mod mcp_config;` behind `#[cfg(feature = "tauri-app")]`. |
+| `tauri.conf.json` `resources` | Add `resources/mcp/**` and `resources/mcp-config.json` (script stages these into `src-tauri/resources/` before `tauri build`). |
+
+### 9.6 Documentation Changes
+
+**`README.txt` / `README-EN.txt`** step 4 rewritten:
+```
+4. 让你的 AI 客户端接入(两种方式):
+   方式 A(推荐,让 AI 自动配置):
+     告诉你的 AI:"用 ma-browser,配置文件在 <解压目录>\mcp-config.json"
+     AI 会读取该文件并自行配置 MCP。
+   方式 B(手动):
+     右键托盘 → "复制 MCP 配置" → 粘贴到你 AI 客户端的配置文件
+   注意:接入前确保托盘图标为绿色(daemon 运行中)。
+```
+
+**`docs/tray-app-packaging.md`** add a section documenting the `mcp-config.json` generation + placeholder-fill mechanism.
+
+### 9.7 Verification
+
+| Item | Method |
+|------|--------|
+| mcp.js bundled | structure check: `mcp/mcp.js` present in zip |
+| mcp-config.json present + filled | after first tray run, `mcp-config.json` contains no `<APP_DIR>` (replaced with real path) |
+| Agent can launch MCP server | from the extracted dir, run `<dir>\node\node.exe <dir>\mcp\mcp.js` with `MA_BROWSER_CONNECT_ONLY=1`; connects to daemon (tray green); a `browser snapshot` via the MCP client returns page info |
+| Copy menu works | right-click → "复制 MCP 配置" → clipboard contains valid `mcpServers` JSON with absolute paths |
+
+## 10. Out of Scope (MVP)
 
 - Auto-start on boot (menu item hidden; user can manually drop a shortcut into the Startup folder)
 - NSIS / MSI installer (portable zip only this round)
