@@ -10,7 +10,8 @@
     "dev":         "tauri dev",
     "build":       "npm run panel:build",
     "tauri:build": "npm run panel:build && tauri build",
-    "build:debug": "npm run panel:build && tauri build --debug"
+    "build:debug": "npm run panel:build && tauri build --debug",
+    "package:win": "node scripts/package-win.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0"
