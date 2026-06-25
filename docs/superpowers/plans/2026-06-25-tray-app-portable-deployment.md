@@ -738,15 +738,16 @@ Edit `packages/tray-app/src-tauri/tauri.conf.json`. Replace the `"resources"` ar
       "../icons/tray-green.png",
       "../icons/tray-red.png",
       "../icons/tray-yellow.png",
-      "../../vendor/MicrosoftEdgeWebview2Setup.exe",
-      "resources/node/**",
-      "resources/daemon/**",
-      "resources/mcp/**",
+      "../vendor/MicrosoftEdgeWebview2Setup.exe",
+      "resources/node/*",
+      "resources/daemon/*",
+      "resources/daemon/node_modules/**/*",
+      "resources/mcp/*",
       "resources/mcp-config.json"
     ],
 ```
 
-Note on the staging: the package script (Task 9) copies `node.exe` → `src-tauri/resources/node/node.exe`, the daemon bundle → `src-tauri/resources/daemon/`, the MCP bundle `dist/mcp.js` → `src-tauri/resources/mcp/mcp.js`, and writes the `mcp-config.json` template → `src-tauri/resources/mcp-config.json` BEFORE `tauri build` runs, so these globs resolve. The `../icons/` paths reference the runtime tray-status icons that live at `packages/tray-app/icons/`. The bootstrapper is vendored at `packages/tray-app/vendor/`.
+Note on the staging: the package script (Task 9) copies `node.exe` → `src-tauri/resources/node/node.exe`, the daemon bundle → `src-tauri/resources/daemon/`, the MCP bundle `dist/mcp.js` → `src-tauri/resources/mcp/mcp.js`, and writes the `mcp-config.json` template → `src-tauri/resources/mcp-config.json` BEFORE `tauri build` runs, so these globs resolve. The `../icons/` paths reference the runtime tray-status icons that live at `packages/tray-app/icons/` (one level up from `src-tauri/`, where `tauri.conf.json` lives — hence `../vendor/` too, NOT `../../vendor/`). IMPORTANT: Tauri's resource glob uses `**/*` (not bare `**`) to match nested files, and validates globs on every `cargo build` — so placeholder files must exist under `src-tauri/resources/` during development (gitignored).
 
 - [ ] **Step 2: Verify tauri config is valid JSON**
 

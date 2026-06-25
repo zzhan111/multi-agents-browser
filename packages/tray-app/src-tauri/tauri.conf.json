@@ -64,10 +64,11 @@
       "../icons/tray-green.png",
       "../icons/tray-red.png",
       "../icons/tray-yellow.png",
-      "../../vendor/MicrosoftEdgeWebview2Setup.exe",
-      "resources/node/**",
-      "resources/daemon/**",
-      "resources/mcp/**",
+      "../vendor/MicrosoftEdgeWebview2Setup.exe",
+      "resources/node/*",
+      "resources/daemon/*",
+      "resources/daemon/node_modules/**/*",
+      "resources/mcp/*",
       "resources/mcp-config.json"
     ],
     "windows": {
