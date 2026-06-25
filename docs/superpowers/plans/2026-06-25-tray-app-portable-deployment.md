@@ -307,10 +307,10 @@ Create the `update_checker.rs` module behind `#[cfg(feature = "tauri-app")]`. It
 Edit `packages/tray-app/src-tauri/Cargo.toml`. In the `[dependencies]` section (after the existing `serde_json = "1.0"` line), add:
 
 ```toml
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 ```
 
-Note: `reqwest` 0.13 is already in `Cargo.lock` transitively (Tauri pulls it at 0.13.3), so this just promotes it to a direct dep with minimal features — no second reqwest version is introduced. `serde` is already a dependency with `derive`.
+Note: `reqwest` 0.13 is already in `Cargo.lock` transitively (Tauri pulls it at 0.13.3), so this just promotes it to a direct dep with minimal features — no second reqwest version is introduced. The TLS feature is named `rustls` in 0.13 (not `rustls-tls`, which was the 0.11/0.12 name). `serde` is already a dependency with `derive`.
 
 - [ ] **Step 2: Declare the module in main.rs**
 

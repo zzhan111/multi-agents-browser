@@ -9,6 +9,8 @@ mod commands;
 mod daemon_runner;
 #[cfg(feature = "tauri-app")]
 mod notifier;
+#[cfg(feature = "tauri-app")]
+mod update_checker;
 
 #[cfg(feature = "tauri-app")]
 fn main() {
