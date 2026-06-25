@@ -11,6 +11,8 @@ mod daemon_runner;
 mod notifier;
 #[cfg(feature = "tauri-app")]
 mod update_checker;
+#[cfg(feature = "tauri-app")]
+mod webview2_check;
 
 #[cfg(feature = "tauri-app")]
 fn main() {
