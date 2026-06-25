@@ -11,3 +11,4 @@ pub mod port_discovery;
 pub mod restart_policy;
 pub mod supervisor;
 pub mod tray_state;
+pub mod version;
