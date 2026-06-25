@@ -38,6 +38,9 @@ const ID_DIAGNOSTICS: &str = "diagnostics";
 const ID_AUTOSTART: &str = "set_autostart";
 const ID_PORTS: &str = "set_ports";
 const ID_NOTIFICATIONS: &str = "set_notifications";
+const ID_COPY_MCP_CONFIG: &str = "copy_mcp_config";
+const ID_CHECK_UPDATE: &str = "check_update";
+const ID_UPDATE_AVAILABLE: &str = "update_available";
 const ID_ABOUT: &str = "about";
 const ID_QUIT: &str = "quit";
 
@@ -64,6 +67,7 @@ pub struct MenuHandles {
     pub status_row: MenuItem<tauri::Wry>,
     pub toggle_daemon: MenuItem<tauri::Wry>,
     pub restart: MenuItem<tauri::Wry>,
+    pub update_available: MenuItem<tauri::Wry>,
 }
 
 /// Entry point invoked by `main.rs`.
@@ -92,10 +96,40 @@ pub fn run() {
             crate::commands::set_autostart,
         ])
         .setup(|app| {
+            // Pre-start: if WebView2 is missing, prompt + launch bootstrapper
+            // and exit so the installer can run.
+            if crate::webview2_check::ensure_installed(app.handle()) {
+                app.handle().exit(0);
+                return Ok(());
+            }
+            // Fill <APP_DIR> in mcp-config.json so coding agents read a
+            // directly-usable config (absolute paths) from the extracted dir.
+            crate::mcp_config::fill_placeholders(app.handle());
             setup_tray(app.handle())?;
             apply_popup_effects(app.handle());
             // Auto-start the daemon as soon as the tray opens.
             dispatch_event(app.handle(), Event::UserStart);
+
+            // Background update check — silent on any failure.
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(info) =
+                    crate::update_checker::check_latest(crate::update_checker::RELEASE_REPO).await
+                {
+                    if crate::update_checker::is_update_available(&info.latest_version) {
+                        let payload = (info.latest_version.clone(), info.release_url.clone());
+                        let app_clone = app_handle.clone();
+                        let _ = app_handle.run_on_main_thread(move || {
+                            {
+                                let state = app_clone.state::<AppState>();
+                                let mut c = state.controller.lock().unwrap();
+                                c.set_update_info(Some(payload));
+                            }
+                            refresh_tray(&app_clone);
+                        });
+                    }
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -212,7 +246,14 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)>
     )?;
     let sep4 = PredefinedMenuItem::separator(app)?;
 
-    // --- Group 5: about / quit ---
+    // --- Group 5: MCP config / update / about / quit ---
+    let copy_mcp_config =
+        MenuItem::with_id(app, ID_COPY_MCP_CONFIG, "复制 MCP 配置", true, None::<&str>)?;
+    let check_update =
+        MenuItem::with_id(app, ID_CHECK_UPDATE, "检查更新", true, None::<&str>)?;
+    // update_available is built dynamically; hidden until an update is found.
+    let update_available =
+        MenuItem::with_id(app, ID_UPDATE_AVAILABLE, "", false, None::<&str>)?;
     let about = MenuItem::with_id(app, ID_ABOUT, "关于 ma-browser", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, ID_QUIT, "退出", true, Some("Ctrl+Q"))?;
 
@@ -229,6 +270,9 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)>
             &sep3,
             &settings_submenu,
             &sep4,
+            &copy_mcp_config,
+            &check_update,
+            &update_available,
             &about,
             &quit,
         ],
@@ -237,6 +281,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)>
         status_row,
         toggle_daemon,
         restart,
+        update_available,
     };
     Ok((menu, handles))
 }
@@ -329,15 +374,81 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             }
         }
 
-        // --- About / quit ---
+        // --- MCP config / update / about / quit ---
+        ID_COPY_MCP_CONFIG => {
+            match crate::mcp_config::mcp_servers_json(app) {
+                Some(json) => {
+                    use tauri_plugin_clipboard_manager::ClipboardExt;
+                    if let Err(e) = app.clipboard().write_text(&json) {
+                        eprintln!("[mcp_config] clipboard write failed: {e}");
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "[mcp_config] mcp-config.json missing or unparseable; cannot copy"
+                    );
+                }
+            }
+        }
+        ID_CHECK_UPDATE => {
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::update_checker::check_latest(crate::update_checker::RELEASE_REPO)
+                    .await
+                {
+                    Some(info) => {
+                        let is_new =
+                            crate::update_checker::is_update_available(&info.latest_version);
+                        let app_clone2 = app_clone.clone();
+                        let _ = app_clone.run_on_main_thread(move || {
+                            {
+                                let state = app_clone2.state::<AppState>();
+                                let mut c = state.controller.lock().unwrap();
+                                c.set_update_info(if is_new {
+                                    Some((info.latest_version.clone(), info.release_url.clone()))
+                                } else {
+                                    None
+                                });
+                            }
+                            refresh_tray(&app_clone2);
+                        });
+                    }
+                    None => {
+                        // Rate-limited / network failure — show "稍后再试".
+                        let app_clone3 = app_clone.clone();
+                        let _ = app_clone.run_on_main_thread(move || {
+                            let state = app_clone3.state::<AppState>();
+                            let guard = state.menu_handles.lock().unwrap();
+                            if let Some(h) = guard.as_ref() {
+                                let _ = h.update_available.set_text("检查失败,稍后再试");
+                                let _ = h.update_available.set_enabled(true);
+                            }
+                        });
+                    }
+                }
+            });
+        }
+        ID_UPDATE_AVAILABLE => {
+            let url = {
+                let state = app.state::<AppState>();
+                let c = state.controller.lock().unwrap();
+                c.update_info().map(|i| i.1.clone())
+            };
+            if let Some(url) = url {
+                use tauri_plugin_opener::OpenerExt;
+                let _ = app.opener().open_url(url, None::<&str>);
+            }
+        }
         ID_ABOUT => {
             use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+            let version = crate::update_checker::current_version();
             app.dialog()
-                .message(concat!(
-                    "版本: 0.0.1\n\n",
-                    "ma-browser 让 AI 通过 Chrome DevTools Protocol\n",
-                    "直接控制你真实的 Chrome 浏览器。\n\n",
-                    "GitHub: github.com/anthropics/ma-browser"
+                .message(format!(
+                    "版本: {}\n\n\
+                     ma-browser 让 AI 通过 Chrome DevTools Protocol\n\
+                     直接控制你真实的 Chrome 浏览器。\n\n\
+                     GitHub: github.com/zzhan111/multi-agents-browser",
+                    version
                 ))
                 .title("关于 ma-browser")
                 .kind(MessageDialogKind::Info)
@@ -493,6 +604,29 @@ fn refresh_tray(app: &AppHandle) {
         // Restart only makes sense when daemon is active.
         if let Err(e) = handles.restart.set_enabled(is_active) {
             eprintln!("[tray] set_enabled(restart) failed: {e}");
+        }
+        // Update the "new version available" item from the controller's
+        // update_info. Shown + labelled when an update is detected; hidden
+        // otherwise (unless a manual check failed → "稍后再试").
+        let update_label = {
+            let c = state.controller.lock().unwrap();
+            c.update_info()
+                .map(|i| format!("🆕 有新版本 v{}", i.0))
+        };
+        if let Some(label) = update_label {
+            let _ = handles.update_available.set_text(&label);
+            let _ = handles.update_available.set_enabled(true);
+        } else if handles.update_available.is_enabled().unwrap_or(false)
+            && !handles
+                .update_available
+                .text()
+                .map(|t| t.to_string())
+                .unwrap_or_default()
+                .contains("稍后再试")
+        {
+            // No update and not in the "稍后再试" failure state: hide it.
+            let _ = handles.update_available.set_text("");
+            let _ = handles.update_available.set_enabled(false);
         }
     }
     drop(guard);

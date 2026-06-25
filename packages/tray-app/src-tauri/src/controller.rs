@@ -23,6 +23,10 @@ pub struct TrayController {
     daemon_port: Option<u16>,
     cdp_port: Option<u16>,
     token: Option<String>,
+    /// Latest detected update (version + release URL). Plain strings keep
+    /// this lib module Tauri-free (it cannot reference `update_checker`,
+    /// which lives in the tauri-app binary crate).
+    update_info: Option<(String, String)>,
 }
 
 impl Default for TrayController {
@@ -39,6 +43,7 @@ impl TrayController {
             daemon_port: None,
             cdp_port: None,
             token: None,
+            update_info: None,
         }
     }
 
@@ -79,6 +84,18 @@ impl TrayController {
     /// Set the daemon's session token (shown to user for MCP config).
     pub fn set_token(&mut self, token: Option<String>) {
         self.token = token;
+    }
+
+    /// Store the latest release info as `(latest_version, release_url)`.
+    /// Called when the update check finds one.
+    pub fn set_update_info(&mut self, info: Option<(String, String)>) {
+        self.update_info = info;
+    }
+
+    /// Current update info `(latest_version, release_url)`, if a newer
+    /// release was detected.
+    pub fn update_info(&self) -> Option<&(String, String)> {
+        self.update_info.as_ref()
     }
 
     /// Resolved daemon HTTP port, if known.

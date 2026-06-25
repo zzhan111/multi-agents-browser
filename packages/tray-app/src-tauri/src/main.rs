@@ -13,6 +13,8 @@ mod notifier;
 mod update_checker;
 #[cfg(feature = "tauri-app")]
 mod webview2_check;
+#[cfg(feature = "tauri-app")]
+mod mcp_config;
 
 #[cfg(feature = "tauri-app")]
 fn main() {
