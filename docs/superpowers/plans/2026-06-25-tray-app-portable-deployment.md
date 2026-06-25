@@ -220,7 +220,7 @@ git commit -m "feat(tray-app): pure-logic semver version comparison module"
 
 ## Task 2: build.rs injects BB_BROWSER_VERSION from package.json
 
-Extend the existing `build.rs` to read `../../package.json` (repo root) and emit `cargo:rustc-env=BB_BROWSER_VERSION=<version>`. This makes `env!("BB_BROWSER_VERSION")` available to Rust code.
+Extend the existing `build.rs` to read `../../../package.json` (repo root) and emit `cargo:rustc-env=BB_BROWSER_VERSION=<version>`. This makes `env!("BB_BROWSER_VERSION")` available to Rust code.
 
 **Files:**
 - Modify: `packages/tray-app/src-tauri/build.rs`
@@ -244,15 +244,15 @@ fn main() {
 
 fn inject_version() {
     // build.rs runs with CWD = the crate dir (packages/tray-app/src-tauri).
-    // The repo root is two levels up.
-    let manifest_path = std::path::Path::new("../../package.json");
+    // The repo root is three levels up: src-tauri -> tray-app -> packages -> root.
+    let manifest_path = std::path::Path::new("../../../package.json");
     let manifest = std::fs::read_to_string(manifest_path)
-        .expect("build.rs: cannot read ../../package.json — run from repo root");
+        .expect("build.rs: cannot read ../../../package.json — run from repo root");
     let version = extract_json_string_field(&manifest, "version")
         .expect("build.rs: package.json has no \"version\" string field");
     println!("cargo:rustc-env=BB_BROWSER_VERSION={}", version);
     // Re-run if package.json changes.
-    println!("cargo:rerun-if-changed=../../package.json");
+    println!("cargo:rerun-if-changed=../../../package.json");
 }
 
 /// Minimal JSON string-field extractor (avoids pulling a JSON crate into the
@@ -261,11 +261,12 @@ fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
     let needle = format!("\"{}\"", field);
     let idx = json.find(&needle)?;
     let rest = &json[idx + needle.len()..];
+    // Find the first `"` after the `:` that follows the field key.
     let colon = rest.find(':')?;
     let after_colon = &rest[colon + 1..];
     let quote = after_colon.find('"')?;
-    let value_start = colon + 1 + quote + 1;
-    let value_rest = &json[value_start..];
+    let value_start_in_rest = colon + 1 + quote + 1;
+    let value_rest = &rest[value_start_in_rest..];
     let end = value_rest.find('"')?;
     Some(value_rest[..end].to_string())
 }
@@ -281,7 +282,7 @@ Expected: succeeds (build script runs). To confirm the value, run a one-off chec
 ```
 cargo build --lib -v 2>&1 | findstr BB_BROWSER_VERSION
 ```
-Expected: a line containing `BB_BROWSER_VERSION=0.11.6` (or whatever package.json currently says).
+Expected: a line containing `BB_BROWSER_VERSION=0.11.6` (or whatever `../../../package.json` currently says).
 
 - [ ] **Step 3: Commit**
 
