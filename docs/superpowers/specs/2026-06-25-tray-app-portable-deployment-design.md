@@ -36,6 +36,11 @@ Current state (verified in `packages/tray-app/src-tauri/`):
 | Verification | **Clean-environment smoke test** |
 | Node bundling approach | **Tauri resources** (resource_dir-based, consistent with existing daemon location logic) |
 | Icon direction | **Geometric abstract / multi-agent** (SVG → PNG → tauri icon toolchain) |
+| Auto-update granularity | **Detect only + guide manual replacement** (portable exe cannot self-swap) |
+| Auto-update channel | **GitHub Releases API** (`zzhan111/multi-agents-browser`) |
+| Auto-update version source | **Unified to `package.json`** (eliminates hardcoded `0.0.1`) |
+| Auto-update timing | **Startup (background) + manual menu item** |
+| Auto-update notification | **Menu text label only** |
 
 ## 3. Product — Target & Artifact Layout
 
@@ -368,10 +373,216 @@ Per `docs/tray-app-smoke-test.md`. Core pass criteria:
 | WebView2 bootstrapper needs network | README states "first run needs network for WebView2"; only networking point, acceptable |
 | node.exe version incompatible with daemon bundle Node API | Pin LTS v20, aligned with dev/CI env; rerun smoke test when upgrading the constant |
 
-## 8. Out of Scope (MVP)
+## 8. Auto-Update Mechanism
+
+> Added in a second brainstorming pass. The tray-app now detects new releases and guides the user to manually replace the portable zip. There is **no** automatic download/file-swap — that is incompatible with the portable exe model (a running exe cannot self-replace, there is no fixed install path, and a failed background swap has no rollback).
+
+### 8.1 Confirmed Decisions
+
+| Decision | Choice |
+|----------|--------|
+| Update granularity | **Detect only + guide manual replacement** |
+| Detection channel | **GitHub Releases API** |
+| Version source | **Unified to `package.json`** (eliminates the hardcoded `0.0.1`) |
+| Detection timing | **On startup (background async) + manual menu item** |
+| Notification form | **Menu text label only** ("🆕 有新版本 vX.Y.Z", click opens release page) |
+
+### 8.2 Mechanism & Data Flow
+
+```
+tray startup
+  └─ background async task (tauri::async_runtime::spawn)
+       ├─ read current version (compile-time injected, source = package.json)
+       ├─ HTTP GET https://api.github.com/repos/zzhan111/multi-agents-browser/releases/latest
+       ├─ parse release tag_name (e.g. "v0.12.0")
+       ├─ semver compare: latest > current ?
+       └─ yes → store {latestVersion, releaseUrl, downloadUrl} in TrayState
+                 → menu refresh: insert clickable "🆕 有新版本 vX.Y.Z" item above About
+          no  → no notification
+
+user clicks menu item → tauri-plugin-opener opens releaseUrl in browser
+                      → user downloads new zip → exits tray → extracts/replaces dir → restarts
+```
+
+**No auto-download/swap rationale (portable constraint):**
+- A running portable exe holds its own file open; it cannot self-delete/replace.
+- No fixed install path — a background swap script cannot reliably locate the target.
+- A failed auto-restart has no rollback (no installer backup, unlike NSIS).
+- "Guide manual replacement" shifts these risks to the user, consistent with the portable philosophy.
+
+**GitHub Releases API robustness:**
+- Network failure / timeout (5s) → silent abort, does not affect startup.
+- Non-200 / parse failure → silent abort.
+- Rate limit (403, 60 req/hr unauthenticated) → silent on startup; on manual menu click, if still limited the menu shows "检查失败,稍后再试".
+- Fully offline environment → feature silently unavailable, no error (normal for portable offline use).
+
+**Semver comparison:** lightweight `major.minor.patch` parse + numeric compare (no extra crate). Release tags conventionally `vX.Y.Z`; strip leading `v`. No pre-release tag handling in MVP (release tags are clean).
+
+### 8.3 Version Unification — eliminate hardcoded `0.0.1`
+
+Current tray-app version `0.0.1` is hardcoded in 3 places (`tauri.conf.json:4`, `Cargo.toml:3`, `app.rs:337` About dialog), disconnected from npm `0.11.6`. Unified source = `package.json`.
+
+**New `src-tauri/build.rs`** — reads root `package.json` version, sets cargo env var:
+```rust
+fn main() {
+    let manifest = std::fs::read_to_string("../../package.json").expect("read package.json");
+    let version = /* parse .version */;
+    println!("cargo:rustc-env=BB_BROWSER_VERSION={}", version);
+}
+```
+
+**Consumed in 3 places:**
+- `app.rs:337` About dialog `"版本: 0.0.1\n\n"` → `concat!("版本: ", env!("BB_BROWSER_VERSION"), "\n\n")`.
+- `tauri.conf.json` / `Cargo.toml` version fields → synced by `package-win.mjs` (§8.6) before build, from `package.json`.
+- `update_checker.rs::current_version()` returns `env!("BB_BROWSER_VERSION")`.
+
+Single source of truth = `package.json`. `build.rs` (compile-time Rust value) + build script (conf files) both read it.
+
+### 8.4 New `update_checker.rs` Module
+
+```rust
+// src-tauri/src/update_checker.rs
+const RELEASE_REPO: &str = "zzhan111/multi-agents-browser";
+
+pub struct UpdateInfo {
+    pub latest_version: String,   // "0.12.0" (no v prefix)
+    pub release_url: String,      // https://github.com/zzhan111/multi-agents-browser/releases/tag/v0.12.0
+    pub download_url: String,     // direct zip asset URL
+}
+
+/// Current app version, injected at build time from package.json.
+pub fn current_version() -> &'static str {
+    env!("BB_BROWSER_VERSION")
+}
+
+/// Fetch latest release from GitHub. None on any failure (silent).
+pub async fn check_latest(repo: &str) -> Option<UpdateInfo> {
+    let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
+    // reqwest GET with User-Agent (GitHub requires), 5s timeout
+    // parse tag_name, html_url, assets[].browser_download_url (zip)
+    // strip leading 'v' from tag_name
+}
+
+/// Compare semver: latest > current ?
+pub fn is_newer(latest: &str, current: &str) -> bool {
+    // parse "major.minor.patch", numeric compare
+}
+```
+
+**Dependency:** `reqwest` (async). If Tauri v2 does not already pull it transitively, add to `Cargo.toml` with `default-features = false` + `rustls-tls` to minimize size (~+2MB acceptable).
+
+### 8.5 Tray Integration — `app.rs`
+
+**Startup detection** in `setup()`:
+```rust
+let app_handle = app.handle().clone();
+tauri::async_runtime::spawn(async move {
+    if let Some(info) = update_checker::check_latest(update_checker::RELEASE_REPO).await {
+        if update_checker::is_newer(&info.latest_version, update_checker::current_version()) {
+            // store in TrayState, refresh menu
+        }
+    }
+    // any failure path silent — network unreachable is normal
+});
+```
+
+**Menu items** (new IDs alongside existing `app.rs:33-42`):
+- `check_update` — always-present "检查更新"; click triggers `check_latest` manually, on rate-limit shows "检查失败,稍后再试".
+- `update_available` — dynamically shown only when an update is detected; label = `format!("🆕 有新版本 v{}", info.latest_version)`; click → `tauri-plugin-opener` opens `release_url`.
+
+```
+Menu structure (inserted above About):
+  ─────────────
+  状态: 运行中
+  ─────────────
+  检查更新          ← check_update (always present)
+  🆕 有新版本 vX.Y.Z  ← update_available (only when update detected)
+  关于              ← About version now from env!()
+  退出
+```
+
+**`tray_state.rs`:** add `pub update_info: Option<UpdateInfo>` field; menu builder reads it to decide whether to show the `update_available` item.
+
+**About dialog fix:** `app.rs:337` currently links to `github.com/anthropics/ma-browser` (incorrect). Fix to `github.com/zzhan111/multi-agents-browser`.
+
+### 8.6 Build Script Changes — `package-win.mjs`
+
+Add a **Phase 0 — version sync** before the existing Phase 1:
+```mjs
+// Phase 0: version sync — package.json is single source of truth
+function syncVersion() {
+  const version = readJson('package.json').version  // "0.11.6"
+  patchFile('packages/tray-app/src-tauri/Cargo.toml', /version = ".*"/, `version = "${version}"`)
+  patchJson('packages/tray-app/src-tauri/tauri.conf.json', { version })
+}
+```
+`build.rs` (compile-time Rust value) + script (conf files) both read `package.json` — double insurance, consistent.
+
+### 8.7 Documentation Changes
+
+**`README.txt` / `README-EN.txt`** add an update section:
+```
+6. 更新:
+   - 有新版本时,右键托盘菜单会显示 "🆕 有新版本 vX.Y.Z"
+   - 点击该项打开下载页,下载新 zip
+   - 退出当前程序(右键→退出),解压新 zip 替换整个目录,重新双击 exe
+```
+
+**`docs/tray-app-packaging.md`** add a "Release a new version" section:
+```
+## Release a new version
+1. Bump version in package.json
+2. git tag vX.Y.Z && git push origin vX.Y.Z
+3. pnpm package:win → produces zip
+4. Create Release on GitHub (zzhan111/multi-agents-browser), tag = vX.Y.Z
+5. Upload zip to Release assets
+6. User tray detects the new version on next startup
+```
+
+**`docs/tray-app-smoke-test.md`** add:
+```
+8. [Expected] Tray menu shows "检查更新", clicking no error (network available)
+9. [Expected] About dialog version = package.json version (not 0.0.1)
+```
+
+### 8.8 Verification
+
+| Item | Method |
+|------|--------|
+| Version unified | smoke test step 9: About shows package.json version |
+| Detection does not block startup | time double-click → tray icon < 3s (GitHub API is background async) |
+| Network unreachable silent | start tray offline, no error popup, "检查更新" click shows "检查失败,稍后再试" |
+| Update detected | set current version below an already-published release (temporarily lower package.json), menu shows "🆕 有新版本" |
+| Menu click opens release page | click → browser opens `github.com/zzhan111/multi-agents-browser/releases/tag/vX.Y.Z` |
+
+### 8.9 Risks & Mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| GitHub API rate limit (60/hr unauthenticated) | startup + manual click only, low frequency; on limit, menu shows "稍后再试" not error |
+| GitHub unreachable (enterprise intranet / firewall) | silent failure, feature unavailable but core (daemon/Chrome) unaffected |
+| package.json version diverges from published Release (forgot to publish) | does not affect detection (queries latest release); developer doc makes release flow explicit |
+| reqwest increases exe size | common dep, possibly already transitive; if added ~+2MB, acceptable |
+
+### 8.10 Change Summary (auto-update additions)
+
+| File | Change |
+|------|--------|
+| `src-tauri/build.rs` | **New** — read package.json, inject `BB_BROWSER_VERSION` |
+| `src-tauri/src/update_checker.rs` | **New** — `check_latest` / `is_newer` / `current_version` / `RELEASE_REPO` |
+| `src-tauri/src/app.rs` | startup spawn detection; new `check_update`/`update_available` menu items + handlers; About version → `env!()`; fix About repo link |
+| `src-tauri/src/tray_state.rs` | add `update_info: Option<UpdateInfo>` |
+| `src-tauri/Cargo.toml` | add `reqwest` (if not transitive); version synced by script |
+| `src-tauri/tauri.conf.json` | version synced by script |
+| `scripts/package-win.mjs` | Phase 0 version sync; build.rs reads package.json |
+| `README.txt` / `README-EN.txt` | add update section |
+| `docs/tray-app-packaging.md` | add release flow section |
+| `docs/tray-app-smoke-test.md` | add update + version check steps |
+
+## 9. Out of Scope (MVP)
 
 - Auto-start on boot (menu item hidden; user can manually drop a shortcut into the Startup folder)
 - NSIS / MSI installer (portable zip only this round)
 - Bundled Chromium (would destroy the login-state reuse value)
 - Code-signed exe (no cert acquired yet; SmartScreen may warn on first run — documented in README)
-- Auto-update mechanism (manual zip replacement for now)
+- **Automatic** download/file-swap update (§8 provides detect + guide-manual-replacement; full auto-swap is incompatible with the portable model and deferred)
