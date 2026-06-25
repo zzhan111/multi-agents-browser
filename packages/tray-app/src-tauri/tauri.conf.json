@@ -60,7 +60,15 @@
       "icons/icon.png"
     ],
     "resources": [
-      "icons/*.png"
+      "icons/*.png",
+      "../icons/tray-green.png",
+      "../icons/tray-red.png",
+      "../icons/tray-yellow.png",
+      "../../vendor/MicrosoftEdgeWebview2Setup.exe",
+      "resources/node/**",
+      "resources/daemon/**",
+      "resources/mcp/**",
+      "resources/mcp-config.json"
     ],
     "windows": {
       "nsis": {
