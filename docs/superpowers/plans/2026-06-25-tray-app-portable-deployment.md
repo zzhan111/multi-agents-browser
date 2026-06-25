@@ -25,6 +25,7 @@
 - `packages/tray-app/src-tauri/src/version.rs` — pure-logic semver parse + compare (Tauri-free, unit-tested)
 - `packages/tray-app/src-tauri/src/update_checker.rs` — Tauri-dependent module: `check_latest` (reqwest), `current_version` (env!), `UpdateInfo` struct
 - `packages/tray-app/src-tauri/src/webview2_check.rs` — Tauri-dependent: WebView2 install detection + bootstrapper launch
+- `packages/tray-app/src-tauri/src/mcp_config.rs` — Tauri-dependent: fill `mcp-config.json` `<APP_DIR>` placeholder at runtime; return filled `mcpServers` JSON for clipboard copy
 - `packages/tray-app/scripts/package-win.mjs` — the portable-zip build script
 - `packages/tray-app/icons/source.svg` — icon source (geometric abstract)
 - `packages/tray-app/README.txt`, `packages/tray-app/README-EN.txt` — end-user quick-start
@@ -36,8 +37,8 @@
 - `packages/tray-app/src-tauri/Cargo.toml` — add `reqwest`, `serde` features; version-synced
 - `packages/tray-app/src-tauri/tauri.conf.json` — `resources` add node/daemon/webview2; version-synced
 - `packages/tray-app/src-tauri/src/lib.rs` — declare `version` module
-- `packages/tray-app/src-tauri/src/main.rs` — declare `update_checker`, `webview2_check` modules (behind `tauri-app` feature)
-- `packages/tray-app/src-tauri/src/app.rs` — startup update check + WebView2 check; new menu items; About version fix
+- `packages/tray-app/src-tauri/src/main.rs` — declare `update_checker`, `webview2_check`, `mcp_config` modules (behind `tauri-app` feature)
+- `packages/tray-app/src-tauri/src/app.rs` — startup update check + WebView2 check + mcp-config placeholder fill; new menu items (update + copy-mcp-config); About version fix
 - `packages/tray-app/src-tauri/src/daemon_runner.rs` — `bundled_node_path` priority + `chrome_installed` pre-check
 - `packages/tray-app/src-tauri/src/tray_state.rs` — add `update_info` field (controller holds it; see Task 8)
 - `packages/tray-app/src-tauri/src/controller.rs` — hold `update_info`, expose to menu builder
@@ -738,11 +739,13 @@ Edit `packages/tray-app/src-tauri/tauri.conf.json`. Replace the `"resources"` ar
       "../icons/tray-yellow.png",
       "../../vendor/MicrosoftEdgeWebview2Setup.exe",
       "resources/node/**",
-      "resources/daemon/**"
+      "resources/daemon/**",
+      "resources/mcp/**",
+      "resources/mcp-config.json"
     ],
 ```
 
-Note on the staging: the package script (Task 9) copies `node.exe` → `src-tauri/resources/node/node.exe` and the daemon bundle → `src-tauri/resources/daemon/` BEFORE `tauri build` runs, so these globs resolve. The `../icons/` paths reference the runtime tray-status icons that live at `packages/tray-app/icons/`. The bootstrapper is vendored at `packages/tray-app/vendor/`.
+Note on the staging: the package script (Task 9) copies `node.exe` → `src-tauri/resources/node/node.exe`, the daemon bundle → `src-tauri/resources/daemon/`, the MCP bundle `dist/mcp.js` → `src-tauri/resources/mcp/mcp.js`, and writes the `mcp-config.json` template → `src-tauri/resources/mcp-config.json` BEFORE `tauri build` runs, so these globs resolve. The `../icons/` paths reference the runtime tray-status icons that live at `packages/tray-app/icons/`. The bootstrapper is vendored at `packages/tray-app/vendor/`.
 
 - [ ] **Step 2: Verify tauri config is valid JSON**
 
@@ -876,7 +879,228 @@ git commit -m "feat(tray-app): redesign app + status icons (geometric abstract m
 
 ---
 
-## Task 8: Wire auto-update + WebView2 check into app.rs (menu + startup)
+## Task 8: mcp_config module + "Copy MCP config" menu
+
+Create `mcp_config.rs` (behind `#[cfg(feature = "tauri-app")]`) that fills the `<APP_DIR>` placeholder in the bundled `mcp-config.json` at startup and returns the filled `mcpServers` JSON for clipboard copy. Then add the `copy_mcp_config` menu item in `app.rs`. This is the coding-agent onboarding surface (spec §9).
+
+**Files:**
+- Create: `packages/tray-app/src-tauri/src/mcp_config.rs`
+- Modify: `packages/tray-app/src-tauri/src/main.rs` (declare module)
+- Modify: `packages/tray-app/src-tauri/src/app.rs` (menu item + startup fill)
+
+- [ ] **Step 1: Declare the module in main.rs**
+
+Edit `packages/tray-app/src-tauri/src/main.rs`. Add `mcp_config` to the `#[cfg(feature = "tauri-app")] mod` block (after `webview2_check`):
+
+```rust
+#[cfg(feature = "tauri-app")]
+mod update_checker;
+#[cfg(feature = "tauri-app")]
+mod webview2_check;
+#[cfg(feature = "tauri-app")]
+mod mcp_config;
+```
+
+- [ ] **Step 2: Write mcp_config.rs**
+
+Create `packages/tray-app/src-tauri/src/mcp_config.rs`:
+
+```rust
+//! Machine-readable MCP access descriptor for coding agents.
+//!
+//! The portable zip ships a `mcp-config.json` template with a `<APP_DIR>`
+//! placeholder (the extraction dir is unknown at packaging time). On first
+//! startup the tray fills the placeholder with the actual exe-parent path
+//! and writes it back, so a coding agent reading the file gets a
+//! directly-usable `mcpServers` block (absolute command/args paths) with
+//! `MA_BROWSER_CONNECT_ONLY=1` — the MCP server connects to the tray-owned
+//! daemon instead of spawning its own.
+
+use serde_json::Value;
+use std::path::PathBuf;
+use tauri::{AppHandle, Manager};
+
+const PLACEHOLDER: &str = "<APP_DIR>";
+const MCP_CONFIG_FILENAME: &str = "mcp-config.json";
+
+/// Path to the bundled mcp-config.json under the Tauri resource dir.
+fn config_path(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().resource_dir().ok()?;
+    Some(dir.join(MCP_CONFIG_FILENAME))
+}
+
+/// The actual extraction root = parent of the running exe. This is where
+/// `node/`, `mcp/`, `daemon/` live in a portable install.
+fn app_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.parent().map(|p| p.to_path_buf())
+}
+
+/// Fill the `<APP_DIR>` placeholder in mcp-config.json with the real path and
+/// write it back. Idempotent: if already filled, this is a no-op. Silent on
+/// any failure (the file may be absent in dev). Called at tray startup.
+pub fn fill_placeholders(app: &AppHandle) {
+    let (Some(path), Some(dir)) = (config_path(app), app_dir()) else {
+        return;
+    };
+    let Ok(mut text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if !text.contains(PLACEHOLDER) {
+        return; // already filled
+    }
+    // Use a forward/backslash-agnostic replacement: keep the JSON's existing
+    // separator style by substituting the literal placeholder.
+    let dir_str = dir.to_string_lossy().replace('\\', "\\\\");
+    text = text.replace(PLACEHOLDER, &dir_str);
+    let _ = std::fs::write(&path, text);
+    eprintln!("[mcp_config] filled <APP_DIR> -> {:?} in {}", dir, path.display());
+}
+
+/// Return the filled `mcpServers` JSON object as a pretty-printed string, for
+/// the "Copy MCP config" menu item. Returns `None` if the file is missing or
+/// unparseable.
+pub fn mcp_servers_json(app: &AppHandle) -> Option<String> {
+    let path = config_path(app)?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let root: Value = serde_json::from_str(&text).ok()?;
+    let servers = root.get("mcpServers")?;
+    Some(serde_json::to_string_pretty(servers).ok()?)
+}
+
+// ---------------------------------------------------------------------------
+// Tests (pure helpers only; app/AppHandle paths are exercised in smoke test)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_constant_is_stable() {
+        assert_eq!(PLACEHOLDER, "<APP_DIR>");
+    }
+
+    #[test]
+    fn replace_preserves_json_escaping() {
+        // When the dir contains backslashes, each must be escaped in JSON.
+        let dir = "C:\\My Apps\\ma-browser-tray";
+        let dir_escaped = dir.replace('\\', "\\\\");
+        let template = r#"{"command":"<APP_DIR>\\node\\node.exe"}"#;
+        let filled = template.replace(PLACEHOLDER, &dir_escaped);
+        // The filled JSON must be valid JSON.
+        let v: serde_json::Value = serde_json::from_str(&filled).unwrap();
+        assert_eq!(v["command"], "C:\\My Apps\\ma-browser-tray\\node\\node.exe");
+    }
+}
+```
+
+- [ ] **Step 3: Run tests to verify they pass**
+
+Run (from `packages/tray-app/src-tauri`):
+```
+cargo test --lib mcp_config
+```
+Expected: PASS, 2 tests. (Run `cargo test --lib` to also confirm no regressions.)
+
+- [ ] **Step 4: Add the menu ID + item in app.rs**
+
+Edit `packages/tray-app/src-tauri/src/app.rs`. Add the menu ID to the constants block (after `ID_UPDATE_AVAILABLE`):
+
+```rust
+const ID_COPY_MCP_CONFIG: &str = "copy_mcp_config";
+```
+
+In `build_menu`, add the item before `check_update` (so it sits at the top of the settings group, per spec §9.4):
+
+```rust
+    let copy_mcp_config =
+        MenuItem::with_id(app, ID_COPY_MCP_CONFIG, "复制 MCP 配置", true, None::<&str>)?;
+```
+
+Add `&copy_mcp_config` to the `Menu::with_items` array, positioned right before `&check_update`:
+
+```rust
+    let menu = Menu::with_items(
+        app,
+        &[
+            &status_row,
+            &sep1,
+            &toggle_daemon,
+            &restart,
+            &sep2,
+            &open_logs,
+            &diagnostics,
+            &sep3,
+            &settings_submenu,
+            &sep4,
+            &copy_mcp_config,
+            &check_update,
+            &update_available,
+            &about,
+            &quit,
+        ],
+    )?;
+```
+
+- [ ] **Step 5: Handle the menu event in handle_menu_event**
+
+Add a case before `ID_CHECK_UPDATE`:
+
+```rust
+        ID_COPY_MCP_CONFIG => {
+            match crate::mcp_config::mcp_servers_json(app) {
+                Some(json) => {
+                    use tauri_plugin_clipboard_manager::ClipboardExt;
+                    if let Err(e) = app.clipboard().write_text(&json) {
+                        eprintln!("[mcp_config] clipboard write failed: {e}");
+                    }
+                }
+                None => {
+                    eprintln!("[mcp_config] mcp-config.json missing or unparseable; cannot copy");
+                }
+            }
+            return;
+        }
+```
+
+- [ ] **Step 6: Call fill_placeholders at startup**
+
+In `run()`, inside `.setup(|app| { ... })`, add the placeholder fill right after the WebView2 check and before `setup_tray`:
+
+```rust
+        .setup(|app| {
+            if crate::webview2_check::ensure_installed(app.handle()) {
+                app.exit(0);
+                return Ok(());
+            }
+            // Fill <APP_DIR> in mcp-config.json so coding agents read a
+            // directly-usable config (absolute paths) from the extracted dir.
+            crate::mcp_config::fill_placeholders(app.handle());
+            setup_tray(app.handle())?;
+            apply_popup_effects(app.handle());
+            dispatch_event(app.handle(), Event::UserStart);
+            // ... (the update-check spawn from Task 8 stays here)
+```
+
+- [ ] **Step 7: Verify it compiles + lib tests pass**
+
+Run (from `packages/tray-app/src-tauri`):
+```
+cargo build --features tauri-app
+cargo test --lib
+```
+Expected: build succeeds; all lib tests pass (including the 2 new `mcp_config` tests).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add packages/tray-app/src-tauri/src/mcp_config.rs packages/tray-app/src-tauri/src/main.rs packages/tray-app/src-tauri/src/app.rs
+git commit -m "feat(tray-app): mcp-config.json placeholder fill + Copy MCP config menu"
+```
+
+---
+
+## Task 9: Wire auto-update + WebView2 check into app.rs (menu + startup)
 
 Modify `app.rs` to: (a) call `webview2_check::ensure_installed` at startup, (b) spawn the update check on startup, (c) add `check_update` + `update_available` menu items, (d) store `update_info` in `controller`, (e) fix the About dialog version + repo link.
 
@@ -935,7 +1159,7 @@ In `build_menu`, add the new items before the About item. Insert after the `sep4
         MenuItem::with_id(app, ID_UPDATE_AVAILABLE, "", false, None::<&str>)?;
 ```
 
-Then add `&check_update` and `&update_available` to the `Menu::with_items` array, positioned right before `&about`:
+Then add `&check_update` and `&update_available` to the `Menu::with_items` array, positioned right before `&about`. Note: `&copy_mcp_config` was added by Task 8 — keep it in place:
 
 ```rust
     let menu = Menu::with_items(
@@ -951,6 +1175,7 @@ Then add `&check_update` and `&update_available` to the `Menu::with_items` array
             &sep3,
             &settings_submenu,
             &sep4,
+            &copy_mcp_config,
             &check_update,
             &update_available,
             &about,
@@ -1051,21 +1276,24 @@ In `refresh_tray`, after the existing menu-handle updates (the `if let Some(hand
 
 - [ ] **Step 6: Spawn startup update check + WebView2 check in setup**
 
-In `run()`, inside `.setup(|app| { ... })`, add the WebView2 check first and the update check after the existing `dispatch_event(app.handle(), Event::UserStart)`:
+In `run()`, inside `.setup(|app| { ... })`, add the update check after `dispatch_event(app.handle(), Event::UserStart)`. NOTE: Task 8 already added the WebView2 check and `mcp_config::fill_placeholders` call at the top of this setup block — keep them. The full setup block after this task is:
 
 ```rust
         .setup(|app| {
             // Pre-start: if WebView2 is missing, prompt + launch bootstrapper
-            // and exit so the installer can run.
+            // and exit so the installer can run. (Task 8/9)
             if crate::webview2_check::ensure_installed(app.handle()) {
                 app.exit(0);
                 return Ok(());
             }
+            // Fill <APP_DIR> in mcp-config.json so coding agents read a
+            // directly-usable config. (Task 8)
+            crate::mcp_config::fill_placeholders(app.handle());
             setup_tray(app.handle())?;
             apply_popup_effects(app.handle());
             dispatch_event(app.handle(), Event::UserStart);
 
-            // Background update check — silent on any failure.
+            // Background update check — silent on any failure. (Task 9)
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Some(info) =
@@ -1127,7 +1355,7 @@ git commit -m "feat(tray-app): wire auto-update detection + WebView2 check into 
 
 ---
 
-## Task 9: package-win.mjs build script
+## Task 10: package-win.mjs build script
 
 Create the portable-zip build script. It runs Phase 0 (version sync) → Phase 1 (pnpm build + tauri build) → Phase 2 (assemble staging) → Phase 3 (fetch node.exe) → Phase 4 (zip + verify).
 
@@ -1179,6 +1407,26 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const TRAY_DIR = resolve(__dirname, '..');
 const REPO_ROOT = resolve(TRAY_DIR, '..', '..');
 const NODE_VERSION = 'v20.15.0'; // pinned LTS; bump here to upgrade bundled Node
+
+// mcp-config.json template. <APP_DIR> is filled at first tray run with the
+// actual extraction root (current_exe().parent()). Backslashes are doubled
+// because this is JSON; the tray's fill_placeholders escapes them too.
+const MCP_CONFIG_TEMPLATE = `{
+  "mcpServers": {
+    "ma-browser": {
+      "command": "<APP_DIR>\\\\node\\\\node.exe",
+      "args": ["<APP_DIR>\\\\mcp\\\\mcp.js"],
+      "env": { "MA_BROWSER_CONNECT_ONLY": "1" }
+    }
+  },
+  "_meta": {
+    "description": "ma-browser MCP server (connect-only; connects to the tray-owned daemon via ~/.bb-browser/daemon.json)",
+    "app_dir_placeholder": "<APP_DIR>",
+    "requires_daemon_running": true,
+    "daemon_status_hint": "Tray icon must be green (daemon running) before MCP calls will succeed"
+  }
+}
+`;
 
 // --- helpers ----------------------------------------------------------------
 
@@ -1249,6 +1497,14 @@ function build() {
     join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'ws'),
     join(resDir, 'daemon', 'node_modules', 'ws')
   );
+  // MCP server bundle
+  mkdirSync(join(resDir, 'mcp'), { recursive: true });
+  copyFileSync(
+    join(REPO_ROOT, 'dist', 'mcp.js'),
+    join(resDir, 'mcp', 'mcp.js')
+  );
+  // mcp-config.json template (with <APP_DIR> placeholder; tray fills it at first run)
+  writeFileSync(join(resDir, 'mcp-config.json'), MCP_CONFIG_TEMPLATE);
   // node.exe placeholder file so the glob resolves during tauri build;
   // real node.exe is fetched in Phase 3 and copied into staging (and the exe
   // resource). For the embedded-resource build we also need it present here:
@@ -1274,6 +1530,9 @@ function assembleStaging(staging) {
   copyFileSync(join(REPO_ROOT, 'packages', 'daemon', 'dist', 'index.js'), join(staging, 'daemon', 'index.js'));
   copyFileSync(join(REPO_ROOT, 'packages', 'daemon', 'src', 'buildDomTree.js'), join(staging, 'daemon', 'buildDomTree.js'));
   copyDir(join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'ws'), join(staging, 'daemon', 'node_modules', 'ws'));
+  mkdirSync(join(staging, 'mcp'), { recursive: true });
+  copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(staging, 'mcp', 'mcp.js'));
+  writeFileSync(join(staging, 'mcp-config.json'), MCP_CONFIG_TEMPLATE);
   mkdirSync(join(staging, 'node'), { recursive: true });
   ensureNodeExe(join(staging, 'node', 'node.exe'));
   copyDir(join(TRAY_DIR, 'icons'), join(staging, 'icons'));
@@ -1338,6 +1597,8 @@ function verifyStructure(staging) {
     'daemon/index.js',
     'daemon/buildDomTree.js',
     'daemon/node_modules/ws/index.js',
+    'mcp/mcp.js',
+    'mcp-config.json',
     'icons/tray-green.png',
     'icons/tray-red.png',
     'icons/tray-yellow.png',
@@ -1390,7 +1651,7 @@ git commit -m "feat(tray-app): portable-zip build script (pnpm package:win)"
 
 ---
 
-## Task 10: End-user README (Chinese + English)
+## Task 11: End-user README (Chinese + English)
 
 Create `README.txt` (Chinese) and `README-EN.txt` (English) per spec §6.1.
 
@@ -1415,9 +1676,13 @@ ma-browser 浏览器代理 — 快速开始
 3. 需要 Google Chrome 浏览器(用于复用你的登录态)
    - 没装? 下载: https://www.google.com/chrome/
 
-4. 配置你的 AI 客户端(Claude Code / Cursor / Cline):
-   - 打开托盘 → 右键 → 复制 MCP 配置
-   - 粘贴到你的客户端配置文件
+4. 配置你的 AI 客户端(Claude Code / Cursor / Cline),两种方式:
+   方式 A(推荐,让 AI 自动配置):
+     告诉你的 AI:"用 ma-browser,配置文件在 <解压目录>\mcp-config.json"
+     AI 会读取该文件并自行配置 MCP。
+   方式 B(手动):
+     右键托盘 → "复制 MCP 配置" → 粘贴到你 AI 客户端的配置文件
+   注意:接入前确保托盘图标为绿色(daemon 运行中)。
 
 5. 日志与状态:
    - 托盘右键 → 打开日志
@@ -1452,9 +1717,15 @@ ma-browser Browser Agent — Quick Start
 3. Google Chrome is required (to reuse your login state)
    - Not installed? Download: https://www.google.com/chrome/
 
-4. Configure your AI client (Claude Code / Cursor / Cline):
-   - Open the tray → right-click → Copy MCP config
-   - Paste into your client's config file
+4. Configure your AI client (Claude Code / Cursor / Cline) — two ways:
+   Way A (recommended, let the AI self-configure):
+     Tell your AI: "use ma-browser, the config file is at
+     <extracted-dir>\mcp-config.json"
+     The AI reads the file and configures MCP itself.
+   Way B (manual):
+     Right-click the tray → "复制 MCP 配置" → paste into your AI client's
+     config file.
+   Note: ensure the tray icon is green (daemon running) before connecting.
 
 5. Logs & state:
    - Tray right-click → Open logs
@@ -1482,7 +1753,7 @@ git commit -m "docs(tray-app): add Chinese + English end-user quick-start README
 
 ---
 
-## Task 11: Developer docs (packaging + smoke-test)
+## Task 12: Developer docs (packaging + smoke-test)
 
 Create `docs/tray-app-packaging.md` and `docs/tray-app-smoke-test.md` per spec §6.2/§6.3 and §8.7.
 
@@ -1527,7 +1798,7 @@ Produces: `packages/tray-app/dist/ma-browser-tray-portable-v{VERSION}.zip`
 The script:
 - Phase 0: syncs `package.json` version → `Cargo.toml` + `tauri.conf.json`
 - Phase 1: `pnpm build` (daemon bundle) + `tauri build` (exe with embedded resources)
-- Phase 2: assembles a staging dir (exe + daemon + node + icons + README)
+- Phase 2: assembles a staging dir (exe + daemon + mcp + node + icons + README + mcp-config.json)
 - Phase 3: downloads the pinned Node.js LTS, extracts `node.exe` (cached in `.cache/`)
 - Phase 4: zips the staging dir + verifies all required files are present
 
@@ -1539,10 +1810,21 @@ ma-browser-tray/
 ├── MicrosoftEdgeWebview2Setup.exe
 ├── node/node.exe
 ├── daemon/{index.js, buildDomTree.js, node_modules/ws/}
+├── mcp/mcp.js
+├── mcp-config.json
 ├── icons/{tray-green,red,yellow}.png
 ├── README.txt
 └── README-EN.txt
 ```
+
+## MCP config (coding-agent onboarding)
+
+The zip ships `mcp-config.json` with a `<APP_DIR>` placeholder. On first
+tray startup, `mcp_config::fill_placeholders` replaces `<APP_DIR>` with the
+actual extraction root and writes it back, so coding agents read a
+directly-usable `mcpServers` block (absolute `node.exe` + `mcp.js` paths,
+`MA_BROWSER_CONNECT_ONLY=1`). The tray also offers a "复制 MCP 配置" menu
+item as a human manual-copy fallback. See spec §9.
 
 ## Upgrade the bundled Node
 
@@ -1589,18 +1871,27 @@ Pre-release verification on a clean Windows 10 environment.
    bootstrapper installs WebView2 → the app exits. Double-click the exe again.
 4. **[Expected]** A tray icon appears and turns **green within 10 seconds**
    (bundled node starts the daemon, daemon attaches to Chrome).
-5. Right-click the tray → click "Copy MCP config" (or the equivalent menu
-   item) → the clipboard contains a daemon URL + token.
-6. Configure Claude Code with that MCP config; run one `browser snapshot`.
-7. **[Expected]** The snapshot returns page info; the tray shows activity.
-8. **[Expected]** The tray menu shows "检查更新"; clicking it does not error
-   (when network is available).
-9. **[Expected]** Right-click → About shows a version equal to `package.json`'s
-   version (NOT `0.0.1`).
+5. Right-click the tray → click "复制 MCP 配置" → the clipboard contains a
+   valid `mcpServers` JSON object with absolute paths (no `<APP_DIR>`).
+6. Verify `mcp-config.json` in the extracted dir has `<APP_DIR>` replaced
+   with the real path (e.g. `C:\ma-browser-tray\node\node.exe`).
+7. Launch the MCP server manually to confirm it connects:
+   ```
+   set MA_BROWSER_CONNECT_ONLY=1
+   C:\ma-browser-tray\node\node.exe C:\ma-browser-tray\mcp\mcp.js
+   ```
+   **[Expected]** It starts without error and does NOT spawn a second daemon
+   (connect-only). Stop it (Ctrl+C).
+8. Configure Claude Code with the copied MCP config; run one `browser snapshot`.
+9. **[Expected]** The snapshot returns page info; the tray shows activity.
+10. **[Expected]** The tray menu shows "检查更新"; clicking it does not error
+    (when network is available).
+11. **[Expected]** Right-click → About shows a version equal to `package.json`'s
+    version (NOT `0.0.1`).
 
 ## Pass criteria
 
-Steps 4, 6, and 9 green = pass. The space-in-path variant (step 1) must also
+Steps 4, 8, and 11 green = pass. The space-in-path variant (step 1) must also
 pass for the bundled-node fix to be considered validated.
 
 ## Failure triage
@@ -1610,8 +1901,10 @@ pass for the bundled-node fix to be considered validated.
 | Step 3: no popup, exe silently dies | `webview2_check.rs` registry detection; bootstrapper path |
 | Step 4: icon stays red | `daemon_runner.rs` bundled-node resolution; check `%USERPROFILE%\.bb-browser\` logs |
 | Step 4: icon yellow forever | daemon started but Chrome not found; `chrome_installed()` pre-check |
-| Step 6: snapshot fails | CDP connectivity; token in daemon.json |
-| Step 9: shows `0.0.1` | `build.rs` `BB_BROWSER_VERSION` injection; `package-win.mjs` Phase 0 |
+| Step 6: mcp-config.json still has `<APP_DIR>` | `mcp_config::fill_placeholders` not running at startup; resource_dir path |
+| Step 7: MCP server spawns its own daemon | `MA_BROWSER_CONNECT_ONLY` env not propagated; mcp.js connect-only logic |
+| Step 8: snapshot fails | CDP connectivity; token in daemon.json; MCP server not in connect-only mode |
+| Step 11: shows `0.0.1` | `build.rs` `BB_BROWSER_VERSION` injection; `package-win.mjs` Phase 0 |
 ```
 
 - [ ] **Step 3: Commit**
@@ -1623,7 +1916,7 @@ git commit -m "docs: add tray-app packaging guide + smoke-test checklist"
 
 ---
 
-## Task 12: Full build verification
+## Task 13: Full build verification
 
 Run the complete `pnpm package:win` end-to-end and confirm the zip is produced and structurally valid. This is the integration gate before the manual clean-environment smoke test.
 
@@ -1646,7 +1939,7 @@ If `tauri build` fails on the resources globs, confirm `packages/tray-app/src-ta
 
 - [ ] **Step 3: Inspect the produced zip**
 
-Open the zip (or extract to a temp dir) and confirm the layout matches spec §3.2: `ma-browser-tray.exe`, `MicrosoftEdgeWebview2Setup.exe`, `node/node.exe` (>30MB), `daemon/index.js`, `daemon/buildDomTree.js`, `daemon/node_modules/ws/`, `icons/tray-{green,red,yellow}.png`, `README.txt`, `README-EN.txt`.
+Open the zip (or extract to a temp dir) and confirm the layout matches spec §3.2: `ma-browser-tray.exe`, `MicrosoftEdgeWebview2Setup.exe`, `node/node.exe` (>30MB), `daemon/index.js`, `daemon/buildDomTree.js`, `daemon/node_modules/ws/`, `mcp/mcp.js`, `mcp-config.json` (contains `<APP_DIR>` placeholder), `icons/tray-{green,red,yellow}.png`, `README.txt`, `README-EN.txt`.
 
 - [ ] **Step 4: Run lib unit tests one more time**
 
