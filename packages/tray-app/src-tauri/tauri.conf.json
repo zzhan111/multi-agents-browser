@@ -1,13 +1,15 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ma-browser Tray",
-  "version": "0.0.1",
+  "version": "0.11.6",
   "identifier": "com.ma-browser.tray",
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
     "frontendDist": "../src",
-    "features": ["tauri-app"]
+    "features": [
+      "tauri-app"
+    ]
   },
   "app": {
     "windows": [
@@ -54,7 +56,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"

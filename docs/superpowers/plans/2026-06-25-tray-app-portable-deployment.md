@@ -1492,7 +1492,7 @@ function build() {
     join(resDir, 'daemon', 'index.js')
   );
   copyFileSync(
-    join(REPO_ROOT, 'packages', 'daemon', 'src', 'buildDomTree.js'),
+    join(REPO_ROOT, 'packages', 'daemon', 'dist', 'buildDomTree.js'),
     join(resDir, 'daemon', 'buildDomTree.js')
   );
   copyDir(
@@ -1530,7 +1530,7 @@ function assembleStaging(staging) {
   );
   mkdirSync(join(staging, 'daemon', 'node_modules'), { recursive: true });
   copyFileSync(join(REPO_ROOT, 'packages', 'daemon', 'dist', 'index.js'), join(staging, 'daemon', 'index.js'));
-  copyFileSync(join(REPO_ROOT, 'packages', 'daemon', 'src', 'buildDomTree.js'), join(staging, 'daemon', 'buildDomTree.js'));
+  copyFileSync(join(REPO_ROOT, 'packages', 'daemon', 'dist', 'buildDomTree.js'), join(staging, 'daemon', 'buildDomTree.js'));
   copyDir(join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'ws'), join(staging, 'daemon', 'node_modules', 'ws'));
   mkdirSync(join(staging, 'mcp'), { recursive: true });
   copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(staging, 'mcp', 'mcp.js'));

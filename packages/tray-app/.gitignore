@@ -3,10 +3,6 @@ src-tauri/target/
 # Staged portable resources (populated by package-win.mjs / dev placeholders)
 src-tauri/resources/
 .cache/
-# Vendored WebView2 bootstrapper — must be manually placed (see docs/tray-app-packaging.md).
-# Git-tracked once the real .exe is placed; placeholder is ignored.
-vendor/*.exe
-!vendor/.gitkeep
 
 # Node
 node_modules/

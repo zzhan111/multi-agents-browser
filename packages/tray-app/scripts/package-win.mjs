@@ -22,7 +22,16 @@ import {
   statSync,
 } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+
+// Ensure cargo (Rust/Tauri) is on PATH for spawned children. On Windows the
+// user's ~/.cargo/bin is added by rustup to the user PATH, but child spawns
+// inherit the *process* env which may not have it when run from some shells.
+const cargoBin = join(homedir(), '.cargo', 'bin');
+if (process.env.PATH && !process.env.PATH.includes(cargoBin)) {
+  process.env.PATH = `${cargoBin}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`;
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TRAY_DIR = resolve(__dirname, '..');
@@ -119,7 +128,7 @@ function stageResources(resDir) {
     join(resDir, 'daemon', 'index.js')
   );
   copyFileSync(
-    join(REPO_ROOT, 'packages', 'daemon', 'src', 'buildDomTree.js'),
+    join(REPO_ROOT, 'packages', 'daemon', 'dist', 'buildDomTree.js'),
     join(resDir, 'daemon', 'buildDomTree.js')
   );
   copyDir(
@@ -161,7 +170,7 @@ function assembleStaging(staging) {
     join(staging, 'daemon', 'index.js')
   );
   copyFileSync(
-    join(REPO_ROOT, 'packages', 'daemon', 'src', 'buildDomTree.js'),
+    join(REPO_ROOT, 'packages', 'daemon', 'dist', 'buildDomTree.js'),
     join(staging, 'daemon', 'buildDomTree.js')
   );
   copyDir(

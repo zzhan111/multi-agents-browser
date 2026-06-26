@@ -1,6 +1,6 @@
 [package]
 name = "ma-browser-tray"
-version = "0.0.1"
+version = "0.11.6"
 description = "Windows system tray daemon UI for ma-browser"
 authors = ["epiral"]
 edition = "2021"
