@@ -192,6 +192,16 @@ function assembleStaging(staging) {
 
 async function ensureNodeExe(dest) {
   if (existsSync(dest) && statSync(dest).size > 10_000_000) return; // already have it
+  // Offline / local override: if LOCAL_NODE_EXE points at a real node.exe,
+  // copy it instead of downloading (useful when nodejs.org is unreachable
+  // but a local Node install exists).
+  const local = process.env.LOCAL_NODE_EXE;
+  if (local && existsSync(local) && statSync(local).size > 10_000_000) {
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(local, dest);
+    console.log(`node.exe copied from LOCAL_NODE_EXE=${local} -> ${dest}`);
+    return;
+  }
   const cacheDir = join(TRAY_DIR, '.cache');
   mkdirSync(cacheDir, { recursive: true });
   const cacheZip = join(cacheDir, `node-${NODE_VERSION}-win-x64.zip`);
