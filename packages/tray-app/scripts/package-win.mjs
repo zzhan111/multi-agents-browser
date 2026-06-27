@@ -252,6 +252,19 @@ function zipAndVerify(staging, version) {
   // Verify structure (extract to temp and assert required files).
   verifyStructure(staging);
   console.log(`\n✓ Built ${zipPath}`);
+
+  // Convenience: also drop a copy in the user's Downloads dir so it's easy
+  // to grab for testing on another machine.
+  try {
+    const downloads = join(homedir(), 'Downloads');
+    if (existsSync(downloads)) {
+      const dest = join(downloads, zipName);
+      copyFileSync(zipPath, dest);
+      console.log(`✓ Copied to ${dest}`);
+    }
+  } catch (e) {
+    console.warn(`(could not copy to Downloads: ${e})`);
+  }
 }
 
 function verifyStructure(staging) {
