@@ -160,6 +160,16 @@ function assembleStaging(staging) {
   const exe = join(TRAY_DIR, 'src-tauri', 'target', 'release', 'ma-browser-tray.exe');
   if (!existsSync(exe)) throw new Error(`exe not found: ${exe}`);
   copyFileSync(exe, join(staging, 'ma-browser-tray.exe'));
+  // Copy sibling DLLs the exe loads at startup (WebView2Loader.dll is
+  // statically imported by Tauri's webview2-com-sys; without it the exe
+  // fails to load on a clean machine BEFORE any Rust code runs).
+  const releaseDir = dirname(exe);
+  for (const entry of readdirSync(releaseDir, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.toLowerCase().endsWith('.dll')) {
+      copyFileSync(join(releaseDir, entry.name), join(staging, entry.name));
+      console.log(`  + sibling DLL: ${entry.name}`);
+    }
+  }
   copyFileSync(
     join(TRAY_DIR, 'vendor', 'MicrosoftEdgeWebview2Setup.exe'),
     join(staging, 'MicrosoftEdgeWebview2Setup.exe')
@@ -270,6 +280,7 @@ function zipAndVerify(staging, version) {
 function verifyStructure(staging) {
   const required = [
     'ma-browser-tray.exe',
+    'WebView2Loader.dll',
     'MicrosoftEdgeWebview2Setup.exe',
     'node/node.exe',
     'daemon/index.js',
