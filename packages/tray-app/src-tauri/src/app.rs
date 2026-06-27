@@ -721,17 +721,26 @@ pub fn dispatch_toggle(app: &AppHandle) {
 // ---------------------------------------------------------------------------
 
 fn load_tray_icon(app: &AppHandle, color: &str) -> Image<'static> {
-    let path = app
-        .path()
-        .resource_dir()
+    let name = format!("tray-{color}.png");
+    // 1. Portable: exe parent / icons/.
+    let path = std::env::current_exe()
         .ok()
-        .map(|d| d.join(format!("icons/tray-{color}.png")))
+        .and_then(|exe| exe.parent().map(|p| p.join("icons").join(&name)))
         .filter(|p| p.exists())
+        // 2. Installed: resource_dir / icons/.
+        .or_else(|| {
+            app.path()
+                .resource_dir()
+                .ok()
+                .map(|d| d.join("icons").join(&name))
+                .filter(|p| p.exists())
+        })
+        // 3. Dev fallback: CWD / icons/.
         .unwrap_or_else(|| {
             std::env::current_dir()
                 .unwrap_or_default()
                 .join("icons")
-                .join(format!("tray-{color}.png"))
+                .join(&name)
         });
 
     Image::from_path(&path).unwrap_or_else(|e| {

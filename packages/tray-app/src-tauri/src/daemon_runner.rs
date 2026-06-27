@@ -372,9 +372,9 @@ fn strip_verbatim_prefix(p: &str) -> String {
 /// 1. In a packaged install: `resource_dir/daemon/index.js`
 /// 2. Dev: walk up from the binary until we find `packages/daemon/dist/index.js`
 fn locate_daemon_entry(app: &AppHandle) -> Result<PathBuf, String> {
-    // Packaged location.
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let p = resource_dir.join("daemon").join("index.js");
+    // Packaged location (portable: exe-parent; installed: resource_dir).
+    if let Some(root) = resources_root(app) {
+        let p = root.join("daemon").join("index.js");
         if p.exists() {
             return Ok(p);
         }
@@ -402,10 +402,37 @@ fn locate_daemon_entry(app: &AppHandle) -> Result<PathBuf, String> {
     )
 }
 
-/// Locate the bundled `node.exe` under the Tauri resource dir. Returns `None`
-/// in dev (no bundled node) — caller falls back to `which::which("node")`.
+/// Resolve the directory holding the bundled resources (node/, daemon/, mcp/,
+/// icons/, etc.). In a portable (non-installed) build, Tauri's
+/// `resource_dir()` does NOT reliably return the exe's parent — so we prefer
+/// `current_exe().parent()` (where the portable zip lays out its resources)
+/// and fall back to `resource_dir()` (for installed builds) and the CWD
+/// (dev).
+fn resources_root(app: &AppHandle) -> Option<PathBuf> {
+    // 1. Portable: the exe's parent dir. Most reliable for the portable zip.
+    if let Some(exe) = std::env::current_exe().ok() {
+        if let Some(parent) = exe.parent() {
+            // Only treat it as the resources root if it actually contains a
+            // known bundled resource (avoid false positives in dev where the
+            // exe lives under target/).
+            if parent.join("daemon").join("index.js").exists()
+                || parent.join("node").join("node.exe").exists()
+            {
+                return Some(parent.to_path_buf());
+            }
+        }
+    }
+    // 2. Installed: Tauri's resource_dir (AppData install dir).
+    if let Ok(dir) = app.path().resource_dir() {
+        return Some(dir);
+    }
+    None
+}
+
+/// Locate the bundled `node.exe` under the bundled-resources root. Returns
+/// `None` in dev (no bundled node) — caller falls back to `which::which("node")`.
 fn bundled_node_path(app: &AppHandle) -> Option<PathBuf> {
-    let dir = app.path().resource_dir().ok()?;
+    let dir = resources_root(app)?;
     let candidate = dir.join("node").join("node.exe");
     candidate.exists().then_some(candidate)
 }

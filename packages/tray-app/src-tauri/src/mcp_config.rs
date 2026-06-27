@@ -15,8 +15,20 @@ use tauri::{AppHandle, Manager};
 const PLACEHOLDER: &str = "<APP_DIR>";
 const MCP_CONFIG_FILENAME: &str = "mcp-config.json";
 
-/// Path to the bundled mcp-config.json under the Tauri resource dir.
+/// Path to the bundled mcp-config.json. In a portable build this lives next
+/// to the exe (current_exe().parent()); in an installed build it's under
+/// resource_dir(). Prefer the exe-parent when it contains the file.
 fn config_path(app: &AppHandle) -> Option<PathBuf> {
+    // 1. Portable: exe parent.
+    if let Some(exe) = std::env::current_exe().ok() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join(MCP_CONFIG_FILENAME);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    // 2. Installed: resource_dir.
     let dir = app.path().resource_dir().ok()?;
     Some(dir.join(MCP_CONFIG_FILENAME))
 }
