@@ -21,7 +21,7 @@ ma-browser site <name> [args...]
 # 运行 adapter（完整写法）
 ma-browser site run <name> [args...]
 
-# 更新社区 adapter 库（从 github.com/epiral/bb-sites 拉取）
+# 更新社区 adapter 库（从 github.com/zzhan111/bb-sites 拉取）
 ma-browser site update
 
 # 查看 adapter 开发指南
@@ -37,7 +37,7 @@ ma-browser guide
 ma-browser site reddit/thread https://www.reddit.com/r/LocalLLaMA/comments/...
 
 # 命名参数（--flag value 格式）
-ma-browser site github/pr-create epiral/bb-sites --title "feat: ..." --head "user:branch"
+ma-browser site github/pr-create zzhan111/bb-sites --title "feat: ..." --head "user:branch"
 
 # 混合使用
 ma-browser site twitter/search "AI agent" --count 20
@@ -259,4 +259,4 @@ ma-browser site twitter/search "AI" --json
 ## 更多信息
 
 - 创建自定义 adapter：参见 [adapter-development.md](adapter-development.md)
-- 社区 adapter 仓库：https://github.com/epiral/bb-sites
+- 社区 adapter 仓库：https://github.com/zzhan111/bb-sites

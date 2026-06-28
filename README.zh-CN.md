@@ -28,7 +28,7 @@ ma-browser site youtube/transcript VIDEO_ID      # YouTube 字幕全文
 ma-browser site stackoverflow/search "async"     # 搜 StackOverflow
 ```
 
-**36 个平台，103 个命令，全部用你真实浏览器的登录态。** [完整列表 →](https://github.com/epiral/bb-sites)
+**36 个平台，103 个命令，全部用你真实浏览器的登录态。** [完整列表 →](https://github.com/zzhan111/bb-sites)
 
 ## 核心理念
 
@@ -85,7 +85,7 @@ ClawHub Skill: [ma-browser-openclaw](https://clawhub.ai/yan5xu/ma-browser)
 
 ## 36 个平台，103 个命令
 
-社区驱动，通过 [bb-sites](https://github.com/epiral/bb-sites) 维护。每个命令一个 JS 文件。
+社区驱动，通过 [bb-sites](https://github.com/zzhan111/bb-sites) 维护。每个命令一个 JS 文件。
 
 | 类别 | 平台 | 命令 |
 |------|------|------|
@@ -192,7 +192,7 @@ ma-browser CLI ──HTTP──▶ Daemon ──CDP WebSocket──▶ 你的真
 
 MultiAgentsBrowser 由 **epiral** 的 [bb-browser](https://github.com/epiral/bb-browser)（MIT）
 演化而来，本仓库完整保留了上游提交历史。社区站点适配器仍位于
-[epiral/bb-sites](https://github.com/epiral/bb-sites)。
+[zzhan111/bb-sites](https://github.com/zzhan111/bb-sites)。
 
 ## 许可证
 

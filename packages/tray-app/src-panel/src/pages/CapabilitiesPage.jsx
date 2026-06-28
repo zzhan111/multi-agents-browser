@@ -11,6 +11,7 @@
 import { useEffect, useCallback, useState, useRef } from 'react';
 import { useStore } from '../store/useStore.jsx';
 import { daemon } from '../api/daemon.js';
+import AdapterConsentModal from '../components/AdapterConsentModal.jsx';
 import styles from './CapabilitiesPage.module.css';
 
 export default function CapabilitiesPage() {
@@ -21,6 +22,11 @@ export default function CapabilitiesPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const debounceRef = useRef(null);
+
+  // Adapter sync (clone/pull) state — drives the consent modal + update button
+  const [consentOpen, setConsentOpen] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState(null);
 
   const fetchAdapters = useCallback(async (query) => {
     if (!daemon.isConnected()) return;
@@ -49,6 +55,25 @@ export default function CapabilitiesPage() {
     if (connected) fetchAdapters(q);
   }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Run the community-adapter sync (clone if absent, else pull). Called from
+  // either the consent modal (first-time agree) or the "更新适配器" button.
+  const runSync = async () => {
+    setSyncing(true);
+    setSyncError(null);
+    try {
+      await daemon.updateAdapters();
+      // Refresh the catalog (daemon invalidated its cache on success).
+      await fetchAdapters(q);
+      setConsentOpen(false);
+    } catch (err) {
+      setSyncError(err.message ?? String(err));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const isEmpty = connected && !error && adapters.length === 0 && !loading && total === 0;
+
   return (
     <div className={styles.root}>
       {/* ── Search bar ── */}
@@ -64,20 +89,56 @@ export default function CapabilitiesPage() {
         <span className={styles.searchCount}>
           {loading ? '…' : `${adapters.length} / ${total}`}
         </span>
+        <button
+          className={styles.updateBtn}
+          onClick={runSync}
+          disabled={!connected || syncing}
+          title="从社区仓库拉取/更新适配器"
+        >
+          {syncing ? '更新中…' : '更新适配器'}
+        </button>
       </div>
 
       {/* ── Error ── */}
       {error && <p className={styles.errorMsg}>⚠ {error}</p>}
+      {syncError && <p className={styles.errorMsg}>⚠ 更新失败:{syncError}</p>}
 
-      {/* ── Adapter list ── */}
-      {!error && adapters.length === 0 && !loading && (
+      {/* ── Empty state: onboarding card (first run, no adapters) ── */}
+      {isEmpty && (
+        <div className={styles.onboarding}>
+          <p className={styles.onboardingTitle}>还没有任何适配器</p>
+          <p className={styles.onboardingDesc}>
+            社区适配器由各自作者维护,使用需遵守站点 ToS。获取后即可在此查看并运行封装好的站点能力。
+          </p>
+          <button
+            className={styles.fetchBtn}
+            onClick={() => setConsentOpen(true)}
+            disabled={!connected}
+          >
+            获取社区适配器
+          </button>
+        </div>
+      )}
+
+      {/* ── Non-empty-but-no-match empty state ── */}
+      {!error && adapters.length === 0 && !loading && !isEmpty && (
         <p className={styles.empty}>{connected ? '无匹配 adapter' : '未连接到 daemon'}</p>
       )}
+
+      {/* ── Adapter list ── */}
       <div className={styles.adapterList}>
         {adapters.map((a) => (
           <AdapterCard key={a.name} adapter={a} />
         ))}
       </div>
+
+      {/* ── Consent modal (first-time adapter fetch) ── */}
+      <AdapterConsentModal
+        open={consentOpen}
+        loading={syncing}
+        onAgree={runSync}
+        onCancel={() => !syncing && setConsentOpen(false)}
+      />
     </div>
   );
 }

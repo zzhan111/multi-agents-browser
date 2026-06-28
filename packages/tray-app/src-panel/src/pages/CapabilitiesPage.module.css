@@ -252,3 +252,62 @@
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ── Update adapters button (in search bar) ── */
+.updateBtn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.updateBtn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.updateBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Onboarding card (first run, no adapters) ── */
+.onboarding {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 48px 24px;
+  margin: 24px auto;
+  max-width: 420px;
+  background: var(--bg-surface);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md, 10px);
+}
+.onboardingTitle {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.onboardingDesc {
+  margin: 0 0 20px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.fetchBtn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  padding: 8px 18px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.fetchBtn:hover:not(:disabled) { opacity: 0.9; }
+.fetchBtn:disabled { opacity: 0.5; cursor: not-allowed; }

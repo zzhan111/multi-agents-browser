@@ -1,0 +1,87 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: var(--bg-panel, #1e1e2e);
+  color: var(--text-primary, #e4e4e7);
+  border: 1px solid var(--border-subtle, #3f3f52);
+  border-radius: 12px;
+  max-width: 480px;
+  width: calc(100% - 32px);
+  padding: 24px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.title {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.intro {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.sectionLabel {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.list {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.footer {
+  margin: 0 0 18px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #e4e4e7);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.cancelBtn,
+.agreeBtn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.cancelBtn {
+  background: transparent;
+  border-color: var(--border-subtle, #3f3f52);
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.agreeBtn {
+  background: var(--accent, #6366f1);
+  color: #fff;
+}
+
+.cancelBtn:disabled,
+.agreeBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

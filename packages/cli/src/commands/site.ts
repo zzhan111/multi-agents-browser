@@ -25,7 +25,7 @@ import { execSync } from "node:child_process";
 const BB_DIR = process.env.BB_BROWSER_HOME || join(homedir(), ".bb-browser");
 const LOCAL_SITES_DIR = join(BB_DIR, "sites");
 const COMMUNITY_SITES_DIR = join(BB_DIR, "bb-sites");
-const COMMUNITY_REPO = "https://github.com/epiral/bb-sites.git";
+const COMMUNITY_REPO = "https://github.com/zzhan111/bb-sites.git";
 
 function checkCliUpdate(): void {
   try {
@@ -624,15 +624,15 @@ async function siteRun(
         ? `Please log in to https://${site.domain} in your OpenClaw browser first, then retry.`
         : undefined;
       const hint = loginHint || errObj.hint;
-      const reportHint = `If this is an adapter bug, report via: gh issue create --repo epiral/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create epiral/bb-sites --title "[${name}] <description>"`;
+      const reportHint = `If this is an adapter bug, report via: gh issue create --repo zzhan111/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] <description>"`;
 
       if (options.json) {
         console.log(JSON.stringify({ id: "openclaw", success: false, error: errObj.error, hint, reportHint }));
       } else {
         console.error(`[error] site ${name}: ${errObj.error}`);
         if (hint) console.error(`  Hint: ${hint}`);
-        console.error(`  Report: gh issue create --repo epiral/bb-sites --title "[${name}] ..."`);
-        console.error(`     or: ma-browser site github/issue-create epiral/bb-sites --title "[${name}] ..."`);
+        console.error(`  Report: gh issue create --repo zzhan111/bb-sites --title "[${name}] ..."`);
+        console.error(`     or: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] ..."`);
       }
       process.exit(1);
     }
@@ -728,15 +728,15 @@ async function siteRun(
       ? `Please log in to https://${site.domain} in your browser first, then retry.`
       : undefined;
     const hint = loginHint || errObj.hint;
-    const reportHint = `If this is an adapter bug, report via: gh issue create --repo epiral/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create epiral/bb-sites --title "[${name}] <description>"`;
+    const reportHint = `If this is an adapter bug, report via: gh issue create --repo zzhan111/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] <description>"`;
 
     if (options.json) {
       console.log(JSON.stringify({ id: evalReq.id, success: false, error: errObj.error, hint, reportHint }));
     } else {
       console.error(`[error] site ${name}: ${errObj.error}`);
       if (hint) console.error(`  Hint: ${hint}`);
-      console.error(`  Report: gh issue create --repo epiral/bb-sites --title "[${name}] ..."`);
-      console.error(`     or: ma-browser site github/issue-create epiral/bb-sites --title "[${name}] ..."`);
+      console.error(`  Report: gh issue create --repo zzhan111/bb-sites --title "[${name}] ..."`);
+      console.error(`     or: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] ..."`);
     }
     process.exit(1);
   }
@@ -788,8 +788,8 @@ export async function siteCommand(
   ma-browser site search reddit
 
 创建新 adapter: ma-browser guide
-报告问题: gh issue create --repo epiral/bb-sites --title "[adapter-name] 描述"
-贡献社区: https://github.com/epiral/bb-sites`);
+报告问题: gh issue create --repo zzhan111/bb-sites --title "[adapter-name] 描述"
+贡献社区: https://github.com/zzhan111/bb-sites`);
     return;
   }
 
