@@ -28,6 +28,10 @@ export default function CapabilitiesPage() {
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState(null);
 
+  // Category filter tab
+  const CATEGORIES = ['全部', '社交', '电商', '出行', '影视', '医药', '工具'];
+  const [activeCat, setActiveCat] = useState('全部');
+
   const fetchAdapters = useCallback(async (query) => {
     if (!daemon.isConnected()) return;
     setLoading(true);
@@ -74,6 +78,10 @@ export default function CapabilitiesPage() {
 
   const isEmpty = connected && !error && adapters.length === 0 && !loading && total === 0;
 
+  // Apply category filter (only filters the rendered list; search still hits all)
+  const visibleAdapters =
+    activeCat === '全部' ? adapters : adapters.filter((a) => a.category === activeCat);
+
   return (
     <div className={styles.root}>
       {/* ── Search bar ── */}
@@ -87,7 +95,7 @@ export default function CapabilitiesPage() {
           spellCheck={false}
         />
         <span className={styles.searchCount}>
-          {loading ? '…' : `${adapters.length} / ${total}`}
+          {loading ? '…' : `${visibleAdapters.length} / ${total}`}
         </span>
         <button
           className={styles.updateBtn}
@@ -98,6 +106,21 @@ export default function CapabilitiesPage() {
           {syncing ? '更新中…' : '更新适配器'}
         </button>
       </div>
+
+      {/* ── Category filter tabs ── */}
+      {!isEmpty && (
+        <div className={styles.catTabs}>
+          {CATEGORIES.map((cat) => (
+            <button
+              key={cat}
+              className={`${styles.catTab} ${activeCat === cat ? styles.catTabActive : ''}`}
+              onClick={() => setActiveCat(cat)}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* ── Error ── */}
       {error && <p className={styles.errorMsg}>⚠ {error}</p>}
@@ -127,7 +150,7 @@ export default function CapabilitiesPage() {
 
       {/* ── Adapter list ── */}
       <div className={styles.adapterList}>
-        {adapters.map((a) => (
+        {visibleAdapters.map((a) => (
           <AdapterCard key={a.name} adapter={a} />
         ))}
       </div>
@@ -156,7 +179,17 @@ function AdapterCard({ adapter: a }) {
 
   const argNames = Object.keys(a.args ?? {});
 
+  const riskLabel = { low: '🟢 低', medium: '🟡 中', high: '🔴 高' }[a.risk] ?? '';
+  const isHighRisk = a.risk === 'high';
+
   const run = async () => {
+    // High-risk adapters require an explicit ToS-compliance confirmation.
+    if (isHighRisk && !window.confirm(
+      `该适配器涉及 ${a.domain},可能属于社交平台/实时数据等高风险场景。\n` +
+      `请确认你已阅读并遵守 ${a.domain} 的服务条款(ToS),且不会用于反爬、转售或商业化替代。\n\n继续运行?`
+    )) {
+      return;
+    }
     setRunning(true);
     setResult(null);
     setRunError(null);
@@ -173,16 +206,25 @@ function AdapterCard({ adapter: a }) {
   };
 
   return (
-    <div className={`${styles.card} ${expanded ? styles.cardExpanded : ''}`}>
+    <div className={`${styles.card} ${expanded ? styles.cardExpanded : ''} ${isHighRisk ? styles.cardHighRisk : ''}`}>
       {/* ── Card header ── */}
       <div className={styles.cardHead} onClick={() => setExpanded((v) => !v)}>
         <span className={styles.chevron}>{expanded ? '▾' : '▸'}</span>
-        <span className={styles.adapterName}>{a.name}</span>
+        <div className={styles.titles}>
+          <span className={styles.adapterTitle}>{a.title || a.name}</span>
+          <span className={styles.adapterName}>{a.name}</span>
+        </div>
         <span className={styles.adapterDomain}>{a.domain}</span>
-        {a.readOnly && <span className={styles.badge}>只读</span>}
+        {riskLabel && <span className={`${styles.riskBadge} ${styles[`risk_${a.risk}`]}`}>{riskLabel}</span>}
+        {a.readOnly
+          ? <span className={`${styles.badge} ${styles.badgeRO}`}>只读</span>
+          : <span className={`${styles.badge} ${styles.badgeRW}`}>写入</span>}
         {a.source === 'local' && <span className={`${styles.badge} ${styles.badgeLocal}`}>本地</span>}
       </div>
       <p className={styles.adapterDesc}>{a.description}</p>
+      {a.prerequisites && (
+        <p className={styles.prereq}>前提:{a.prerequisites}</p>
+      )}
 
       {/* ── Expanded details ── */}
       {expanded && (

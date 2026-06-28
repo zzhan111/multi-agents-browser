@@ -21,6 +21,15 @@ export interface SiteAdapter {
   example?: string;
   source: "local" | "community";
   filePath: string;
+  // Extended fields for the panel Capabilities tab (legal-compliance + UX).
+  /** Human-readable title (e.g. "查看用户推文动态"); falls back to `name`. */
+  title?: string;
+  /** Category for grouping/filtering: 社交 / 电商 / 出行 / 影视 / 医药 / 工具. */
+  category?: string;
+  /** Risk level: low / medium / high. */
+  risk?: "low" | "medium" | "high";
+  /** Usage prerequisites shown to the user (e.g. "需先登录 x.com"). */
+  prerequisites?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +64,10 @@ function parseMeta(filePath: string, source: "local" | "community"): SiteAdapter
       example: json.example,
       source,
       filePath,
+      title: json.title,
+      category: json.category,
+      risk: json.risk,
+      prerequisites: json.prerequisites,
     };
   } catch {
     // Fall through to @tag format
