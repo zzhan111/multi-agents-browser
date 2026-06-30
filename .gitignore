@@ -45,3 +45,13 @@ temp_*.json
 # Local agent configs
 .claude/
 .reasonix/
+
+# Daemon runtime artifacts (written to DAEMON_DIR = BB_BROWSER_HOME || ~/.bb-browser).
+# These appear at the repo root only when BB_BROWSER_HOME is set to the repo
+# (e.g. during local dev). Anchor to root so we never shadow a legit nested
+# state/ or browser/ dir elsewhere.
+/daemon.json
+/token
+/state/
+/browser/
+/logs/
