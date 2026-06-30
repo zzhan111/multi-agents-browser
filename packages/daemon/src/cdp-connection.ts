@@ -75,6 +75,53 @@ function normalizeHeaders(headers: unknown): Record<string, string> | undefined 
   );
 }
 
+/**
+ * Render a ws close code as a short human-readable cause. Used to distinguish
+ * a managed-browser crash (1006 abnormal) from a graceful/protocol-driven
+ * close when logging CDP drops. 1006 + empty reason is the signature of the
+ * Chrome process dying or being killed: the TCP socket closes without the peer
+ * sending a close frame.
+ */
+function describeCloseCode(code: number, reason: Buffer): string {
+  const reasonStr = reason && reason.length > 0 ? ` reason="${reason.toString("utf8")}"` : "";
+  switch (code) {
+    case 1000:
+      return `1000 (normal closure)${reasonStr}`;
+    case 1001:
+      return `1001 (going away — peer shutting down)${reasonStr}`;
+    case 1005:
+      return `1005 (no status received)${reasonStr}`;
+    case 1006:
+      // No close frame from the peer. Almost always the Chrome process
+      // crashed/was killed or the network dropped — the OS tore down the TCP
+      // connection without a WS-level handshake.
+      return `1006 (abnormal — likely Chrome process exited or network drop)${reasonStr}`;
+    case 1011:
+      return `1011 (server internal error)${reasonStr}`;
+    case 4000:
+    case 4001:
+    case 4002:
+    case 4003:
+    case 4004:
+    case 4005:
+    case 4006:
+    case 4007:
+    case 4008:
+    case 4009:
+    case 4010:
+    case 4011:
+    case 4012:
+    case 4013:
+    case 4014:
+    case 4015:
+      // 4xxx codes are application-defined; Chrome's CDP server uses some of
+      // these to signal its own protocol-level conditions.
+      return `${code} (CDP application close)${reasonStr}`;
+    default:
+      return `${code}${reasonStr}`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // CdpConnection
 // ---------------------------------------------------------------------------
@@ -328,10 +375,18 @@ export class CdpConnection {
       }
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code: number, reason: Buffer) => {
       this._connected = false;
       this.socket = null;
-      this.lastError = "CDP WebSocket closed unexpectedly";
+      const cause = describeCloseCode(code, reason);
+      // Intentional disconnect() sends code 1000; everything else is an
+      // unexpected drop we want surfaced for diagnosis.
+      if (this.intentionallyClosed) {
+        this.lastError = `CDP WebSocket closed intentionally (${cause})`;
+      } else {
+        this.lastError = `CDP WebSocket closed unexpectedly (${cause})`;
+        console.error(`[Daemon] CDP WebSocket closed: ${cause}`);
+      }
       for (const p of this.pending.values()) {
         p.reject(new Error("CDP connection closed"));
       }
@@ -355,7 +410,12 @@ export class CdpConnection {
       }
     });
 
-    ws.on("error", () => {});
+    // The ws "error" event usually fires just before "close" on an abnormal
+    // disconnect and carries the OS-level cause (ECONNRESET, ECONNREFUSED,
+    // EPIPE, …). Log it so the drop reason is diagnosable instead of swallowed.
+    ws.on("error", (err: Error) => {
+      console.error(`[Daemon] CDP WebSocket error: ${err?.message ?? err}`);
+    });
   }
 
   // ---------------------------------------------------------------------------

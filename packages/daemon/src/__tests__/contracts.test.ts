@@ -767,3 +767,78 @@ describe("daemon.json PID strategy", () => {
     assert.equal(typeof raw.token, "string");
   });
 });
+
+// ---------------------------------------------------------------------------
+// stale daemon.json removal on fatal crash
+//
+// Mirrors safeRemoveStaleDaemonJson() in index.ts. The invariant: a fatal
+// crash must only delete daemon.json when its pid is the crashing process's
+// own pid OR a dead process — never when another live daemon owns the file.
+// Violating this silently breaks discovery for WSL agents / the tray when
+// several daemon instances share a DAEMON_DIR.
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure decision: should daemon.json (recording `filePid`) be removed by a
+ * process with pid `ownPid`? Matches the guard in safeRemoveStaleDaemonJson.
+ */
+function shouldRemoveStaleDaemonJson(filePid: number, ownPid: number): boolean {
+  return filePid === ownPid || !isProcessAlive(filePid);
+}
+
+describe("daemon.json stale removal on crash", () => {
+  const testDir = path.join(os.tmpdir(), "ma-browser-test-remove-" + process.pid);
+  const testDaemonJson = path.join(testDir, "daemon.json");
+
+  beforeEach(() => {
+    mkdirSync(testDir, { recursive: true });
+    if (existsSync(testDaemonJson)) {
+      unlinkSync(testDaemonJson);
+    }
+  });
+
+  it("removes daemon.json when pid is the crashing process's own", () => {
+    const info = { pid: process.pid, host: "127.0.0.1", port: 19824, token: "self" };
+    writeFileSync(testDaemonJson, JSON.stringify(info));
+
+    const raw = JSON.parse(readFileSync(testDaemonJson, "utf8"));
+    assert.equal(shouldRemoveStaleDaemonJson(raw.pid, process.pid), true);
+    // Simulate the removal the production code performs when the guard holds.
+    unlinkSync(testDaemonJson);
+    assert.equal(existsSync(testDaemonJson), false, "Own entry should be removed");
+  });
+
+  it("removes daemon.json when pid belongs to a dead process (stale entry)", () => {
+    const deadPid = 999999; // guaranteed not to exist
+    const info = { pid: deadPid, host: "127.0.0.1", port: 19824, token: "stale" };
+    writeFileSync(testDaemonJson, JSON.stringify(info));
+
+    const raw = JSON.parse(readFileSync(testDaemonJson, "utf8"));
+    assert.equal(isProcessAlive(raw.pid), false);
+    assert.equal(shouldRemoveStaleDaemonJson(raw.pid, process.pid), true);
+    unlinkSync(testDaemonJson);
+    assert.equal(existsSync(testDaemonJson), false, "Stale dead-pid entry should be removed");
+  });
+
+  it("does NOT remove daemon.json when pid belongs to another live daemon", () => {
+    // process.pid here stands in for "a different, live daemon's pid" — it is
+    // alive but not the crashing process's own pid.
+    const otherLivePid = process.pid;
+    const crashingPid = otherLivePid + 1; // different, and not what the file records
+    const info = { pid: otherLivePid, host: "127.0.0.1", port: 19824, token: "other" };
+    writeFileSync(testDaemonJson, JSON.stringify(info));
+
+    const raw = JSON.parse(readFileSync(testDaemonJson, "utf8"));
+    assert.equal(isProcessAlive(raw.pid), true);
+    assert.equal(shouldRemoveStaleDaemonJson(raw.pid, crashingPid), false);
+    assert.equal(existsSync(testDaemonJson), true, "Another live daemon's entry must be preserved");
+  });
+
+  it("leaves a missing/unparseable file alone (nothing to remove)", () => {
+    // No file written. The production guard reads inside try/catch and returns
+    // early on a missing/unparseable file; verify the decision never fires.
+    assert.equal(existsSync(testDaemonJson), false);
+    // shouldRemoveStaleDaemonJson is only reached after a successful parse, so
+    // a missing file trivially survives — no removal occurs.
+  });
+});

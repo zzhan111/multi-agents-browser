@@ -21,6 +21,7 @@ import {
   MANAGED_PORT_FILE,
   launchManagedBrowser,
   probeCdp,
+  isProcessAlive,
 } from "@ma-browser/shared";
 import { HttpServer, installLogInterceptor, type DaemonRuntimeStatus } from "./http-server.js";
 import { CdpConnection } from "./cdp-connection.js";
@@ -168,6 +169,36 @@ function writeDaemonJson(info: DaemonInfo): void {
       console.error("[Daemon] Failed to write daemon.json (fallback):", (err2 as Error)?.message ?? err2);
     }
   }
+}
+
+/**
+ * Remove daemon.json ONLY if it advertises a stale entry — i.e. the pid it
+ * records is this process, or a process that no longer exists. This realizes
+ * the original intent ("remove a stale entry pointing at a now-dead process")
+ * without the hazard of the previous unconditional unlink: when several daemon
+ * instances/projects share a DAEMON_DIR (or BB_BROWSER_HOME paths overlap), a
+ * fatal crash in one must not delete a daemon.json that a *different*, still-
+ * healthy daemon wrote — doing so would silently break discovery for WSL agents
+ * and the tray. If the recorded pid belongs to another live process, we leave
+ * the file untouched.
+ */
+function safeRemoveStaleDaemonJson(): void {
+  let pid: number | undefined;
+  try {
+    const raw = JSON.parse(readFileSync(DAEMON_JSON, "utf8")) as Partial<DaemonInfo>;
+    if (typeof raw.pid === "number") pid = raw.pid;
+  } catch {
+    // Missing or unparseable file — nothing to remove (and nothing to corrupt).
+    return;
+  }
+  if (pid === undefined) return;
+  // Own entry, or an entry whose owner has already died → safe to remove.
+  if (pid === process.pid || !isProcessAlive(pid)) {
+    try {
+      unlinkSync(DAEMON_JSON);
+    } catch {}
+  }
+  // Otherwise: another live daemon owns this file — leave it alone.
 }
 
 /** Write the bearer token to a bare file so WSL agents can discover it. */
@@ -363,10 +394,14 @@ async function main(): Promise<void> {
       console.error(`[Vault] startup init failed: ${e instanceof Error ? e.message : e}`),
     );
 
-  // Self-heal: if the established CDP socket drops (e.g. user closed Chrome),
-  // restart the bring-up loop so we re-discover/relaunch and return to green.
+  // Self-heal: if the established CDP socket drops (e.g. user closed Chrome,
+  // managed browser crashed, or network blip), restart the bring-up loop so we
+  // re-discover/relaunch and return to green. The close cause (code/reason) is
+  // logged by CdpConnection just before this fires.
   cdp.onUnexpectedClose = () => {
-    console.error("[Daemon] CDP connection dropped; restarting bring-up loop...");
+    console.error(
+      `[Daemon] CDP connection dropped${cdp.lastError ? ` (${cdp.lastError})` : ""}; restarting bring-up loop...`,
+    );
     void bringUpCdp(cdp, options, runtimeStatus);
   };
 }
@@ -461,8 +496,8 @@ main().catch((error) => {
   // Remove daemon.json so a tray-spawned replacement doesn't find a stale
   // entry pointing at this now-dead process. (Graceful shutdown intentionally
   // skips this because a replacement daemon may already have overwritten it.)
-  try {
-    unlinkSync(DAEMON_JSON);
-  } catch {}
+  // safeRemoveStaleDaemonJson() only acts when the file's pid is ours or dead —
+  // never when another live daemon owns it (see its doc comment).
+  safeRemoveStaleDaemonJson();
   process.exit(1);
 });
