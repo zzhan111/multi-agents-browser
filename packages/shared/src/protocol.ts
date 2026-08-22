@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Entry, Report, ReportHit, VaultManifest } from "@ma-browser/vault";
 
 /**
  * ma-browser 通信协议 — CLI/MCP ↔ Daemon ↔ Chrome CDP
@@ -45,7 +46,13 @@ export type ActionType =
   | "site_search"
   | "site_info"
   | "site_run"
-  | "site_update";
+  | "site_update"
+  | "vault_list"
+  | "vault_register"
+  | "vault_recent"
+  | "vault_search"
+  | "vault_get_report"
+  | "vault_get_entry";
 
 /** 请求类型 */
 export interface Request {
@@ -142,6 +149,14 @@ export interface Request {
   query?: string;
   /** 域名过滤（site_search 使用） */
   domain?: string;
+  /** vault 名称（vault_recent / vault_search / vault_get_* 使用；vault_list 忽略） */
+  vaultName?: string;
+  /** vault.yaml 绝对路径（vault_register 使用） */
+  vaultPath?: string;
+  /** 推文/条目 ID（vault_get_report / vault_get_entry 使用） */
+  tweetId?: string;
+  /** 时间窗口起点，ISO 8601（vault_recent 使用，可选） */
+  vaultSince?: string;
 }
 
 /** 元素引用信息 */
@@ -347,6 +362,36 @@ export interface ResponseData {
     visits: number;
     titles: string[];
   }>;
+  /** 已注册 vault 列表（vault_list / vault_register 返回） */
+  vaults?: VaultInfo[];
+  /** 最近条目列表（vault_recent 返回） */
+  vaultEntries?: Entry[];
+  /** FTS5 搜索命中（vault_search 返回） */
+  vaultHits?: ReportHit[];
+  /** 完整报告（vault_get_report 返回） */
+  vaultReport?: Report;
+  /** 完整条目（vault_get_entry 返回） */
+  vaultEntry?: Entry;
+}
+
+/** vault_list 返回的单个 vault 概要 */
+export interface VaultInfo {
+  /** manifest.name（kebab-case，注册表主键） */
+  name: string;
+  /** 展示名 */
+  displayName: string;
+  /** vault.yaml 绝对路径 */
+  manifestPath: string;
+  /** 该 vault 是否成功加载（false = yaml 缺失/损坏，详见 problem） */
+  ok: boolean;
+  /** ok=false 时的原因描述 */
+  problem?: string;
+  /** 已索引条目数（ok=true 时存在） */
+  entryCount?: number;
+  /** 已索引报告数（ok=true 时存在） */
+  reportCount?: number;
+  /** manifest（ok=true 时存在，供 UI 取 ui.colorAccent 等） */
+  manifest?: VaultManifest;
 }
 
 /** 响应类型 */

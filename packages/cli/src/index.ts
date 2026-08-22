@@ -28,6 +28,7 @@ import { errorsCommand } from "./commands/errors.js";
 import { traceCommand } from "./commands/trace.js";
 import { fetchCommand } from "./commands/fetch.js";
 import { siteCommand } from "./commands/site.js";
+import { vaultCommand } from "./commands/vault.js";
 import { historyCommand } from "./commands/history.js";
 import { shutdownCommand, startCommand, statusCommand } from "./commands/daemon.js";
 import { getDaemonPath } from "./daemon-manager.js";
@@ -57,6 +58,10 @@ ma-browser - AI Agent 浏览器自动化工具
   site info <name>             查看 adapter 用法（参数、返回值、示例）
   site <name> [args]           运行 adapter
   site update                  更新社区 adapter 库
+  vault list                   列出已注册研究库
+  vault register <yaml路径>     注册研究目录并建立索引
+  vault recent <name>          查看最新研究条目
+  vault search <query>         全文搜索研究库（FTS5）
   guide                        如何把任何网站变成 adapter
   star                         ⭐ Star ma-browser on GitHub
 
@@ -125,6 +130,8 @@ interface ParsedArgs {
     openclaw?: boolean;
     port?: number;
     since?: string;
+    limit?: number;
+    vault?: string;
   };
 }
 
@@ -204,6 +211,18 @@ function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === "--since") {
       // --since 参数及其值，无论出现在命令前后都跳过
       skipNext = true;
+    } else if (arg === "--limit") {
+      skipNext = true;
+      const nextIdx = args.indexOf(arg) + 1;
+      if (nextIdx < args.length) {
+        result.flags.limit = parseInt(args[nextIdx], 10);
+      }
+    } else if (arg === "--vault") {
+      skipNext = true;
+      const nextIdx = args.indexOf(arg) + 1;
+      if (nextIdx < args.length) {
+        result.flags.vault = args[nextIdx];
+      }
     } else if (arg === "--method") {
       // --method 参数及其值，由子命令通过 process.argv 解析
       skipNext = true;
@@ -664,6 +683,16 @@ async function main(): Promise<void> {
           days: parsed.flags.days,
           tabId: globalTabId,
           openclaw: parsed.flags.openclaw,
+        });
+        break;
+      }
+
+      case "vault": {
+        await vaultCommand(parsed.args, {
+          json: parsed.flags.json,
+          limit: parsed.flags.limit,
+          since: parsed.flags.since,
+          vault: parsed.flags.vault,
         });
         break;
       }

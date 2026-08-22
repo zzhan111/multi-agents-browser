@@ -26,6 +26,7 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "@ma-browser/vault": "workspace:^",
     "zod": "^3.24.1"
   }
 }

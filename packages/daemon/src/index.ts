@@ -30,6 +30,7 @@ import { StateStore } from "./state-store.js";
 import { AgentRegistry } from "./agent-registry.js";
 import { BindingStore } from "./binding-store.js";
 import { JournalManager } from "./agent-journal.js";
+import { getVaultManager } from "./vault/manager.js";
 import { ScratchpadManager } from "./scratchpad-manager.js";
 
 // ---------------------------------------------------------------------------
@@ -281,6 +282,7 @@ async function main(): Promise<void> {
     clearInterval(scratchpadGcTimer);
     clearInterval(journalFlushTimer);
     journalManager.flushAll(); // flush any unflushed entries before exit
+    getVaultManager().shutdown(); // stop watchers + close SQLite cleanly (WAL checkpoint)
     cdp.disconnect();
     await httpServer.stop();
     // daemon.json intentionally NOT deleted — a tray-driven restart may already
@@ -351,6 +353,15 @@ async function main(): Promise<void> {
   // HTTP server stays up and /status keeps reporting cdpConnected=false until
   // we succeed. The tray's /status poller renders that as yellow (重连中).
   void bringUpCdp(cdp, options, runtimeStatus);
+
+  // Vault feature: load the registry + start watchers in the background.
+  // Same detachment rules as bringUpCdp — a vault indexing failure must never
+  // take the daemon down, and the first index of a large vault can take a while.
+  void getVaultManager()
+    .init()
+    .catch((e) =>
+      console.error(`[Vault] startup init failed: ${e instanceof Error ? e.message : e}`),
+    );
 
   // Self-heal: if the established CDP socket drops (e.g. user closed Chrome),
   // restart the bring-up loop so we re-discover/relaunch and return to green.

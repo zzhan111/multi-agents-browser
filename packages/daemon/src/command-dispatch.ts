@@ -31,6 +31,7 @@ import {
   matchTabOrigin,
   updateAdapters,
 } from "./site-runner.js";
+import { getVaultManager } from "./vault/manager.js";
 
 export interface DispatchContext {
   bindingStore?: BindingStore;
@@ -537,6 +538,9 @@ const READ_ONLY_ALLOWED = new Set([
   // Site adapter discovery is pure catalog reads (no browser side effects).
   // site_run is intentionally excluded — it runs arbitrary adapter JS.
   "site_list", "site_search", "site_info",
+  // Vault reads are file/SQLite queries. vault_register mutates the registry,
+  // so it is intentionally excluded.
+  "vault_list", "vault_recent", "vault_search", "vault_get_report", "vault_get_entry",
 ]);
 
 /** Returns true if the request involves running JavaScript via Runtime.evaluate. */
@@ -572,6 +576,74 @@ async function waitForTabReady(
       // target may not be attached yet — retry
     }
     await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Vault actions
+// ---------------------------------------------------------------------------
+
+/**
+ * Vault requests never touch Chrome. They carry INV-1/INV-4 metadata via a
+ * synthetic tab id (`vault-<name>`; `vault-registry` for registry-wide
+ * actions) and the global seq counter, so downstream consumers (history,
+ * since-cursors) treat them like any other action.
+ */
+async function handleVaultRequest(request: Request, cdp: CdpConnection): Promise<Response> {
+  const mgr = getVaultManager();
+  const seq = () => cdp.tabManager.nextSeq();
+
+  // First vault action in the process lazily initializes the manager
+  // (registry load + reconcile + watchers). Subsequent calls are no-ops.
+  await mgr.init().catch((e) =>
+    console.error(`[Vault] init failed: ${e instanceof Error ? e.message : e}`),
+  );
+
+  switch (request.action) {
+    case "vault_list": {
+      return ok(request.id, { vaults: mgr.list(), tab: "vault-registry", seq: seq() });
+    }
+    case "vault_register": {
+      if (!request.vaultPath)
+        return fail(request.id, "Missing 'vaultPath' parameter for vault_register — pass the vault.yaml path");
+      const r = await mgr.register(request.vaultPath);
+      if (!r.ok) return fail(request.id, `vault_register failed — ${r.issues.join("; ")}`);
+      return ok(request.id, { vaults: [r.row], tab: `vault-${r.row.name}`, seq: seq() });
+    }
+    case "vault_recent": {
+      const name = request.vaultName;
+      if (!name) return fail(request.id, "Missing 'vaultName' parameter for vault_recent");
+      const entries = mgr.recent(name, request.vaultSince ?? null, request.limit ?? 50);
+      if (entries.length === 0 && !mgr.vaultNames().includes(name)) {
+        return fail(request.id, `Unknown vault '${name}' — run vault_list for registered names`);
+      }
+      return ok(request.id, { vaultEntries: entries, tab: `vault-${name}`, seq: seq() });
+    }
+    case "vault_search": {
+      if (!request.query) return fail(request.id, "Missing 'query' parameter for vault_search");
+      const hits = mgr.search(request.vaultName ?? null, request.query, request.limit ?? 20);
+      return ok(request.id, {
+        vaultHits: hits,
+        tab: request.vaultName ? `vault-${request.vaultName}` : "vault-all",
+        seq: seq(),
+      });
+    }
+    case "vault_get_report": {
+      if (!request.vaultName) return fail(request.id, "Missing 'vaultName' parameter for vault_get_report");
+      if (!request.tweetId) return fail(request.id, "Missing 'tweetId' parameter for vault_get_report");
+      const report = mgr.getReport(request.vaultName, request.tweetId);
+      if (!report) return fail(request.id, `No report for tweet '${request.tweetId}' in vault '${request.vaultName}'`);
+      return ok(request.id, { vaultReport: report, tab: `vault-${request.vaultName}`, seq: seq() });
+    }
+    case "vault_get_entry": {
+      if (!request.vaultName) return fail(request.id, "Missing 'vaultName' parameter for vault_get_entry");
+      if (!request.tweetId) return fail(request.id, "Missing 'tweetId' parameter for vault_get_entry");
+      const entry = mgr.getEntry(request.vaultName, request.tweetId);
+      if (!entry) return fail(request.id, `No entry for tweet '${request.tweetId}' in vault '${request.vaultName}'`);
+      return ok(request.id, { vaultEntry: entry, tab: `vault-${request.vaultName}`, seq: seq() });
+    }
+    default:
+      return fail(request.id, `Unknown vault action '${request.action}'`);
   }
 }
 
@@ -757,6 +829,12 @@ export async function dispatchRequest(
     const result = updateAdapters();
     if ("error" in result) return fail(request.id, `${result.error} — manual fix: ${result.action}`);
     return ok(request.id, result as unknown as ExtResponseData);
+  }
+
+  // Vault feature. Pure file/SQLite reads + registry writes — no page target,
+  // so all vault actions are handled before ensurePageTarget().
+  if (request.action.startsWith("vault_")) {
+    return handleVaultRequest(request, cdp);
   }
 
   const target = await cdp.ensurePageTarget(

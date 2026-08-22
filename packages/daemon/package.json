@@ -17,9 +17,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ma-browser/shared": "workspace:*"
+    "@ma-browser/shared": "workspace:*",
+    "@ma-browser/vault": "workspace:^",
+    "better-sqlite3": "^13.0.3",
+    "chokidar": "^5.0.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.0.0",
     "tsup": "^8.0.0",
     "tsx": "^4.20.6",
