@@ -1,0 +1,229 @@
+/* VaultPage — 只读双栏视图（左列表 / 右详情） */
+.root {
+  display: flex;
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── 左栏 ── */
+.listPane {
+  width: 300px;
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  border-right: 1px solid var(--border, #2a2f3a);
+  background: var(--card, #14161c);
+  border-radius: 8px;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.select,
+.search {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2a2f3a);
+  background: var(--card, #14161c);
+  color: var(--foreground, #e6e6e6);
+  font-size: 13px;
+}
+
+.group {
+  margin-bottom: 10px;
+}
+
+.groupTitle {
+  font-size: 12px;
+  color: var(--muted-foreground, #9aa3b2);
+  margin: 6px 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.groupCount {
+  opacity: 0.6;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--foreground, #e6e6e6);
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+
+.row:hover {
+  background: var(--card, #1a1d24);
+}
+
+.rowActive {
+  border-color: var(--accent, #4c8dff);
+  background: var(--card, #1a1d24);
+}
+
+.rowTop {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.vaultBadge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent, #4c8dff);
+  color: #fff;
+  opacity: 0.9;
+}
+
+.rowTime {
+  font-size: 11px;
+  color: var(--muted-foreground, #9aa3b2);
+}
+
+.rowAuthor {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rowText {
+  font-size: 12px;
+  color: var(--muted-foreground, #9aa3b2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.rowReport {
+  font-size: 11px;
+  color: #7ed07e;
+}
+
+/* ── 右栏 ── */
+.detailPane {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px;
+  background: var(--card, #14161c);
+  border-radius: 8px;
+}
+
+.entry header {
+  margin-bottom: 10px;
+}
+
+.entry h2 {
+  font-size: 16px;
+  margin: 6px 0;
+}
+
+.time {
+  font-size: 12px;
+  color: var(--muted-foreground, #9aa3b2);
+  font-weight: 400;
+}
+
+.entryText {
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.meta {
+  font-size: 12px;
+  color: var(--muted-foreground, #9aa3b2);
+}
+
+.missing {
+  color: #d9a533;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.link {
+  color: var(--accent, #4c8dff);
+  font-size: 13px;
+}
+
+.btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2a2f3a);
+  background: var(--card, #1a1d24);
+  color: var(--foreground, #e6e6e6);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.markdown {
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--foreground, #e6e6e6);
+  margin: 0;
+  padding: 10px;
+  background: #0f1116;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.empty {
+  color: var(--muted-foreground, #9aa3b2);
+  font-size: 13px;
+  padding: 12px;
+}
+
+.hint code {
+  background: #0f1116;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.error {
+  color: #e74c3c;
+  font-size: 13px;
+}
+
+/* ── 窄宽度：7A 折叠为上下（<680px） ── */
+@media (max-width: 679px) {
+  .root {
+    flex-direction: column;
+  }
+  .listPane {
+    width: auto;
+    min-width: 0;
+    max-height: 45%;
+    border-right: none;
+    border-bottom: 1px solid var(--border, #2a2f3a);
+  }
+}

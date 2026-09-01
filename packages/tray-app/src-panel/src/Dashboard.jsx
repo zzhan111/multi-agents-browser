@@ -17,6 +17,7 @@ import BindingsPage from './pages/BindingsPage.jsx';
 import TracePage from './pages/TracePage.jsx';
 import LogsPage from './pages/LogsPage.jsx';
 import CapabilitiesPage from './pages/CapabilitiesPage.jsx';
+import VaultPage from './pages/VaultPage.jsx';
 
 import styles from './Dashboard.module.css';
 
@@ -25,6 +26,7 @@ const TABS = [
   { id: 'activity',      label: '🛰 活动' },
   { id: 'bindings',      label: '🔗 绑定' },
   { id: 'capabilities',  label: '🔌 Capabilities' },
+  { id: 'vault',         label: '📚 Vault' },
   { id: 'trace',         label: '🎬 Trace' },
   { id: 'logs',          label: '📋 Logs' },
 ];
@@ -102,6 +104,7 @@ export default function Dashboard() {
         {activeTab === 'activity'     && <ActivityPage />}
         {activeTab === 'bindings'     && <BindingsPage />}
         {activeTab === 'capabilities' && <CapabilitiesPage />}
+        {activeTab === 'vault'        && <VaultPage />}
         {activeTab === 'trace'        && <TracePage />}
         {activeTab === 'logs'         && <LogsPage />}
       </div>
