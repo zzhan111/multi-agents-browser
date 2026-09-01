@@ -1,5 +1,8 @@
 # Tauri
 src-tauri/target/
+# Staged portable resources (populated by package-win.mjs / dev placeholders)
+src-tauri/resources/
+.cache/
 
 # Node
 node_modules/

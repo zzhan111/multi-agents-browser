@@ -259,15 +259,45 @@ fn daemon_confirmed_gone(host: &str, port: u16, token: &str) -> bool {
 /// daemon dodge already-bound ports (e.g. another ma-browser instance, or
 /// Windows port reservations) without changing the daemon code.
 fn build_spawn_config(app: &AppHandle) -> Result<SpawnConfig, String> {
-    // Verify node is installed (clear error if not). We then spawn it by the
-    // bare name "node" rather than this absolute path: Rust's Windows Command
-    // resolution spuriously fails ("program not found") for absolute node
-    // paths containing spaces (e.g. C:\Program Files\nodejs\node.exe), whereas
-    // its PATH search for the bare name works reliably. The absolute path is
-    // kept only as a cross-platform fallback (see DaemonRunner::spawn).
-    let node_abs = which::which("node")
-        .map_err(|e| format!("node not on PATH: {e}"))?;
-    eprintln!("[runner] node on PATH: {node_abs:?} (exists={})", node_abs.exists());
+    // Chrome pre-check: the daemon attaches to the user's real Chrome via CDP.
+    // If Chrome isn't installed, the daemon will fail to attach — surface a
+    // clear message now instead of a vague "daemon exited" later.
+    if !chrome_installed() {
+        eprintln!(
+            "[runner] Chrome not detected; daemon will fail to attach. \
+             Install Google Chrome from https://www.google.com/chrome/"
+        );
+        return Err(
+            "Google Chrome not found. Install it from https://www.google.com/chrome/ \
+             — ma-browser controls your real Chrome via CDP."
+                .into(),
+        );
+    }
+
+    // Prefer the bundled node.exe (portable install); fall back to a bare
+    // "node" PATH search (dev, or a user who has Node installed). The bundled
+    // path is an absolute path and is spawned directly. The bare-name fallback
+    // relies on Windows' PATH search, which is reliable even when an absolute
+    // node path would contain spaces (see the existing comment in spawn()).
+    let node_program: PathBuf = match bundled_node_path(app) {
+        Some(p) => {
+            eprintln!("[runner] using bundled node: {p:?}");
+            p
+        }
+        None => {
+            // Verify node exists on PATH (clear error if not) — validation only;
+            // we spawn the bare name "node" for the PATH-search reliability noted
+            // above. The absolute path resolved here is reused by spawn()'s
+            // fallback retry if the bare-name spawn fails.
+            match which::which("node") {
+                Ok(abs) => {
+                    eprintln!("[runner] node on PATH: {abs:?} (spawning bare name)");
+                    PathBuf::from("node")
+                }
+                Err(e) => return Err(format!("node not on PATH and no bundled node: {e}")),
+            }
+        }
+    };
     let daemon_entry = locate_daemon_entry(app)?;
     eprintln!(
         "[runner] resolved daemon entry: {daemon_entry:?} (exists={})",
@@ -302,7 +332,7 @@ fn build_spawn_config(app: &AppHandle) -> Result<SpawnConfig, String> {
     let bb_home = format!("{}/.bb-browser", home_env.replace("\\", "/"));
 
     Ok(SpawnConfig {
-        program: PathBuf::from("node"),
+        program: node_program,
         args: vec![
             entry_str,
             // Bind the wildcard address so agents inside WSL2 can reach the
@@ -342,9 +372,9 @@ fn strip_verbatim_prefix(p: &str) -> String {
 /// 1. In a packaged install: `resource_dir/daemon/index.js`
 /// 2. Dev: walk up from the binary until we find `packages/daemon/dist/index.js`
 fn locate_daemon_entry(app: &AppHandle) -> Result<PathBuf, String> {
-    // Packaged location.
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let p = resource_dir.join("daemon").join("index.js");
+    // Packaged location (portable: exe-parent; installed: resource_dir).
+    if let Some(root) = resources_root(app) {
+        let p = root.join("daemon").join("index.js");
         if p.exists() {
             return Ok(p);
         }
@@ -370,6 +400,87 @@ fn locate_daemon_entry(app: &AppHandle) -> Result<PathBuf, String> {
         "could not locate packages/daemon/dist/index.js. Run `pnpm build` from the repo root."
             .into(),
     )
+}
+
+/// Resolve the directory holding the bundled resources (node/, daemon/, mcp/,
+/// icons/, etc.). In a portable (non-installed) build, Tauri's
+/// `resource_dir()` does NOT reliably return the exe's parent — so we prefer
+/// `current_exe().parent()` (where the portable zip lays out its resources)
+/// and fall back to `resource_dir()` (for installed builds) and the CWD
+/// (dev).
+fn resources_root(app: &AppHandle) -> Option<PathBuf> {
+    // 1. Portable: the exe's parent dir. Most reliable for the portable zip.
+    if let Some(exe) = std::env::current_exe().ok() {
+        if let Some(parent) = exe.parent() {
+            // Only treat it as the resources root if it actually contains a
+            // known bundled resource (avoid false positives in dev where the
+            // exe lives under target/).
+            if parent.join("daemon").join("index.js").exists()
+                || parent.join("node").join("node.exe").exists()
+            {
+                return Some(parent.to_path_buf());
+            }
+        }
+    }
+    // 2. Installed: Tauri's resource_dir (AppData install dir).
+    if let Ok(dir) = app.path().resource_dir() {
+        return Some(dir);
+    }
+    None
+}
+
+/// Locate the bundled `node.exe` under the bundled-resources root. Returns
+/// `None` in dev (no bundled node) — caller falls back to `which::which("node")`.
+fn bundled_node_path(app: &AppHandle) -> Option<PathBuf> {
+    let dir = resources_root(app)?;
+    let candidate = dir.join("node").join("node.exe");
+    candidate.exists().then_some(candidate)
+}
+
+/// True if Google Chrome appears to be installed. Checks the two standard
+/// install locations + the registry. Used to give a clear message before a
+/// doomed daemon spawn (the daemon connects to the user's real Chrome).
+fn chrome_installed() -> bool {
+    // 1. Program Files (system-wide)
+    if let Some(pf) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+        let candidate = pf
+            .join("Google")
+            .join("Chrome")
+            .join("Application")
+            .join("chrome.exe");
+        if candidate.exists() {
+            return true;
+        }
+    }
+    // 2. LOCALAPPDATA (per-user install)
+    if let Some(lad) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        let candidate = lad
+            .join("Google")
+            .join("Chrome")
+            .join("Application")
+            .join("chrome.exe");
+        if candidate.exists() {
+            return true;
+        }
+    }
+    // 3. Registry (HKLM App Paths\chrome.exe) — best-effort.
+    #[cfg(windows)]
+    {
+        use winreg::enums::HKEY_LOCAL_MACHINE;
+        use winreg::RegKey;
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        if let Ok(key) =
+            hklm.open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe")
+        {
+            let path: Option<String> = key.get_value("").ok();
+            if let Some(p) = path {
+                if PathBuf::from(p).exists() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

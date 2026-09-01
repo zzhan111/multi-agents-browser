@@ -25,7 +25,7 @@ import { execSync } from "node:child_process";
 const BB_DIR = process.env.BB_BROWSER_HOME || join(homedir(), ".bb-browser");
 const LOCAL_SITES_DIR = join(BB_DIR, "sites");
 const COMMUNITY_SITES_DIR = join(BB_DIR, "bb-sites");
-const COMMUNITY_REPO = "https://github.com/epiral/bb-sites.git";
+const COMMUNITY_REPO = "https://github.com/zzhan111/bb-sites.git";
 
 function checkCliUpdate(): void {
   try {
@@ -624,15 +624,15 @@ async function siteRun(
         ? `Please log in to https://${site.domain} in your OpenClaw browser first, then retry.`
         : undefined;
       const hint = loginHint || errObj.hint;
-      const reportHint = `If this is an adapter bug, report via: gh issue create --repo epiral/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create epiral/bb-sites --title "[${name}] <description>"`;
+      const reportHint = `If this is an adapter bug, report via: gh issue create --repo zzhan111/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] <description>"`;
 
       if (options.json) {
         console.log(JSON.stringify({ id: "openclaw", success: false, error: errObj.error, hint, reportHint }));
       } else {
         console.error(`[error] site ${name}: ${errObj.error}`);
         if (hint) console.error(`  Hint: ${hint}`);
-        console.error(`  Report: gh issue create --repo epiral/bb-sites --title "[${name}] ..."`);
-        console.error(`     or: ma-browser site github/issue-create epiral/bb-sites --title "[${name}] ..."`);
+        console.error(`  Report: gh issue create --repo zzhan111/bb-sites --title "[${name}] ..."`);
+        console.error(`     or: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] ..."`);
       }
       process.exit(1);
     }
@@ -655,7 +655,7 @@ async function siteRun(
   await ensureDaemonRunning();
 
   // 确定目标 tab
-  let targetTabId: number | undefined = options.tabId;
+  let targetTabId: string | number | undefined = options.tabId;
 
   // 如果用户没指定 --tab，自动查找匹配域名的 tab
   if (!targetTabId && site.domain) {
@@ -728,15 +728,15 @@ async function siteRun(
       ? `Please log in to https://${site.domain} in your browser first, then retry.`
       : undefined;
     const hint = loginHint || errObj.hint;
-    const reportHint = `If this is an adapter bug, report via: gh issue create --repo epiral/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create epiral/bb-sites --title "[${name}] <description>"`;
+    const reportHint = `If this is an adapter bug, report via: gh issue create --repo zzhan111/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] <description>"`;
 
     if (options.json) {
       console.log(JSON.stringify({ id: evalReq.id, success: false, error: errObj.error, hint, reportHint }));
     } else {
       console.error(`[error] site ${name}: ${errObj.error}`);
       if (hint) console.error(`  Hint: ${hint}`);
-      console.error(`  Report: gh issue create --repo epiral/bb-sites --title "[${name}] ..."`);
-      console.error(`     or: ma-browser site github/issue-create epiral/bb-sites --title "[${name}] ..."`);
+      console.error(`  Report: gh issue create --repo zzhan111/bb-sites --title "[${name}] ..."`);
+      console.error(`     or: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] ..."`);
     }
     process.exit(1);
   }
@@ -788,8 +788,8 @@ export async function siteCommand(
   ma-browser site search reddit
 
 创建新 adapter: ma-browser guide
-报告问题: gh issue create --repo epiral/bb-sites --title "[adapter-name] 描述"
-贡献社区: https://github.com/epiral/bb-sites`);
+报告问题: gh issue create --repo zzhan111/bb-sites --title "[adapter-name] 描述"
+贡献社区: https://github.com/zzhan111/bb-sites`);
     return;
   }
 
@@ -836,13 +836,35 @@ export async function siteCommand(
       break;
   }
 
-  // 静默后台更新社区 adapter
-  silentUpdate();
+  // 静默后台更新社区 adapter（fire-and-forget）
+  void silentUpdate(options);
 }
 
-function silentUpdate(): void {
+/**
+ * 后台快进更新社区 adapter 库。
+ *
+ * pull 是 detached + unref 的 fire-and-forget，拿不到退出码；但「结构性」故障
+ * （分支没跟踪上游 / 本地领先无法快进）会让后台 pull 永远静默空转，
+ * 社区 adapter 长期停更而用户无感知。这里先做一次纯本地（无网络）前置检查，
+ * 命中就在 stderr 提示一行并跳过注定失败的 pull。
+ *
+ * 注意：不检查 working tree dirty。--ff-only + ahead=0 时 untracked files 或
+ * 本地修改不会阻止 fast-forward pull；如果有真正的 merge conflict，后台 pull
+ * 会静默失败，用户下次运行 `ma-browser site update` 时会看到完整 git 报错。
+ */
+async function silentUpdate(options: SiteOptions = {}): Promise<void> {
   const gitDir = join(COMMUNITY_SITES_DIR, ".git");
   if (!existsSync(gitDir)) return;
+
+  const blocker = await communityUpdateBlocker();
+  if (blocker) {
+    if (!options.json) {
+      console.error(`[ma-browser] 社区 adapter 自动更新已停止：${blocker}`);
+      console.error(`  修复后运行 ma-browser site update（库目录 ${COMMUNITY_SITES_DIR}）`);
+    }
+    return;
+  }
+
   import("node:child_process").then(({ spawn }) => {
     const child = spawn("git", ["pull", "--ff-only"], {
       cwd: COMMUNITY_SITES_DIR,
@@ -851,4 +873,43 @@ function silentUpdate(): void {
     });
     child.unref();
   }).catch(() => {});
+}
+
+/**
+ * 纯本地检查社区库能否 `git pull --ff-only`。返回阻塞原因，或 null（健康）。
+ * 不触发网络；检查自身的任何异常都返回 null，绝不因健康检查而打断 CLI。
+ * 异步执行，3s 超时后放弃检查（视为健康），不阻塞 CLI 主线程。
+ */
+async function communityUpdateBlocker(): Promise<string | null> {
+  const run = (cmd: string): Promise<string> =>
+    import("node:child_process").then(({ execFile }) =>
+      new Promise<string>((resolve, reject) => {
+        execFile("git", cmd.replace(/^git /, "").split(" "), {
+          cwd: COMMUNITY_SITES_DIR,
+          timeout: 3000,
+        }, (err, stdout) => {
+          if (err) reject(err);
+          else resolve(stdout.toString().trim());
+        });
+      }),
+    );
+
+  const deadline = Date.now() + 3000;
+
+  try {
+    let upstream: string;
+    try {
+      upstream = await run("git rev-parse --abbrev-ref --symbolic-full-name @{u}");
+    } catch {
+      return "当前分支未跟踪上游（无法 git pull）";
+    }
+    if (Date.now() > deadline) return null;
+    const ahead = await run("git rev-list --count @{u}..HEAD");
+    if (ahead !== "0") {
+      return `本地领先 ${upstream} ${ahead} 个提交，--ff-only 无法快进`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

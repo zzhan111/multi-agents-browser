@@ -153,12 +153,22 @@ export class DaemonClient {
     return this._get(`/api/sites${qs ? `?${qs}` : ''}`);
   }
 
+  /**
+   * Trigger a community-adapter sync (git clone if absent, else git pull).
+   * Returns the site_update command response. The caller should refresh
+   * the catalog afterwards via getSites('', '') (the daemon invalidates its
+   * in-memory cache on success).
+   */
+  async updateAdapters() {
+    return this.send('site_update');
+  }
+
   async getOverview() {
     return this._get('/api/overview');
   }
 
-  async getCommands(limit = 50) {
-    return this._get(`/api/commands?limit=${limit}`);
+  async getCommands(limit = 50, since = 0) {
+    return this._get(`/api/commands?limit=${limit}&since=${since}`);
   }
 
   async getLogs(level = '', limit = 200) {

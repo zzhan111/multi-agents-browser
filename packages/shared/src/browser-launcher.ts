@@ -112,16 +112,20 @@ export function findBrowserExecutable(): string | null {
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA ?? "";
     const candidates = [
-      // Google Chrome
+      // Google Chrome — system-wide (Program Files) installs first
       "C:/Program Files/Google/Chrome/Application/chrome.exe",
       "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
       ...(localAppData
         ? [
+            // Stable Chrome per-user install — the DEFAULT for Chrome's own
+            // installer (most clean machines land here, NOT Program Files).
+            `${localAppData}/Google/Chrome/Application/chrome.exe`,
             `${localAppData}/Google/Chrome Dev/Application/chrome.exe`,
             `${localAppData}/Google/Chrome SxS/Application/chrome.exe`,
             `${localAppData}/Google/Chrome Beta/Application/chrome.exe`,
           ]
         : []),
+      // Microsoft Edge / Brave only as a fallback when Chrome is absent.
       "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
       "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
       "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe",

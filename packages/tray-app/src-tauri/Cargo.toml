@@ -1,6 +1,6 @@
 [package]
 name = "ma-browser-tray"
-version = "0.0.1"
+version = "0.11.6"
 description = "Windows system tray daemon UI for ma-browser"
 authors = ["epiral"]
 edition = "2021"
@@ -48,6 +48,14 @@ optional = true
 version = "7"
 optional = true
 
+# HTTP client for the GitHub-Releases update check (Task 3). Optional — only
+# the tauri-app binary uses it. Already in Cargo.lock transitively at 0.13.x.
+[dependencies.reqwest]
+version = "0.13"
+default-features = false
+features = ["json", "rustls"]
+optional = true
+
 # Windows registry access for autostart (HKCU\...\Run).
 # Always included on Windows (not optional) so the lib crate can use it
 # without requiring the tauri-app feature.
@@ -65,6 +73,7 @@ tauri-app = [
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-dialog",
     "dep:which",
+    "dep:reqwest",
 ]
 
 [dev-dependencies]

@@ -288,19 +288,19 @@ ma-browser site platform/command "test query"
 
 ```bash
 # 方式 A：使用 gh CLI
-git clone https://github.com/epiral/bb-sites && cd bb-sites
+git clone https://github.com/zzhan111/bb-sites && cd bb-sites
 git checkout -b feat-platform
 # 添加 adapter 文件
 git push -u origin feat-platform
-gh pr create --repo epiral/bb-sites
+gh pr create --repo zzhan111/bb-sites
 
 # 方式 B：使用 ma-browser 自身
-ma-browser site github/fork epiral/bb-sites
+ma-browser site github/fork zzhan111/bb-sites
 git clone https://github.com/YOUR_USER/bb-sites && cd bb-sites
 git checkout -b feat-platform
 # 添加 adapter 文件
 git push -u origin feat-platform
-ma-browser site github/pr-create epiral/bb-sites --title "feat(platform): add adapters" --head "YOUR_USER:feat-platform"
+ma-browser site github/pr-create zzhan111/bb-sites --title "feat(platform): add adapters" --head "YOUR_USER:feat-platform"
 ```
 
 ## 错误处理规范
@@ -326,8 +326,8 @@ return {error: 'Rate limited', hint: 'Try again in 60 seconds'};
 
 ```bash
 # 通过 gh CLI
-gh issue create --repo epiral/bb-sites --title "[adapter-name] 描述"
+gh issue create --repo zzhan111/bb-sites --title "[adapter-name] 描述"
 
 # 通过 ma-browser
-ma-browser site github/issue-create epiral/bb-sites --title "[adapter-name] 描述"
+ma-browser site github/issue-create zzhan111/bb-sites --title "[adapter-name] 描述"
 ```

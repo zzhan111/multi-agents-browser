@@ -706,7 +706,7 @@ async function main(): Promise<void> {
           console.error("  brew install gh && gh auth login");
           process.exit(1);
         }
-        const repos = ["zzhan111/multi-agents-browser", "epiral/bb-sites"];
+        const repos = ["zzhan111/multi-agents-browser", "zzhan111/bb-sites"];
         for (const repo of repos) {
           try {
             execSync(`gh api user/starred/${repo} -X PUT`, { stdio: "pipe" });
@@ -760,23 +760,23 @@ async function main(): Promise<void> {
 
 5. CONTRIBUTE
    Option A (with gh CLI):
-     git clone https://github.com/epiral/bb-sites && cd bb-sites
+     git clone https://github.com/zzhan111/bb-sites && cd bb-sites
      git checkout -b feat-platform
      # add adapter files
      git push -u origin feat-platform
-     gh pr create --repo epiral/bb-sites
+     gh pr create --repo zzhan111/bb-sites
 
    Option B (without gh CLI, using ma-browser itself):
-     ma-browser site github/fork epiral/bb-sites
+     ma-browser site github/fork zzhan111/bb-sites
      git clone https://github.com/YOUR_USER/bb-sites && cd bb-sites
      git checkout -b feat-platform
      # add adapter files
      git push -u origin feat-platform
-     ma-browser site github/pr-create epiral/bb-sites --title "feat(platform): add adapters" --head "YOUR_USER:feat-platform"
+     ma-browser site github/pr-create zzhan111/bb-sites --title "feat(platform): add adapters" --head "YOUR_USER:feat-platform"
 
 Private adapters:  ~/.bb-browser/sites/<platform>/<command>.js
 Community:         ~/.bb-browser/bb-sites/ (via ma-browser site update)
-Full guide:        https://github.com/epiral/bb-sites/blob/main/SKILL.md`);
+Full guide:        https://github.com/zzhan111/bb-sites/blob/main/SKILL.md`);
         break;
       }
 

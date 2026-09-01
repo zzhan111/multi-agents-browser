@@ -1,13 +1,15 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ma-browser Tray",
-  "version": "0.0.1",
+  "version": "0.11.6",
   "identifier": "com.ma-browser.tray",
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
     "frontendDist": "../src",
-    "features": ["tauri-app"]
+    "features": [
+      "tauri-app"
+    ]
   },
   "app": {
     "windows": [
@@ -54,13 +56,25 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"
     ],
     "resources": [
-      "icons/*.png"
+      "icons/*.png",
+      "../icons/tray-green.png",
+      "../icons/tray-red.png",
+      "../icons/tray-yellow.png",
+      "../vendor/MicrosoftEdgeWebview2Setup.exe",
+      "resources/node/*",
+      "resources/daemon/*",
+      "resources/daemon/node_modules/**/*",
+      "resources/mcp/*",
+      "resources/mcp-config.json"
     ],
     "windows": {
       "nsis": {

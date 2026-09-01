@@ -537,7 +537,7 @@ const READ_ONLY_ALLOWED = new Set([
   "tab_release", "tab_claim",
   // Site adapter discovery is pure catalog reads (no browser side effects).
   // site_run is intentionally excluded — it runs arbitrary adapter JS.
-  "site_list", "site_search", "site_info",
+  "site_list", "site_search", "site_info", "site_recommend",
   // Vault reads are file/SQLite queries. vault_register mutates the registry,
   // so it is intentionally excluded.
   "vault_list", "vault_recent", "vault_search", "vault_get_report", "vault_get_entry",
@@ -822,6 +822,30 @@ export async function dispatchRequest(
     if (!adapter) return fail(request.id, `Site adapter '${request.name}' not found`);
     return ok(request.id, adapter as unknown as ExtResponseData);
   }
+  if (request.action === "site_recommend") {
+    // Recommend adapters whose domain matches any currently open page tab.
+    // Mirrors the tab-origin matching used by site_run, so recommendations are
+    // immediately runnable. Pure read (getTargets + catalog) — no side effects.
+    const targets = (await cdp.getTargets()).filter((t) => t.type === "page");
+    const adapters = listAdapters();
+    const recommendations = targets
+      .map((t) => {
+        const tState = cdp.tabManager.getTab(t.id);
+        const matched = adapters.filter((a) => matchTabOrigin(t.url, a.domain));
+        return {
+          tab: tState?.shortId ?? t.id.slice(-4).toLowerCase(),
+          url: t.url,
+          adapters: matched.map((a) => ({
+            name: a.name,
+            description: a.description,
+            domain: a.domain,
+            ...(a.example ? { example: a.example } : {}),
+          })),
+        };
+      })
+      .filter((r) => r.adapters.length > 0);
+    return ok(request.id, { siteRecommendations: recommendations });
+  }
   if (request.action === "site_run") {
     return handleSiteRun(cdp, request, session);
   }
@@ -984,7 +1008,8 @@ export async function dispatchRequest(
           // Non-critical — click via CDP events already fired
         }
       }
-      return ok(request.id, { tab: shortId, seq });
+      const ref = tab.refs[request.ref];
+      return ok(request.id, { tab: shortId, seq, role: ref?.role, name: ref?.name });
     }
 
     case "fill":
@@ -994,10 +1019,13 @@ export async function dispatchRequest(
       const seq = tab.recordAction();
       const backendNodeId = await parseRef(cdp, target.id, tab, request.ref);
       await insertTextIntoNode(cdp, target.id, backendNodeId, request.text, request.action === "fill");
+      const ref = tab.refs[request.ref];
       return ok(request.id, {
         value: request.text,
         tab: shortId,
         seq,
+        role: ref?.role,
+        name: ref?.name,
       });
     }
 
@@ -1012,11 +1040,20 @@ export async function dispatchRequest(
         "DOM.resolveNode",
         { backendNodeId },
       );
-      await cdp.sessionCommand(target.id, "Runtime.callFunctionOn", {
+      const priorState = await cdp.sessionCommand<{ result: { value: boolean } }>(target.id, "Runtime.callFunctionOn", {
         objectId: resolved.object.objectId,
-        functionDeclaration: `function() { this.checked = ${desired}; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); }`,
+        functionDeclaration: `function() { const was = this.checked; this.checked = ${desired}; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); return was; }`,
+        returnByValue: true,
       });
-      return ok(request.id, { tab: shortId, seq });
+      const wasChecked = priorState?.result?.value ?? false;
+      const ref = tab.refs[request.ref];
+      return ok(request.id, {
+        tab: shortId,
+        seq,
+        role: ref?.role,
+        name: ref?.name,
+        ...(desired ? { wasAlreadyChecked: wasChecked } : { wasAlreadyUnchecked: !wasChecked }),
+      });
     }
 
     case "select": {
@@ -1028,14 +1065,20 @@ export async function dispatchRequest(
         "DOM.resolveNode",
         { backendNodeId },
       );
-      await cdp.sessionCommand(target.id, "Runtime.callFunctionOn", {
+      const labelResult = await cdp.sessionCommand<{ result: { value: string | null } }>(target.id, "Runtime.callFunctionOn", {
         objectId: resolved.object.objectId,
-        functionDeclaration: `function() { this.value = ${JSON.stringify(request.value)}; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); }`,
+        functionDeclaration: `function() { this.value = ${JSON.stringify(request.value)}; this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); return this.options && this.selectedIndex >= 0 ? this.options[this.selectedIndex].text : null; }`,
+        returnByValue: true,
       });
+      const ref = tab.refs[request.ref];
       return ok(request.id, {
         value: request.value,
         tab: shortId,
         seq,
+        role: ref?.role,
+        name: ref?.name,
+        selectedValue: request.value,
+        ...(labelResult?.result?.value != null ? { selectedLabel: labelResult.result.value } : {}),
       });
     }
 

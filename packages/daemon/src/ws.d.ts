@@ -1,7 +1,5 @@
 declare module "ws" {
   import { EventEmitter } from "node:events";
-  import type { IncomingMessage, ClientRequest } from "node:http";
-  import type { Duplex } from "node:stream";
 
   namespace WebSocket {
     type RawData = Buffer | ArrayBuffer | Buffer[];

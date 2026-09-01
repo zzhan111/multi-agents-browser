@@ -27,6 +27,7 @@ const initialState = {
   traceEvents: [],
   traceEventCount: 0,
   lastUpdated: null,
+  recordWindow: { start: null, end: null }, // 录制窗口戳（高亮命令流中被录制的命令）
   realTimeStats: {
     status: 'idle',
     eventCount: 0,
@@ -112,6 +113,7 @@ function reducer(state, action) {
           lastEventTime: null,
         },
       };
+    case 'SET_RECORD_WINDOW':        return { ...state, recordWindow: action.payload };
     case 'SET_SELECTED_EVENT_INDEX': return { ...state, selectedEventIndex: action.payload };
     case 'SET_SHOW_EXPORTER':        return { ...state, showExporter: action.payload };
 
@@ -152,6 +154,7 @@ export function StoreProvider({ children }) {
     setTraceEvents:     useCallback((v) => dispatch({ type: 'SET_TRACE_EVENTS', payload: v }), []),
     addTraceEvent:      useCallback((e) => dispatch({ type: 'ADD_TRACE_EVENT', payload: e }), []),
     clearTraceEvents:   useCallback(() => dispatch({ type: 'CLEAR_TRACE_EVENTS' }), []),
+    setRecordWindow:    useCallback((v) => dispatch({ type: 'SET_RECORD_WINDOW', payload: v }), []),
     setSelectedEventIndex: useCallback((v) => dispatch({ type: 'SET_SELECTED_EVENT_INDEX', payload: v }), []),
     setShowExporter:    useCallback((v) => dispatch({ type: 'SET_SHOW_EXPORTER', payload: v }), []),
     // Overview

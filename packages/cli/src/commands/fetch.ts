@@ -39,7 +39,7 @@ function matchTabOrigin(tabUrl: string, targetHostname: string): boolean {
 /**
  * 找到匹配域名的 tab，如果没有则新建
  */
-async function ensureTabForOrigin(origin: string, hostname: string): Promise<number | undefined> {
+async function ensureTabForOrigin(origin: string, hostname: string): Promise<string | number | undefined> {
   const listReq: Request = { id: generateId(), action: "tab_list" };
   const listResp: Response = await sendCommand(listReq);
 

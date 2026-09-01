@@ -15,6 +15,7 @@ import TabPanel from '../components/TabPanel.jsx';
 import TraceControls from '../components/TraceControls.jsx';
 import TraceTimeline from '../components/TraceTimeline.jsx';
 import RealtimeMonitor from '../components/RealtimeMonitor.jsx';
+import CommandLog from '../components/CommandLog.jsx';
 import ExportDialog from '../components/ExportDialog.jsx';
 
 import styles from './TracePage.module.css';
@@ -34,6 +35,10 @@ export default function TracePage() {
     setTraceEvents,
     addTraceEvent,
     lastUpdated,
+    commands,
+    setCommands,
+    recordWindow,
+    setRecordWindow,
   } = useStore();
 
   const lastEventCursorRef = useRef(null);
@@ -69,14 +74,51 @@ export default function TracePage() {
     };
   }, [setConnected, setConnecting, setConnectionError]);
 
-  // Reset cursor only when recording flips false→true.
+  // Reset cursor only when recording flips false→true; stamp the record window
+  // (used to highlight which MCP commands fall inside the recording span).
   const wasRecordingRef = useRef(false);
+  const recordWindowRef = useRef(recordWindow);
+  recordWindowRef.current = recordWindow;
   useEffect(() => {
     if (traceRecording && !wasRecordingRef.current) {
       lastEventCursorRef.current = null;
+      setRecordWindow({ start: Date.now(), end: null });
+    } else if (!traceRecording && wasRecordingRef.current) {
+      const rw = recordWindowRef.current;
+      if (rw.start != null) setRecordWindow({ ...rw, end: Date.now() });
     }
     wasRecordingRef.current = traceRecording;
-  }, [traceRecording]);
+  }, [traceRecording, setRecordWindow]);
+
+  // Poll the daemon command history (incremental via since=seq).
+  const lastCommandSeqRef = useRef(0);
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await daemon.getCommands(100, lastCommandSeqRef.current);
+        if (!cancelled && res?.commands?.length) {
+          const cmds = res.commands;
+          const maxSeq = cmds.reduce((m, c) => Math.max(m, c.seq), 0);
+          if (maxSeq > lastCommandSeqRef.current) lastCommandSeqRef.current = maxSeq;
+          setCommands((prev) => {
+            // Merge: keep old commands not in the new batch, append new ones
+            const existingSeqs = new Set(cmds.map((c) => c.seq));
+            const merged = [...prev.filter((c) => !existingSeqs.has(c.seq)), ...cmds];
+            // Keep newest first, cap at 200
+            merged.sort((a, b) => b.seq - a.seq);
+            return merged.slice(0, 200);
+          });
+        }
+      } catch (err) {
+        console.error('[TracePage] commands poll error:', err);
+      }
+    };
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [connected, setCommands]);
 
   // Recording poll (Web Worker timer to avoid throttling when tab is hidden).
   useEffect(() => {
@@ -168,17 +210,26 @@ export default function TracePage() {
               <div className={styles.controls}>
                 <TraceControls />
               </div>
-              <div className={styles.timeline}>
-                {traceRecording && (
-                  <div className={styles.recordingIndicator}>
-                    <span className={styles.recDot} />
-                    <span>正在录制中…</span>
-                    <span className={styles.recNote}>
-                      {lastUpdated ? '最近有更新' : '等待操作'}
-                    </span>
-                  </div>
-                )}
-                <TraceTimeline />
+              <div className={styles.split}>
+                <div className={styles.commandPane}>
+                  <CommandLog
+                    commands={commands}
+                    tabShort={activeTab?.tab}
+                    recordWindow={recordWindow}
+                  />
+                </div>
+                <div className={styles.timeline}>
+                  {traceRecording && (
+                    <div className={styles.recordingIndicator}>
+                      <span className={styles.recDot} />
+                      <span>正在录制中…</span>
+                      <span className={styles.recNote}>
+                        {lastUpdated ? '最近有更新' : '等待操作'}
+                      </span>
+                    </div>
+                  )}
+                  <TraceTimeline />
+                </div>
               </div>
             </main>
           </div>

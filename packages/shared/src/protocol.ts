@@ -47,6 +47,7 @@ export type ActionType =
   | "site_info"
   | "site_run"
   | "site_update"
+  | "site_recommend"
   | "vault_list"
   | "vault_register"
   | "vault_recent"
@@ -299,6 +300,10 @@ export interface ResponseData {
   owner?: string;
   /** 是否已释放租约（tab_release 命令返回） */
   released?: boolean;
+  /** 稳定 tab 句柄（tab_claim/task_update 命令返回，跨浏览器重启存活） */
+  bbTabId?: string;
+  /** 任务进度游标（task_update 命令返回） */
+  progress?: string;
   /** 全局操作序号 */
   seq?: number;
   /** 观测查询游标（用于 since 增量查询） */
@@ -307,8 +312,20 @@ export interface ResponseData {
   snapshotData?: SnapshotData;
   /** 获取的文本或属性值（get 操作返回） */
   value?: string;
-  /** 截图路径（screenshot 操作返回） */
-  screenshotPath?: string;
+  /** 元素可访问性角色（click/hover/fill/check/select 等交互命令返回） */
+  role?: string;
+  /** 元素可访问名称（click/hover/fill/check/select 等交互命令返回） */
+  name?: string;
+  /** select 命令选中的 value */
+  selectedValue?: string;
+  /** select 命令选中项的可见文本 */
+  selectedLabel?: string;
+  /** check 命令：元素之前是否已勾选 */
+  wasAlreadyChecked?: boolean;
+  /** uncheck 命令：元素之前是否已取消勾选 */
+  wasAlreadyUnchecked?: boolean;
+  /** 截图路径（screenshot 操作返回，daemon 实际以 `path` 键返回） */
+  path?: string;
   /** 截图 data URL（screenshot 操作返回） */
   dataUrl?: string;
   /** eval 执行结果 */
@@ -392,6 +409,20 @@ export interface VaultInfo {
   reportCount?: number;
   /** manifest（ok=true 时存在，供 UI 取 ui.colorAccent 等） */
   manifest?: VaultManifest;
+  /** site_recommend：基于当前活跃 tab 的 adapter 推荐 */
+  siteRecommendations?: Array<{
+    /** tab 短 ID */
+    tab: string;
+    /** tab 当前 URL */
+    url: string;
+    /** 匹配到的 adapter 列表 */
+    adapters: Array<{
+      name: string;
+      description: string;
+      domain: string;
+      example?: string;
+    }>;
+  }>;
 }
 
 /** 响应类型 */

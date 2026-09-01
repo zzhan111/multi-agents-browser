@@ -47,8 +47,24 @@
   flex-shrink: 0;
 }
 
+/* main 内上下两栏：上=命令流(本视图)，下=trace 事件(导出用) */
+.split {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.commandPane {
+  flex: 1;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
 .timeline {
   flex: 1;
+  min-height: 0;
   overflow: auto;
 }
 

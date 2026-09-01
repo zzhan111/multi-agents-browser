@@ -14,20 +14,20 @@ interface ConsoleOptions {
 
 export async function consoleCommand(options: ConsoleOptions = {}): Promise<void> {
   // Parse since: if numeric string, convert to number
-  let since: string | number | undefined;
+  let since: number | "last_action" | undefined;
   if (options.since) {
     const num = parseInt(options.since, 10);
-    since = (!isNaN(num) && String(num) === options.since) ? num : options.since;
+    since = (!isNaN(num) && String(num) === options.since) ? num : (options.since as "last_action");
   }
 
-  const request: Request & { since?: string | number } = {
+  const request: Request = {
     id: generateId(),
     action: "console",
     consoleCommand: options.clear ? "clear" : "get",
     tabId: options.tabId,
     since,
   };
-  const response = await sendCommand(request as Request);
+  const response = await sendCommand(request);
 
   if (options.json) {
     console.log(JSON.stringify(response));

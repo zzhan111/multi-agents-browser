@@ -284,7 +284,7 @@ export class HttpServer {
           dispatchRequest(this.cdp, request, session, dispatchCtx),
           timeout,
         ]);
-        finish?.();
+        finish?.(response.success !== false, response.data?.tab);
         // Write journal after successful dispatch
         if (session.agentId && this.journalManager) {
           const tab = typeof request.tabId === "string" ? request.tabId : undefined;
@@ -359,12 +359,13 @@ export class HttpServer {
   }
 
   // ---------------------------------------------------------------------------
-  // GET /api/commands?limit=50
+  // GET /api/commands?limit=50&since=0
   // ---------------------------------------------------------------------------
 
   private handleCommands(url: string, res: ServerResponse): void {
     const limit = parseIntParam(url, "limit", 50);
-    const records = this.history ? this.history.recent(limit) : [];
+    const since = parseIntParam(url, "since", 0);
+    const records = this.history ? this.history.recent(limit, since) : [];
     this.sendJson(res, 200, { commands: records });
   }
 

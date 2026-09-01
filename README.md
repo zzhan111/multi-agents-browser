@@ -28,7 +28,7 @@ ma-browser site youtube/transcript VIDEO_ID      # full transcript
 ma-browser site stackoverflow/search "async"     # search SO questions
 ```
 
-**103 commands across 36 platforms.** All using your real browser's login state. [Full list →](https://github.com/epiral/bb-sites)
+**103 commands across 36 platforms.** All using your real browser's login state. [Full list →](https://github.com/zzhan111/bb-sites)
 
 ## The idea
 
@@ -85,7 +85,7 @@ Skill on ClawHub: [ma-browser-openclaw](https://clawhub.ai/yan5xu/ma-browser)
 
 ## 36 platforms, 103 commands
 
-Community-driven via [bb-sites](https://github.com/epiral/bb-sites). One JS file per command.
+Community-driven via [bb-sites](https://github.com/zzhan111/bb-sites). One JS file per command.
 
 | Category | Platforms | Commands |
 |----------|-----------|----------|
@@ -193,7 +193,7 @@ ma-browser CLI ──HTTP──▶ Daemon ──CDP WebSocket──▶ Your Real
 MultiAgentsBrowser evolved from [bb-browser](https://github.com/epiral/bb-browser)
 by **epiral** (MIT). The full upstream commit history is preserved in this
 repository. Community site adapters still live at
-[epiral/bb-sites](https://github.com/epiral/bb-sites).
+[zzhan111/bb-sites](https://github.com/zzhan111/bb-sites).
 
 ## License
 

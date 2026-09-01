@@ -14,7 +14,7 @@ import path from "node:path";
 import { DAEMON_DIR } from "@ma-browser/shared";
 import { getCatalog, queryCatalog, invalidateCatalog, type SiteAdapter } from "./site-catalog.js";
 
-const COMMUNITY_REPO = "https://github.com/epiral/bb-sites.git";
+const COMMUNITY_REPO = "https://github.com/zzhan111/bb-sites.git";
 const COMMUNITY_SITES_DIR = path.join(DAEMON_DIR, "bb-sites");
 
 export type UpdateResult =
