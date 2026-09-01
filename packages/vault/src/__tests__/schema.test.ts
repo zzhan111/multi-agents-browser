@@ -39,17 +39,18 @@ ui:
   tray_badge_text: "X"
 `;
 
-test("parseVaultYaml accepts a complete vault.yaml and projects to camelCase", () => {
+test("parseVaultYaml accepts a complete vault.yaml and projects to camelCase (legacy orchestrator section is accepted + ignored)", () => {
   const r = parseVaultYaml(VALID_VAULT_YAML);
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.equal(r.manifest.schemaVersion, 1);
   assert.equal(r.manifest.name, "x");
   assert.equal(r.manifest.data.archiveDir, "./archive");
-  assert.equal(r.manifest.orchestrator.type, "hermes");
   assert.equal(r.manifest.push.fsSweepMs, 30000);
   assert.equal(r.manifest.rss.maxEntries, 200);
   assert.equal(r.manifest.ui.trayBadgeText, "X");
+  // M3 remnant: orchestrator section must not leak into the trimmed manifest.
+  assert.ok(!("orchestrator" in r.manifest), "no orchestrator field on manifest");
 });
 
 test("parseVaultYaml defaults the optional ui block", () => {
@@ -76,6 +77,17 @@ test("parseVaultYaml rejects a wrong enum value with the field named", () => {
   if (r.ok) return;
   assert.equal(r.error, "invalid_schema");
   assert.ok(r.issues.some((i) => i.includes("orchestrator.type")), `issue names orchestrator.type: ${r.issues}`);
+});
+
+test("parseVaultYaml accepts a manifest with no orchestrator section at all (M3 removed)", () => {
+  const noOrch = VALID_VAULT_YAML
+    .replace(/orchestrator:\n([^]*?)push:/, "push:")
+    .replace("  orchestrator_ping_ms: 30000\n", "");
+  const r = parseVaultYaml(noOrch);
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.manifest.name, "x");
+  assert.equal(r.manifest.push.fsSweepMs, 30000);
 });
 
 test("parseVaultYaml returns invalid_yaml for syntactically broken YAML — and never throws", () => {
@@ -117,14 +129,15 @@ tags: []
 Body prose follows.
 `;
 
-test("parseReportFrontmatter parses a valid v1 frontmatter block", () => {
+test("parseReportFrontmatter parses a valid v1 frontmatter block (legacy orchestrator keys ignored)", () => {
   const r = parseReportFrontmatter(V1_REPORT);
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.equal(r.schemaVersion, 1);
-  assert.equal(r.data?.orchestratorSessionId, "sess_EXAMPLE0123456789");
+  assert.equal(r.data?.reportTs, "2026-06-28T18:08:41");
   assert.deepEqual(r.data?.tweetIds, ["0000000000000000001", "0000000000000000002"]);
   assert.equal(r.data?.candidateCount, 5);
+  assert.ok(!("orchestratorSessionId" in (r.data ?? {})), "no session field leaks into trimmed frontmatter");
 });
 
 test("parseReportFrontmatter returns schemaVersion 0 for the 250 legacy reports with no frontmatter", () => {
@@ -155,7 +168,6 @@ vault: example
   assert.equal(r.ok, true);
   if (!r.ok) return;
   assert.equal(r.schemaVersion, 1);
-  assert.equal(r.data?.orchestratorSessionId, null);
   assert.deepEqual(r.data?.tweetIds, []);
   assert.deepEqual(r.data?.tags, []);
   assert.equal(r.data?.candidateCount, undefined);

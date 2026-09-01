@@ -29,21 +29,26 @@ const vaultManifestYaml = z.object({
     index: z.string().min(1),
     candidates: z.string().optional(),
   }),
-  orchestrator: z.object({
-    type: z.enum(["hermes", "openai-compat", "custom-http"]),
-    base_url: z.string().url(),
-    session_id_path: z.string().min(1),
-    auth: z.object({
-      type: z.literal("bearer"),
-      token_file: z.string().optional(),
-      token: z.string().optional(),
-    }),
-  }),
+  // Legacy M3 section — accepted for backward compat with existing vault.yaml
+  // files, but ignored (deep-dive is removed per minimal design).
+  orchestrator: z
+    .object({
+      type: z.enum(["hermes", "openai-compat", "custom-http"]),
+      base_url: z.string().url(),
+      session_id_path: z.string().min(1),
+      auth: z.object({
+        type: z.literal("bearer"),
+        token_file: z.string().optional(),
+        token: z.string().optional(),
+      }),
+    })
+    .optional(),
   push: z.object({
     watch_path: z.string().min(1),
     debounce_ms: z.number().int().positive(),
     fs_sweep_ms: z.number().int().positive(),
-    orchestrator_ping_ms: z.number().int().positive(),
+    // Legacy M3 field — accepted for compat, ignored.
+    orchestrator_ping_ms: z.number().int().positive().optional(),
   }),
   mcp: z.object({ expose: z.boolean() }),
   rss: z.object({
@@ -80,17 +85,10 @@ function projectManifest(raw: z.infer<typeof vaultManifestYaml>): VaultManifest 
       index: raw.data.index,
       candidates: raw.data.candidates,
     },
-    orchestrator: {
-      type: raw.orchestrator.type,
-      baseUrl: raw.orchestrator.base_url,
-      sessionIdPath: raw.orchestrator.session_id_path,
-      auth: raw.orchestrator.auth,
-    },
     push: {
       watchPath: raw.push.watch_path,
       debounceMs: raw.push.debounce_ms,
       fsSweepMs: raw.push.fs_sweep_ms,
-      orchestratorPingMs: raw.push.orchestrator_ping_ms,
     },
     mcp: raw.mcp,
     rss: { enable: raw.rss.enable, maxEntries: raw.rss.max_entries },
@@ -212,8 +210,6 @@ export function parseReportFrontmatter(md: string): ParseFrontmatterResult {
     data: {
       schemaVersion: 1,
       reportTs: f.report_ts,
-      orchestratorSessionId: f.orchestrator_session_id,
-      orchestratorType: f.orchestrator_type,
       vault: f.vault,
       tweetIds: f.tweet_ids,
       candidateCount: f.candidate_count,

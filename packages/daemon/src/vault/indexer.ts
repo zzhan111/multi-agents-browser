@@ -251,7 +251,9 @@ export class VaultIndexer {
       if (fm.ok && fm.schemaVersion === 1 && fm.data) {
         const ids = fm.data.tweetIds.length > 0 ? fm.data.tweetIds : indexTweetIds;
         for (const id of ids) {
-          insert.run(id, reportTs, vault, absPath, fm.data.orchestratorSessionId, fm.data.orchestratorType, 1);
+          // M3 orchestrator columns: kept in the DB schema for compat with
+          // existing index.sqlite files, but always written null (deep-dive removed).
+          insert.run(id, reportTs, vault, absPath, null, null, 1);
           n++;
         }
       } else if (fm.ok && fm.schemaVersion === 0) {
@@ -336,8 +338,7 @@ export class VaultIndexer {
         .prepare(
           `SELECT e.tweet_id, e.vault, e.created_at, r.report_ts,
                   snippet(fts_entries, 1, '[', ']', '…', 12) AS snip,
-                  bm25(fts_entries) AS score,
-                  r.orchestrator_session_id AS sid
+                  bm25(fts_entries) AS score
            FROM fts_entries
            JOIN entries e ON e.tweet_id = fts_entries.tweet_id
            LEFT JOIN reports r ON r.tweet_id = e.tweet_id
@@ -352,7 +353,6 @@ export class VaultIndexer {
         report_ts: string | null;
         snip: string;
         score: number;
-        sid: string | null;
       }>;
       return rows.map((r) => ({
         tweetId: r.tweet_id,
@@ -360,7 +360,6 @@ export class VaultIndexer {
         snippet: r.snip,
         reportTs: r.report_ts ?? r.created_at,
         score: r.score,
-        hasSession: r.sid !== null,
       }));
     } catch {
       // Bad FTS5 syntax from the caller — return empty rather than 500-ing the daemon.
@@ -401,10 +400,6 @@ export class VaultIndexer {
       createdAt: r.created_at,
       indexedAt: r.indexed_at,
       reportId: report?.report_ts ?? null,
-      tags: [], // M4: sidecar reducer
-      processedBy: [], // M4
-      notes: [], // M4
-      deleted: false, // M4
     };
   }
 
@@ -417,8 +412,6 @@ export class VaultIndexer {
           report_ts: string;
           vault: string;
           file_path: string;
-          orchestrator_session_id: string | null;
-          orchestrator_type: string | null;
           schema_version: number;
         }
       | undefined;
@@ -438,8 +431,6 @@ export class VaultIndexer {
       reportTs: r.report_ts,
       vault: r.vault,
       filePath: r.file_path,
-      orchestratorSessionId: r.orchestrator_session_id,
-      orchestratorType: r.orchestrator_type,
       bodyMd,
       frontmatter,
     };

@@ -1,12 +1,18 @@
 // Vault feature contract types — the shared vocabulary between daemon
 // (runtime implementation in packages/daemon/src/vault/) and tray-app panel.
 // Pure types + parsers only: no daemon imports, no React, no side effects.
+//
+// Trimmed per DESIGN-V5-MINIMAL.md: M3 (deep-dive/orchestrator) and M4
+// (sidecar mutations) are gone. This file is the read-only spine: manifests,
+// entries, reports, and search hits.
 
 /**
  * Parsed vault.yaml manifest. Lives at the root of any cron-driven research
  * directory the user registers with `ma-browser vault add <path>`.
  * Field names follow the on-disk YAML (snake_case); this interface is the
  * camelCase projection produced by the zod schema in schema.ts.
+ * Legacy `orchestrator:` / `push.orchestrator_ping_ms:` keys are accepted
+ * and ignored by the parser (they were M3, now removed).
  */
 export interface VaultManifest {
   schemaVersion: 1;
@@ -21,18 +27,10 @@ export interface VaultManifest {
     index: string;
     candidates?: string;
   };
-  orchestrator: {
-    type: "hermes" | "openai-compat" | "custom-http";
-    baseUrl: string;
-    /** Frontmatter path where the orchestrator session id is written (P7). */
-    sessionIdPath: string;
-    auth: { type: "bearer"; tokenFile?: string; token?: string };
-  };
   push: {
     watchPath: string;
     debounceMs: number;
     fsSweepMs: number;
-    orchestratorPingMs: number;
   };
   mcp: { expose: boolean };
   rss: { enable: boolean; maxEntries: number };
@@ -42,13 +40,12 @@ export interface VaultManifest {
 /**
  * Report frontmatter (P7). Cron writes this from M3 onward; the ~250 reports
  * written before P7 have no frontmatter at all and parse as schemaVersion 0.
+ * `orchestrator_session_id` / `orchestrator_type` keys may appear in the
+ * YAML (legacy) but are no longer part of the shape — M3 dropped them.
  */
 export interface ReportFrontmatter {
   schemaVersion: 1;
   reportTs: string; // ISO 8601
-  /** Null for v0 reports — deep-dive falls back to newWithContext. */
-  orchestratorSessionId: string | null;
-  orchestratorType: string | null;
   vault: string;
   tweetIds: string[];
   candidateCount?: number;
@@ -62,8 +59,6 @@ export interface Report {
   reportTs: string; // ISO 8601
   vault: string;
   filePath: string;
-  orchestratorSessionId: string | null;
-  orchestratorType: string | null;
   bodyMd: string;
   frontmatter: ReportFrontmatter | null;
 }
@@ -75,12 +70,11 @@ export interface ReportHit {
   snippet: string; // FTS5 highlight
   reportTs: string;
   score: number; // BM25 rank
-  hasSession: boolean;
 }
 
 /**
- * A tweet (or any primary entity) inside a vault. Tags/notes/processed marks
- * are reduced from the sidecar in M4; PR #1 populates the indexed fields only.
+ * A tweet (or any primary entity) inside a vault. M4 sidecar annexation
+ * (tags/notes/processed marks) is removed with the mutation surface.
  */
 export interface Entry {
   tweetId: string;
@@ -93,31 +87,4 @@ export interface Entry {
   createdAt: string;
   indexedAt: string;
   reportId: string | null;
-  tags: string[]; // reduced from sidecar Pass 1 (M4)
-  processedBy: ProcessedMark[]; // append-only, Pass 2 (M4)
-  notes: NoteEntry[]; // append-only, Pass 2 (M4)
-  deleted: boolean; // Pass 1 (M4)
 }
-
-export interface ProcessedMark {
-  agent: string;
-  ts: string;
-  note?: string;
-}
-
-export interface NoteEntry {
-  noteId: string; // uuid v7
-  bodyMd: string;
-  author: string;
-  ts: string;
-}
-
-/**
- * Where a deep-dive request landed. Rendered by the panel as one of three
- * banners: resume (continuing the original session), newWithContext (fresh
- * session with background injection), queued (orchestrator offline).
- */
-export type SessionRoute =
-  | { kind: "resume"; sessionId: string; orchestratorUrl: string }
-  | { kind: "newWithContext"; sessionId: string; orchestratorUrl: string; fallbackReason: string }
-  | { kind: "queued"; requestId: string; queuedAt: string };

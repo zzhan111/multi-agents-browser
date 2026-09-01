@@ -202,7 +202,7 @@ async function vaultSearch(query: string, options: VaultOptions): Promise<void> 
     return;
   }
   for (const h of hits) {
-    console.log(`[${h.vault}] @${h.tweetId}  (bm25 ${h.score.toFixed(2)}${h.hasSession ? " · 有会话" : ""})`);
+    console.log(`[${h.vault}] @${h.tweetId}  (bm25 ${h.score.toFixed(2)})`);
     console.log(`  ${h.snippet}`);
   }
   console.log(`\n${hits.length} 命中 · 💡 ma-browser vault recent <name> 按时间浏览`);

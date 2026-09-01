@@ -213,22 +213,20 @@ fresh body
     await idx.reconcile();
     assert.equal(idx.counts().reports, 2);
 
-    // v0 report: no session, schema_version 0
+    // v0 report: no frontmatter, schema_version 0
     const e0 = idx.getEntry("2001");
     assert.ok(e0?.reportId);
     const r0 = idx.getReport("2001");
-    assert.equal(r0?.orchestratorSessionId, null);
     assert.equal(r0?.frontmatter, null);
     assert.ok(r0?.bodyMd.includes("legacy body"));
     assert.equal(r0?.reportTs, "2026-07-29T08:05:00", "report_ts derived from filename");
 
-    // v1 report: session present (hasSession feeds deep-dive routing)
+    // v1 report: frontmatter parsed; legacy orchestrator keys are ignored
     const r1 = idx.getReport("2002");
-    assert.equal(r1?.orchestratorSessionId, "sess_TEST123");
     assert.equal(r1?.frontmatter?.schemaVersion, 1);
     assert.ok(r1?.bodyMd.includes("fresh body"));
     const hit = idx.search("v1 tweet")[0];
-    assert.equal(hit.hasSession, true);
+    assert.ok(hit, "search returns the indexed tweet");
 
     idx.close();
   } finally {
