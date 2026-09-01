@@ -800,6 +800,60 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Vault read tools (read-only spine, see ma-browser-vault skill / DESIGN
+// v5 minimal §M2). These hit the daemon's /command protocol directly — the
+// same surface as `ma-browser vault …` — without loading the skill's docs
+// into every session.
+// ---------------------------------------------------------------------------
+
+async function vaultRead(
+  request: Omit<Request, "id"> & Record<string, unknown>,
+) {
+  try {
+    const resp = await runCommand(request);
+    if (!resp.success) return responseError(resp);
+    return textResult(resp.data ?? {});
+  } catch (error) {
+    return errorResult(error instanceof Error ? error.message : String(error));
+  }
+}
+
+server.tool(
+  "vault_list_recent",
+  "List the most recent entries of a research vault (newest first). Use since (ISO 8601) to poll for only newer entries — pass the max createdAt from the previous call as a watermark.",
+  {
+    vault: z.string().min(1).describe("Vault name, e.g. 'x' (run `ma-browser vault list` to see registered names)"),
+    since: z.string().optional().describe("ISO 8601 watermark; only entries created after this are returned"),
+    limit: z.number().int().positive().max(200).optional().describe("Max entries, default 50"),
+  },
+  async ({ vault, since, limit }) =>
+    vaultRead({ action: "vault_recent", vaultName: vault, vaultSince: since, limit }),
+);
+
+server.tool(
+  "vault_search",
+  "Full-text search (FTS5) across vault entries and reports. Bare CJK queries are auto-prefixed (term*); explicit FTS5 syntax passes through. Returns BM25-ranked hits with snippets.",
+  {
+    query: z.string().min(1).describe("Search query, e.g. 'EverMemOS' or '@modelcontextprotocol'"),
+    vault: z.string().optional().describe("Limit to one vault name (default: all registered vaults with mcp.expose=true)"),
+    limit: z.number().int().positive().max(100).optional().describe("Max hits, default 20"),
+  },
+  async ({ query, vault, limit }) =>
+    vaultRead({ action: "vault_search", query, vaultName: vault, limit }),
+);
+
+server.tool(
+  "vault_get_report",
+  "Fetch the full markdown report for a tweet_id, including parsed frontmatter. Reports that were written before frontmatter existed (schemaVersion 0) may have no tweet_id mapping — search instead.",
+  {
+    vault: z.string().min(1).describe("Vault name"),
+    tweet_id: z.string().min(1).describe("Tweet ID (status id) to look up, e.g. from a search hit or entry"),
+  },
+  async ({ vault, tweet_id }) =>
+    vaultRead({ action: "vault_get_report", vaultName: vault, tweetId: tweet_id }),
+);
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 
