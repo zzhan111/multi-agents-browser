@@ -712,7 +712,7 @@ fn daemon_post(daemon_port: u16, token: &str, body: &str) -> Option<String> {
     stream.write_all(req.as_bytes()).ok()?;
     let mut resp = String::new();
     stream.read_to_string(&mut resp).ok()?;
-    let (_headers, body) = resp.split_once("\u{D}\u{A}\u{D}\u{A")?;
+    let (_headers, body) = resp.split_once("\u{D}\u{A}\u{D}\u{A}")?;
     Some(body.to_string())
 }
 

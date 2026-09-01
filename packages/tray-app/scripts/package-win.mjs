@@ -95,6 +95,35 @@ function copyDir(src, dest) {
   }
 }
 
+/**
+ * Generate the daemon's runtime node_modules via npm (hoisted layout).
+ *
+ * Why not copy the monorepo's node_modules: pnpm's isolated layout keeps
+ * transitive deps (readdirp, picomatch, …) inside .pnpm hashed dirs instead
+ * of the package root, so a plain copy breaks `require`. npm flat-installs
+ * everything at the top level. `--ignore-scripts`: better-sqlite3 v13 ships
+ * the NAPI prebuild inside its own tarball (prebuilds/win32-x64.node), which
+ * works with the bundled Node v24 without a node-gyp build.
+ */
+async function ensureDaemonRuntimeDeps(dir) {
+  const pkg = {
+    name: 'ma-browser-daemon-runtime',
+    private: true,
+    version: '1.0.0',
+    dependencies: {
+      ws: '^8.18.0',
+      chokidar: '^3.6.0',
+      yaml: '^2.9.0',
+      'better-sqlite3': '^13.0.3',
+    },
+  };
+  writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
+  rmSync(join(dir, 'node_modules'), { recursive: true, force: true });
+  run('npm', ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], dir);
+  rmSync(join(dir, 'package.json'), { recursive: false, force: true });
+  rmSync(join(dir, 'package-lock.json'), { recursive: false, force: true });
+}
+
 // --- Phase 0: version sync --------------------------------------------------
 
 function syncVersion() {
@@ -115,7 +144,7 @@ function syncVersion() {
 
 // --- Phase 1: build ---------------------------------------------------------
 
-function stageResources(resDir) {
+async function stageResources(resDir) {
   // Stage resources into src-tauri/resources/ so tauri.conf.json globs resolve.
   rmSync(resDir, { recursive: true, force: true });
   mkdirSync(join(resDir, 'node'), { recursive: true });
@@ -134,36 +163,28 @@ function stageResources(resDir) {
     join(REPO_ROOT, 'packages', 'daemon', 'dist', 'buildDomTree.js'),
     join(resDir, 'daemon', 'buildDomTree.js')
   );
-  copyDir(
-    join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'ws'),
-    join(resDir, 'daemon', 'node_modules', 'ws')
-  );
-  // better-sqlite3 is import-external in the daemon bundle (native prebuild);
-  // without it a registered vault crashes the daemon at startup with
-  // MODULE_NOT_FOUND. Ships its win32-x64 NAPI prebuild (see NODE_VERSION).
-  copyDir(
-    join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'better-sqlite3'),
-    join(resDir, 'daemon', 'node_modules', 'better-sqlite3')
-  );
+  // Runtime deps: CJS modules tsup cannot shim into the ESM bundle.
+  // Generate a hoisted node_modules with npm (see ensureDaemonRuntimeDeps).
+  await ensureDaemonRuntimeDeps(join(resDir, 'daemon'));
   // MCP server bundle
   copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(resDir, 'mcp', 'mcp.js'));
   // mcp-config.json template (with <APP_DIR> placeholder; tray fills it at first run)
   writeFileSync(join(resDir, 'mcp-config.json'), MCP_CONFIG_TEMPLATE);
 }
 
-function build() {
+async function build() {
   console.log('\n=== Phase 1: build (pnpm build + tauri build) ===');
   run('pnpm', ['build'], REPO_ROOT); // turbo build -> daemon + mcp tsup bundles
   const resDir = join(TRAY_DIR, 'src-tauri', 'resources');
-  stageResources(resDir);
+  await stageResources(resDir);
   // node.exe must be present in resources for the tauri build's resource glob.
-  ensureNodeExe(join(resDir, 'node', 'node.exe'));
+  await ensureNodeExe(join(resDir, 'node', 'node.exe'));
   run('pnpm', ['tauri', 'build'], TRAY_DIR);
 }
 
 // --- Phase 2: assemble staging ----------------------------------------------
 
-function assembleStaging(staging) {
+async function assembleStaging(staging) {
   console.log('\n=== Phase 2: assemble staging ===');
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
@@ -197,10 +218,7 @@ function assembleStaging(staging) {
     join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'ws'),
     join(staging, 'daemon', 'node_modules', 'ws')
   );
-  copyDir(
-    join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'better-sqlite3'),
-    join(staging, 'daemon', 'node_modules', 'better-sqlite3')
-  );
+  await ensureDaemonRuntimeDeps(join(staging, 'daemon'));
   mkdirSync(join(staging, 'mcp'), { recursive: true });
   copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(staging, 'mcp', 'mcp.js'));
   writeFileSync(join(staging, 'mcp-config.json'), MCP_CONFIG_TEMPLATE);
@@ -256,7 +274,7 @@ async function ensureNodeExe(dest) {
 
 // --- Phase 4: zip + verify --------------------------------------------------
 
-function zipAndVerify(staging, version) {
+async function zipAndVerify(staging, version) {
   console.log('\n=== Phase 4: zip + verify ===');
   const distDir = join(TRAY_DIR, 'dist');
   mkdirSync(distDir, { recursive: true });
@@ -300,6 +318,8 @@ function verifyStructure(staging) {
     'daemon/index.js',
     'daemon/buildDomTree.js',
     'daemon/node_modules/ws/index.js',
+    'daemon/node_modules/yaml/package.json',
+    'daemon/node_modules/chokidar/package.json',
     'daemon/node_modules/better-sqlite3/package.json',
     'daemon/node_modules/better-sqlite3/prebuilds/win32-x64.node',
     'mcp/mcp.js',
@@ -329,11 +349,11 @@ async function main() {
     );
   }
   syncVersion();
-  build();
+  await build();
   const { version } = readJson(join(REPO_ROOT, 'package.json'));
   const staging = join(TRAY_DIR, 'dist', 'portable-staging', 'ma-browser-tray');
-  assembleStaging(staging);
-  zipAndVerify(staging, version);
+  await assembleStaging(staging);
+  await zipAndVerify(staging, version);
 }
 
 main().catch((e) => {
