@@ -12,8 +12,9 @@
 // manager absolutizes them once (withDataDir) so indexer/watcher never
 // re-derive.
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { randomBytes } from "node:crypto";
 import type { Entry, Report, ReportHit, VaultManifest } from "@ma-browser/vault";
 import { loadVaults, registerVault, vaultPaths, type LoadedVault } from "./discovery.js";
 import { VaultIndexer } from "./indexer.js";
@@ -172,6 +173,38 @@ export class VaultManager {
   /** Resolve vault by name; throws nothing, returns null when unknown. */
   vaultNames(): string[] {
     return this.list().filter((v) => v.ok).map((v) => v.name);
+  }
+
+  /** Resolve a loaded manifest by name (null when unknown/broken). */
+  manifest(name: string): VaultManifest | null {
+    return this.find(name)?.manifest ?? null;
+  }
+
+  /** Absolute path of a vault's RSS token file (stateRoot/<name>/rss-token). */
+  rssTokenPath(name: string): string {
+    return join(this.stateRoot, name, "rss-token");
+  }
+
+  /**
+   * Read the per-vault RSS Basic Auth token, creating it on first use.
+   * The token is the password for the `rss` user on /vault/<name>.xml.
+   */
+  ensureRssToken(name: string): string {
+    const p = this.rssTokenPath(name);
+    if (existsSync(p)) return readFileSync(p, "utf-8").trim();
+    const token = randomBytes(24).toString("hex");
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `${token}\n`, { mode: 0o600 });
+    return token;
+  }
+
+  /** Rotate the RSS token and return the new value. */
+  rotateRssToken(name: string): string {
+    const token = randomBytes(24).toString("hex");
+    const p = this.rssTokenPath(name);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `${token}\n`, { mode: 0o600 });
+    return token;
   }
 
   shutdown(): void {

@@ -12,6 +12,7 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { createWriteStream, mkdirSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Request } from "@ma-browser/shared";
@@ -27,6 +28,8 @@ import type { BindingStore } from "./binding-store.js";
 import type { JournalManager } from "./agent-journal.js";
 import type { ScratchpadManager } from "./scratchpad-manager.js";
 import { dispatchRequest, type DispatchContext } from "./command-dispatch.js";
+import { getVaultManager } from "./vault/manager.js";
+import { buildAtomFeed, type FeedEntry } from "./vault/rss.js";
 
 /** Parse a positive integer env var, falling back to `fallback` if unset/invalid. */
 function envInt(name: string, fallback: number): number {
@@ -34,6 +37,27 @@ function envInt(name: string, fallback: number): number {
   if (raw === undefined) return fallback;
   const n = parseInt(raw, 10);
   return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/** Parse `Basic <base64(user:pass)>`. Returns null when absent/malformed. */
+function basicAuthUserPass(auth: string): { user: string; pass: string } | null {
+  if (!auth.startsWith("Basic ")) return null;
+  try {
+    const decoded = Buffer.from(auth.slice(6), "base64").toString("utf-8");
+    const idx = decoded.indexOf(":");
+    if (idx < 0) return null;
+    return { user: decoded.slice(0, idx), pass: decoded.slice(idx + 1) };
+  } catch {
+    return null;
+  }
+}
+
+/** Constant-time string comparison (lengths compared first, no early exit). */
+function timingEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, "utf-8");
+  const bb = Buffer.from(b, "utf-8");
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
 }
 
 /**
@@ -169,6 +193,15 @@ export class HttpServer {
       return;
     }
 
+    // RSS feeds use their own Basic Auth (rss:<per-vault token>), NOT the
+    // daemon's Bearer token — feed readers can't send Bearer headers. This is
+    // the first route that bypasses checkAuth by design (DESIGN-V5-MINIMAL §M2).
+    const vaultMatch = url.match(/^\/vault\/([a-z0-9][a-z0-9-]*)\.xml$/);
+    if (req.method === "GET" && vaultMatch) {
+      this.handleVaultRss(vaultMatch[1], req, res);
+      return;
+    }
+
     if (!this.checkAuth(req, res)) return;
 
     if (req.method === "POST" && url === "/command") {
@@ -201,9 +234,62 @@ export class HttpServer {
   }
 
   // ---------------------------------------------------------------------------
-  // POST /command
+  // GET /vault/<name>.xml
   // ---------------------------------------------------------------------------
 
+  /**
+   * Serve a vault's Atom feed. Auth is Basic (user `rss`, password = the
+   * per-vault token in stateRoot/<name>/rss-token), compared timing-safely.
+   * Regenerated from SQLite per request — no cache, always fresh.
+   */
+  private handleVaultRss(name: string, req: IncomingMessage, res: ServerResponse): void {
+    const mgr = getVaultManager();
+    const manifest = mgr.manifest(name);
+    if (!manifest) {
+      this.sendJson(res, 404, { error: `Unknown vault '${name}' — run ma-browser vault list` });
+      return;
+    }
+    if (!manifest.rss.enable) {
+      this.sendJson(res, 404, { error: `RSS disabled for vault '${name}' (set rss.enable: true in vault.yaml)` });
+      return;
+    }
+
+    const token = mgr.ensureRssToken(name);
+    const creds = basicAuthUserPass(req.headers.authorization ?? "");
+    if (!creds || creds.user !== "rss" || !timingEqual(creds.pass, token)) {
+      res.setHeader("WWW-Authenticate", `Basic realm="ma-browser vault ${name}"`);
+      this.sendJson(res, 401, { error: "Unauthorized — use Basic Auth user 'rss' with the per-vault token" });
+      return;
+    }
+
+    const entries: FeedEntry[] = mgr.recent(name, null, manifest.rss.maxEntries).map((e) => ({
+      tweetId: e.tweetId,
+      author: e.author,
+      text: e.text,
+      url: e.url,
+      createdAt: e.createdAt,
+    }));
+
+    const feed = buildAtomFeed(
+      {
+        title: `${manifest.displayName} (${manifest.name})`,
+        selfUrl: `/vault/${name}.xml`,
+        id: `urn:ma-browser:vault:${name}`,
+        updated: entries[0]?.createdAt ?? new Date().toISOString(),
+      },
+      entries,
+    );
+
+    res.writeHead(200, {
+      "Content-Type": "application/atom+xml; charset=utf-8",
+      "Cache-Control": "no-cache",
+    });
+    res.end(feed);
+  }
+
+  // ---------------------------------------------------------------------------
+  // POST /command
+  // ---------------------------------------------------------------------------
   private async handleCommand(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const body = await this.readBody(req);

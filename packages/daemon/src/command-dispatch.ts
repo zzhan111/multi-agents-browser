@@ -642,6 +642,14 @@ async function handleVaultRequest(request: Request, cdp: CdpConnection): Promise
       if (!entry) return fail(request.id, `No entry for tweet '${request.tweetId}' in vault '${request.vaultName}'`);
       return ok(request.id, { vaultEntry: entry, tab: `vault-${request.vaultName}`, seq: seq() });
     }
+    case "vault_rotate_rss_token": {
+      if (!request.vaultName) return fail(request.id, "Missing 'vaultName' parameter for vault_rotate_rss_token");
+      if (!mgr.vaultNames().includes(request.vaultName)) {
+        return fail(request.id, `Unknown vault '${request.vaultName}' — run vault_list for registered names`);
+      }
+      const token = mgr.rotateRssToken(request.vaultName);
+      return ok(request.id, { vaultToken: token, tab: `vault-${request.vaultName}`, seq: seq() });
+    }
     default:
       return fail(request.id, `Unknown vault action '${request.action}'`);
   }

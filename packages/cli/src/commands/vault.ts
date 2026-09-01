@@ -14,7 +14,7 @@
  * 创建 vault.yaml 的模板见 docs/vault.md（或 DESIGN 文档）。
  */
 
-import { generateId, type Request, type Response } from "@ma-browser/shared";
+import { generateId, DAEMON_PORT, type Request, type Response } from "@ma-browser/shared";
 import { sendCommand } from "../client.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
 
@@ -40,6 +40,7 @@ export async function vaultCommand(args: string[], options: VaultOptions = {}): 
   ma-browser vault register <path/to/vault.yaml>       注册研究目录并建立索引
   ma-browser vault recent <name> [--limit N] [--since ISO]   最近条目（新→旧）
   ma-browser vault search <query> [--vault <name>] [--limit N]  FTS5 全文搜索
+  ma-browser vault rotate-rss-token <name>            轮换 RSS 订阅 Basic Auth token
 
 选项:
   --json            机器可读输出（Agent 友好）
@@ -52,7 +53,8 @@ export async function vaultCommand(args: string[], options: VaultOptions = {}): 
   ma-browser vault list
   ma-browser vault recent x --limit 5
   ma-browser vault search "EverMemOS" --vault x
-  ma-browser vault search "长期记忆" --json`);
+  ma-browser vault search "长期记忆" --json
+  ma-browser vault rotate-rss-token x   # 旧 token 立即失效`);
     return;
   }
 
@@ -90,6 +92,16 @@ export async function vaultCommand(args: string[], options: VaultOptions = {}): 
         return;
       }
       return vaultSearch(query, options);
+    }
+    case "rotate-rss-token":
+    case "rotate-token": {
+      const name = args[1];
+      if (!name) {
+        console.error("[error] vault rotate-rss-token: <vault 名称> 必填（vault list 查看）。");
+        process.exitCode = 1;
+        return;
+      }
+      return vaultRotateRssToken(name, options);
     }
     default:
       console.error(`[error] 未知子命令 '${sub}'。运行 ma-browser vault --help 查看用法。`);
@@ -206,4 +218,23 @@ async function vaultSearch(query: string, options: VaultOptions): Promise<void> 
     console.log(`  ${h.snippet}`);
   }
   console.log(`\n${hits.length} 命中 · 💡 ma-browser vault recent <name> 按时间浏览`);
+}
+
+async function vaultRotateRssToken(name: string, options: VaultOptions): Promise<void> {
+  const res = await send({ id: generateId(), action: "vault_rotate_rss_token", vaultName: name });
+  if (!res.success) {
+    console.error(`[error] ${res.error}`);
+    process.exitCode = 1;
+    return;
+  }
+  const token = res.data?.vaultToken;
+  if (!token) {
+    console.error("[error] daemon 未返回 token。");
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`已轮换 vault '${name}' 的 RSS token（旧值立即失效）：`);
+  console.log(`  URL:  http://127.0.0.1:${DAEMON_PORT}/vault/${name}.xml`);
+  console.log(`  Auth: rss:${token}`);
+  if (options.json) console.log(JSON.stringify({ name, url: `/vault/${name}.xml`, token }, null, 2));
 }

@@ -53,7 +53,8 @@ export type ActionType =
   | "vault_recent"
   | "vault_search"
   | "vault_get_report"
-  | "vault_get_entry";
+  | "vault_get_entry"
+  | "vault_rotate_rss_token";
 
 /** 请求类型 */
 export interface Request {
@@ -389,6 +390,8 @@ export interface ResponseData {
   vaultReport?: Report;
   /** 完整条目（vault_get_entry 返回） */
   vaultEntry?: Entry;
+  /** 新的 RSS Basic Auth token（vault_rotate_rss_token 返回） */
+  vaultToken?: string;
   /** site_recommend：基于当前活跃 tab 的 adapter 推荐 */
   siteRecommendations?: Array<{
     /** tab 短 ID */
