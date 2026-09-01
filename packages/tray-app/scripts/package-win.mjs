@@ -36,7 +36,10 @@ if (process.env.PATH && !process.env.PATH.includes(cargoBin)) {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TRAY_DIR = resolve(__dirname, '..');
 const REPO_ROOT = resolve(TRAY_DIR, '..', '..');
-const NODE_VERSION = 'v20.15.0'; // pinned LTS; bump here to upgrade bundled Node
+const NODE_VERSION = 'v24.13.0'; // pinned LTS; bump here to upgrade bundled Node
+// NOTE: daemon/index.js imports better-sqlite3 (EXTERNAL — only ws is bundled
+// by tsup), and better-sqlite3 v13 requires Node >= 22 (engines). Node 20
+// would fail to load the NAPI prebuild. v24.13.0 matches the dev/tested ABI.
 
 // mcp-config.json template. <APP_DIR> is filled at first tray run with the
 // actual extraction root (current_exe().parent()). Backslashes are doubled
@@ -135,6 +138,13 @@ function stageResources(resDir) {
     join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'ws'),
     join(resDir, 'daemon', 'node_modules', 'ws')
   );
+  // better-sqlite3 is import-external in the daemon bundle (native prebuild);
+  // without it a registered vault crashes the daemon at startup with
+  // MODULE_NOT_FOUND. Ships its win32-x64 NAPI prebuild (see NODE_VERSION).
+  copyDir(
+    join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'better-sqlite3'),
+    join(resDir, 'daemon', 'node_modules', 'better-sqlite3')
+  );
   // MCP server bundle
   copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(resDir, 'mcp', 'mcp.js'));
   // mcp-config.json template (with <APP_DIR> placeholder; tray fills it at first run)
@@ -186,6 +196,10 @@ function assembleStaging(staging) {
   copyDir(
     join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'ws'),
     join(staging, 'daemon', 'node_modules', 'ws')
+  );
+  copyDir(
+    join(REPO_ROOT, 'packages', 'daemon', 'node_modules', 'better-sqlite3'),
+    join(staging, 'daemon', 'node_modules', 'better-sqlite3')
   );
   mkdirSync(join(staging, 'mcp'), { recursive: true });
   copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(staging, 'mcp', 'mcp.js'));
@@ -286,6 +300,8 @@ function verifyStructure(staging) {
     'daemon/index.js',
     'daemon/buildDomTree.js',
     'daemon/node_modules/ws/index.js',
+    'daemon/node_modules/better-sqlite3/package.json',
+    'daemon/node_modules/better-sqlite3/prebuilds/win32-x64.node',
     'mcp/mcp.js',
     'mcp-config.json',
     'icons/tray-green.png',
