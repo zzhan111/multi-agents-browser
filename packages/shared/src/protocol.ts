@@ -389,6 +389,20 @@ export interface ResponseData {
   vaultReport?: Report;
   /** 完整条目（vault_get_entry 返回） */
   vaultEntry?: Entry;
+  /** site_recommend：基于当前活跃 tab 的 adapter 推荐 */
+  siteRecommendations?: Array<{
+    /** tab 短 ID */
+    tab: string;
+    /** tab 当前 URL */
+    url: string;
+    /** 匹配到的 adapter 列表 */
+    adapters: Array<{
+      name: string;
+      description: string;
+      domain: string;
+      example?: string;
+    }>;
+  }>;
 }
 
 /** vault_list 返回的单个 vault 概要 */
@@ -409,20 +423,6 @@ export interface VaultInfo {
   reportCount?: number;
   /** manifest（ok=true 时存在，供 UI 取 ui.colorAccent 等） */
   manifest?: VaultManifest;
-  /** site_recommend：基于当前活跃 tab 的 adapter 推荐 */
-  siteRecommendations?: Array<{
-    /** tab 短 ID */
-    tab: string;
-    /** tab 当前 URL */
-    url: string;
-    /** 匹配到的 adapter 列表 */
-    adapters: Array<{
-      name: string;
-      description: string;
-      domain: string;
-      example?: string;
-    }>;
-  }>;
 }
 
 /** 响应类型 */
