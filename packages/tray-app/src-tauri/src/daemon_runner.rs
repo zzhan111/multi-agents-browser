@@ -11,6 +11,7 @@
 //!   (Tauri marshals to its event loop), which then calls
 //!   `crate::app::dispatch_event`.
 
+use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -29,7 +30,8 @@ use ma_browser_tray::port_discovery::{
 };
 use ma_browser_tray::supervisor::Event;
 use ma_browser_tray::tray_state::CdpState;
-use tauri::{AppHandle, Manager};
+use serde_json::Value;
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Owns the side-band kill signal for the active daemon (if any). The
 /// actual `DaemonProcess` lives on the watcher thread.
@@ -529,6 +531,7 @@ fn run_watcher(
     // `"cdpConnected":true` from GET /status.
     let mut last_connected: Option<bool> = None;
     let mut ticks: u32 = 0;
+    let mut vault_state = VaultPollState::default();
     loop {
         // Check for kill signal first (non-blocking).
         if kill_rx.try_recv().is_ok() {
@@ -557,6 +560,14 @@ fn run_watcher(
                     on_cdp_status(&app, status.cdp_connected);
                 }
             }
+        }
+
+        // Vault watermark poll every ~5s (every 10th 500ms tick): discover
+        // registered vaults, diff against per-vault last-seen createdAt, and
+        // toast + emit vault:new-entry for new entries (DESIGN v5 minimal §M2).
+        // First poll per vault ONLY seeds the watermark (no toast for backlog).
+        if ticks % 10 == 0 {
+            poll_vault_new_entries(&app, poll_port, &poll_token, &mut vault_state);
         }
         ticks = ticks.wrapping_add(1);
 
@@ -673,6 +684,137 @@ fn json_u16(body: &str, key: &str) -> Option<u16> {
         .take_while(|c| c.is_ascii_digit())
         .collect();
     digits.parse().ok()
+}
+
+// ---------------------------------------------------------------------------
+// Vault watermark poll (DESIGN v5 minimal §M2: tray toast on new report)
+// ---------------------------------------------------------------------------
+
+/// Per-vault incremental state for the watermark poll. Lives on the watcher
+/// thread (run_watcher) — no locks needed.
+#[derive(Default)]
+struct VaultPollState {
+    /// vault name -> max createdAt seen (ISO 8601; lexical == chronological).
+    watermarks: HashMap<String, String>,
+    /// vault name -> display name (for toast titles).
+    display: HashMap<String, String>,
+}
+
+/// Raw-socket POST /command. Returns the response body on HTTP success;
+/// None on any transport error so transient failures stay silent.
+fn daemon_post(daemon_port: u16, token: &str, body: &str) -> Option<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", daemon_port)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(4))).ok()?;
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
+    // CRLF is emitted via \u{D}\u{A} so the literal survives any editor
+    // newline normalization (the rest of this file uses embedded CRLF too).
+    let req = format!("POST /command HTTP/1.1\u{D}\u{A}Host: 127.0.0.1\u{D}\u{A}Content-Type: application/json\u{D}\u{A}Authorization: Bearer {token}\u{D}\u{A}Content-Length: {}\u{D}\u{A}Connection: close\u{D}\u{A}\u{D}\u{A}{}", body.len(), body);
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).ok()?;
+    let (_headers, body) = resp.split_once("\u{D}\u{A}\u{D}\u{A")?;
+    Some(body.to_string())
+}
+
+/// One poll cycle: discover vaults, diff per-vault new entries against the
+/// watermark, then toast + emit `vault:new-entry` for each (max 3 per cycle).
+/// The first time a vault is seen, its watermark is seeded silently so an
+/// existing backlog never toasts.
+fn poll_vault_new_entries(
+    app: &AppHandle,
+    daemon_port: u16,
+    token: &str,
+    state: &mut VaultPollState,
+) {
+    let Some(body) = daemon_post(daemon_port, token, "{\"id\":\"vault-poll\",\"action\":\"vault_list\"}") else {
+        return;
+    };
+    let Ok(list_value) = serde_json::from_str::<Value>(&body) else {
+        return;
+    };
+    let Some(vaults) = list_value.pointer("/data/vaults").and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    let mut live: HashMap<String, String> = HashMap::new();
+    for v in vaults {
+        let Some(name) = v.get("name").and_then(|n| n.as_str()) else { continue };
+        if !v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false) { continue; }
+        let display = v
+            .get("displayName")
+            .and_then(|d| d.as_str())
+            .unwrap_or(name)
+            .to_string();
+        live.insert(name.to_string(), display);
+    }
+    if live.is_empty() {
+        return;
+    }
+    state.display = live;
+    state.watermarks.retain(|name, _| state.display.contains_key(name));
+
+    for (name, display) in state.display.clone() {
+        let since = state.watermarks.get(&name).cloned();
+        let req = match &since {
+            Some(s) => format!(
+                "{{\"id\":\"vault-poll\",\"action\":\"vault_recent\",\"vaultName\":\"{name}\",\"vaultSince\":\"{s}\",\"limit\":10}}"
+            ),
+            None => format!(
+                "{{\"id\":\"vault-poll\",\"action\":\"vault_recent\",\"vaultName\":\"{name}\",\"limit\":10}}"
+            ),
+        };
+        let Some(body) = daemon_post(daemon_port, token, &req) else { continue };
+        let Ok(recent_value) = serde_json::from_str::<Value>(&body) else { continue };
+        let Some(entries) = recent_value.pointer("/data/vaultEntries").and_then(|e| e.as_array()) else {
+            continue;
+        };
+        if entries.is_empty() {
+            continue;
+        }
+
+        // Seed the watermark silently on first contact (no backlog toasts).
+        if since.is_none() {
+            if let Some(ts) = entries[0].get("createdAt").and_then(|c| c.as_str()) {
+                state.watermarks.insert(name.clone(), ts.to_string());
+            }
+            continue;
+        }
+        let watermark = state.watermarks.get(&name).cloned().unwrap_or_default();
+
+        let mut toasts = 0usize;
+        for e in entries.iter().take(3) {
+            let Some(ts) = e.get("createdAt").and_then(|c| c.as_str()) else { continue };
+            if ts <= watermark.as_str() {
+                continue;
+            }
+            let tweet_id = e.get("tweetId").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            let author = e.get("author").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            let text = e.get("text").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            let url = e.get("url").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            toasts += 1;
+            let preview: String = text.chars().take(60).collect();
+            crate::notifier::vault_new_entry(app, &display, &author, &preview);
+            let _ = app.emit(
+                "vault:new-entry",
+                serde_json::json!({
+                    "vault": name,
+                    "tweetId": tweet_id,
+                    "author": author,
+                    "text": text,
+                    "url": url,
+                    "createdAt": ts,
+                }),
+            );
+        }
+        if toasts > 0 {
+            // Advance watermark to the newest entry seen (entries are desc).
+            if let Some(newest) = entries[0].get("createdAt").and_then(|c| c.as_str()) {
+                if newest > watermark.as_str() {
+                    state.watermarks.insert(name.clone(), newest.to_string());
+                }
+            }
+        }
+    }
 }
 
 /// Push a CDP connection-status change into the controller and repaint.

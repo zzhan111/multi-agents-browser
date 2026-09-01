@@ -83,3 +83,9 @@ pub fn gave_up(app: &AppHandle, crashes: usize) {
         ),
     );
 }
+
+/// §6.1 scenario 6 (M2) — the vault watermark poll found a new entry.
+/// `display` is the vault's displayName; `preview` is truncated by the caller.
+pub fn vault_new_entry(app: &AppHandle, display: &str, author: &str, preview: &str) {
+    send(app, &format!("📚 {display} · @{author}"), preview);
+}
