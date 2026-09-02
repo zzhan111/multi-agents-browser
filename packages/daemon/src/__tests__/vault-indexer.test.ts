@@ -114,9 +114,15 @@ test("reconcile ingests jsonl entries; counts, search (ascii + CJK), and recent 
     assert.equal(cjk[0].tweetId, "1002");
 
     // recent(): Aug 01 first despite "Fri" < "Tue" lexically
-    const recent = idx.recent(null, 10);
-    assert.deepEqual(recent.map((e) => e.tweetId), ["1002", "1001"]);
-    assert.equal(recent[0].createdAt.slice(0, 10), "2026-08-01");
+        const recent = idx.recent(null, null, 10);
+        assert.deepEqual(recent.map((e) => e.tweetId), ["1002", "1001"]);
+        assert.equal(recent[0].createdAt.slice(0, 10), "2026-08-01");
+
+        // recent(beforeIso): back-pagination returns the older entries only
+            const before = idx.recent(null, "2026-07-30T00:00:00.000Z", 10);
+            assert.deepEqual(before.map((e) => e.tweetId), ["1001"]);
+            const noneOlder = idx.recent(null, "2026-07-20T00:00:00.000Z", 10);
+            assert.equal(noneOlder.length, 0);
 
     idx.close();
   } finally {

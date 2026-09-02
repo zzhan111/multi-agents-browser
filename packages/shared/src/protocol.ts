@@ -157,8 +157,10 @@ export interface Request {
   vaultPath?: string;
   /** 推文/条目 ID（vault_get_report / vault_get_entry 使用） */
   tweetId?: string;
-  /** 时间窗口起点，ISO 8601（vault_recent 使用，可选） */
-  vaultSince?: string;
+  /** 时间窗口起点，ISO 8601（vault_recent 使用，可选；created_at >= vaultSince） */
+    vaultSince?: string;
+    /** 分页上界，ISO 8601（vault_recent 使用，可选；created_at < vaultBefore，向前翻页） */
+    vaultBefore?: string;
 }
 
 /** 元素引用信息 */
