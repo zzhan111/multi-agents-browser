@@ -367,16 +367,20 @@ export class VaultIndexer {
     }
   }
 
-  recent(sinceIso: string | null, limit = 50): Entry[] {
-    const rows = (
-      sinceIso
-        ? this.db.prepare(
-            "SELECT * FROM entries WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
-          ).all(sinceIso, limit)
-        : this.db.prepare("SELECT * FROM entries ORDER BY created_at DESC LIMIT ?").all(limit)
-    ) as Array<IndexRow & { source_file: string }>;
-    return rows.map((r) => this.rowToEntry(r));
-  }
+  recent(sinceIso: string | null, beforeIso: string | null, limit = 50): Entry[] {
+      const rows = (
+        beforeIso
+          ? this.db.prepare(
+              "SELECT * FROM entries WHERE created_at < ? ORDER BY created_at DESC LIMIT ?",
+            ).all(beforeIso, limit)
+          : sinceIso
+            ? this.db.prepare(
+                "SELECT * FROM entries WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+              ).all(sinceIso, limit)
+            : this.db.prepare("SELECT * FROM entries ORDER BY created_at DESC LIMIT ?").all(limit)
+      ) as Array<IndexRow & { source_file: string }>;
+      return rows.map((r) => this.rowToEntry(r));
+    }
 
   getEntry(tweetId: string): Entry | null {
     const r = this.db.prepare("SELECT * FROM entries WHERE tweet_id = ?").get(tweetId) as

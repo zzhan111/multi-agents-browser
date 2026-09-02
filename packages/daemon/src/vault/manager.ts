@@ -144,10 +144,10 @@ export class VaultManager {
     return null;
   }
 
-  recent(vaultName: string, sinceIso: string | null, limit: number): Entry[] {
-    const v = this.find(vaultName);
-    return v ? v.indexer.recent(sinceIso, limit) : [];
-  }
+  recent(vaultName: string, sinceIso: string | null, beforeIso: string | null, limit: number): Entry[] {
+      const v = this.find(vaultName);
+      return v ? v.indexer.recent(sinceIso, beforeIso, limit) : [];
+    }
 
   search(vaultName: string | null, query: string, limit: number): ReportHit[] {
     const hits: ReportHit[] = [];

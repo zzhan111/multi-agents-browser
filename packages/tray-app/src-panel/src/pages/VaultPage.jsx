@@ -230,10 +230,10 @@ export default function VaultPage() {
     setLoadingMore(true);
     try {
       const resp = await daemon.send('vault_recent', {
-        vaultName: vaultFilter,
-        vaultSince: oldest.createdAt,
-        limit: PAGE_SIZE,
-      });
+              vaultName: vaultFilter,
+              vaultBefore: oldest.createdAt,
+              limit: PAGE_SIZE,
+            });
       const next = resp?.data?.vaultEntries ?? [];
       setEntries((prev) => {
         const seen = new Set(prev.map((e) => `${e.vault}:${e.tweetId}`));
