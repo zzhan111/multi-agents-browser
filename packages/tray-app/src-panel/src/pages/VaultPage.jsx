@@ -1,19 +1,68 @@
 /**
- * VaultPage — 控制面板 Vault tab（只读双栏，DESIGN v5 minimal §M2）
+ * VaultPage — 控制面板 Vault tab（只读双栏）
  *
- * 左栏 (~280px)：vault 选择器（默认 All vaults）+ 搜索过滤 + 时间分组列表
- *               （Today / Yesterday / Earlier，每行带 vault badge）
- * 右栏：选中条目的详情 —— 有报告则渲染报告 Markdown，否则渲染条目元数据 +
- *        推文全文。
+ * 左栏 (~300px)：vault 选择器 + 健康汇总 + 搜索框 + 列表
+ *   - 浏览模式（搜索框为空）：时间分组列表（Today / Yesterday / Earlier，
+ *     每行带 vault badge），单 vault 过滤时底部有「加载更早」分页。
+ *   - 搜索模式（输入 ≥1 字符，300ms 防抖）：daemon FTS5 全文搜索
+ *     （vault_search），命中显示高亮 snippet，可点击直达详情。
+ * 右栏：选中条目的详情 —— 有报告则渲染 Markdown（marked + DOMPurify），
+ *       否则渲染条目元数据 + 推文全文（URL 自动转链接）。
  *
- * 无 composer（deep-dive 已删除）；全部走 daemon /command 只读 action。
+ * 全部走 daemon /command 只读 action。无 composer。
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import { daemon } from '../api/daemon.js';
 import styles from './VaultPage.module.css';
 
 const PAGE_SIZE = 50;
+
+// ── Markdown 安全渲染（一次性 hook：所有链接新窗口打开 + noreferrer） ──
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName === 'A') {
+    node.setAttribute('rel', 'noopener noreferrer');
+    node.setAttribute('target', '_blank');
+  }
+});
+
+/** marked v18 同步返回 string；防御异步/空值。 */
+function renderMarkdown(md) {
+  if (!md) return '';
+  const raw = marked.parse(md, { async: false });
+  return DOMPurify.sanitize(typeof raw === 'string' ? raw : String(raw ?? ''));
+}
+
+/** 推文文本里的 URL 转成可点链接。 */
+const URL_RE = /(https?:\/\/[^\s]+)/g;
+function linkify(text) {
+  const parts = [];
+  let last = 0;
+  let m;
+  URL_RE.lastIndex = 0;
+  while ((m = URL_RE.exec(text))) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    parts.push(
+      <a key={m.index} href={m[0]} target="_blank" rel="noopener noreferrer">{m[0]}</a>,
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts.length ? parts : text;
+}
+
+/** FTS5 snippet 高亮：`[命中词]` → <mark>。 */
+function highlightSnippet(snippet) {
+  return snippet.split(/(\[[^\]]+\])/g).map((part, i) =>
+    part.startsWith('[') && part.endsWith(']') && part.length > 2 ? (
+      <mark key={i} className={styles.hitMark}>{part.slice(1, -1)}</mark>
+    ) : (
+      <span key={i}>{part}</span>
+    ),
+  );
+}
 
 /** 时间分组：Today / Yesterday / Earlier（本地时区语义足够）。 */
 function groupLabel(iso, now) {
@@ -32,7 +81,7 @@ function groupLabel(iso, now) {
 
 export default function VaultPage() {
   const [vaults, setVaults] = useState([]); // vault_list 行
-  const [entries, setEntries] = useState([]); // 当前选区条目（新→旧）
+  const [entries, setEntries] = useState([]); // 浏览模式条目（新→旧）
   const [selected, setSelected] = useState(null); // 左侧选中行
   const [detail, setDetail] = useState(null); // {kind:'report'|'entry', data}
   const [filter, setFilter] = useState('');
@@ -40,7 +89,16 @@ export default function VaultPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [reportMissing, setReportMissing] = useState(false);
-  const fetchedFor = useRef('');
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  // ── 搜索模式状态 ──
+  const [mode, setMode] = useState('browse'); // 'browse' | 'search'
+  const [searchHits, setSearchHits] = useState([]);
+  const [searchState, setSearchState] = useState('idle'); // idle|typing|searching|done|error
+  const [searchError, setSearchError] = useState(null);
+  const debounceRef = useRef(null);
+  const filterRef = useRef(filter);
+  filterRef.current = filter;
 
   const now = useMemo(() => new Date(), []);
 
@@ -62,7 +120,8 @@ export default function VaultPage() {
         .flatMap((b) => b?.data?.vaultEntries ?? [])
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
       setEntries(merged);
-      setFetchedFor(merged.map((e) => e.tweetId).join(','));
+      setHasMore(selectedVault ? merged.length === PAGE_SIZE : false);
+      if (selectedVault && merged.length < PAGE_SIZE) setHasMore(false);
     } catch (err) {
       setError(err.message ?? String(err));
     } finally {
@@ -70,9 +129,59 @@ export default function VaultPage() {
     }
   };
 
+  // ── 服务端 FTS5 搜索 ──
+  const runSearch = useCallback(async (q) => {
+    setSearchState('searching');
+    setSearchError(null);
+    try {
+      const resp = await daemon.send('vault_search', {
+        query: q,
+        vaultName: vaultFilter || undefined,
+        limit: 30,
+      });
+      setSearchHits(resp?.data?.vaultHits ?? []);
+      setSearchState('done');
+    } catch (err) {
+      setSearchError(err.message ?? String(err));
+      setSearchState('error');
+    }
+  }, [vaultFilter]);
+
+  // filter 输入：非空 → 搜索模式（防抖），空 → 回浏览模式
+  const onFilterChange = (e) => {
+    const q = e.target.value;
+    setFilter(q);
+    clearTimeout(debounceRef.current);
+    if (!q.trim()) {
+      setMode('browse');
+      setSearchHits([]);
+      setSearchState('idle');
+      return;
+    }
+    setMode('search');
+    setSearchState('typing');
+    debounceRef.current = setTimeout(() => runSearch(q.trim()), 300);
+  };
+
   useEffect(() => {
     load(vaultFilter);
-  }, [vaultFilter]);
+    // 切换 vault 时若搜索框非空，用新范围重搜
+    const q = filterRef.current.trim();
+    setMode(q ? 'search' : 'browse');
+    if (q) runSearch(q);
+    return () => clearTimeout(debounceRef.current);
+  }, [vaultFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 搜索命中 → 拉完整 entry → 选中 ──
+  const openHit = async (hit) => {
+    try {
+      const r = await daemon.send('vault_get_entry', { vaultName: hit.vault, tweetId: hit.tweetId });
+      const entry = r?.data?.vaultEntry;
+      setSelected(entry ?? { ...hit, text: hit.snippet, likes: 0, retweets: 0, url: '' });
+    } catch {
+      setSelected({ ...hit, text: hit.snippet, likes: 0, retweets: 0, url: '' });
+    }
+  };
 
   // ── 选中行 → 详情（报告优先，无报告回退条目） ──
   useEffect(() => {
@@ -114,29 +223,50 @@ export default function VaultPage() {
     return () => { if (unlisten) unlisten(); };
   }, []);
 
-  const filtered = useMemo(() => {
-    const q = filter.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter((e) =>
-      e.text.toLowerCase().includes(q) ||
-      e.author.toLowerCase().includes(q) ||
-      e.tweetId.includes(q),
-    );
-  }, [entries, filter]);
+  // ── 加载更早（仅单 vault 浏览模式；vaultSince 为 >= 语义，按 tweetId 去重） ──
+  const loadMore = async () => {
+    if (!vaultFilter || entries.length === 0 || loadingMore) return;
+    const oldest = entries[entries.length - 1];
+    setLoadingMore(true);
+    try {
+      const resp = await daemon.send('vault_recent', {
+        vaultName: vaultFilter,
+        vaultSince: oldest.createdAt,
+        limit: PAGE_SIZE,
+      });
+      const next = resp?.data?.vaultEntries ?? [];
+      setEntries((prev) => {
+        const seen = new Set(prev.map((e) => `${e.vault}:${e.tweetId}`));
+        const added = next.filter((e) => !seen.has(`${e.vault}:${e.tweetId}`));
+        return [...prev, ...added];
+      });
+      setHasMore(next.length === PAGE_SIZE);
+    } catch (err) {
+      setError(err.message ?? String(err));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  // ── 健康汇总 ──
+  const healthyCount = vaults.filter((v) => v.ok).length;
+  const brokenVaults = vaults.filter((v) => !v.ok);
 
   const groups = useMemo(() => {
     const g = {};
-    for (const e of filtered) {
+    for (const e of entries) {
       const label = groupLabel(e.createdAt, now);
       (g[label] ??= []).push(e);
     }
     return g;
-  }, [filtered, now]);
+  }, [entries, now]);
 
   const openInBrowser = async () => {
     if (!selected?.url) return;
     await daemon.send('open', { url: selected.url });
   };
+
+  const searching = mode === 'search' && (searchState === 'typing' || searchState === 'searching');
 
   return (
     <div className={styles.root}>
@@ -154,19 +284,33 @@ export default function VaultPage() {
               <option key={v.name} value={v.name}>{v.displayName} ({v.name})</option>
             ))}
           </select>
+          {vaults.length > 0 && (
+            <div
+              className={brokenVaults.length ? styles.healthBad : styles.healthOk}
+              title={brokenVaults.length
+                ? brokenVaults.map((v) => `${v.name}: ${v.problem ?? '未知问题'}`).join('\n')
+                : undefined}
+            >
+              {brokenVaults.length === 0
+                ? `✓ ${vaults.length} 个 vault 正常`
+                : `⚠ ${healthyCount} 正常 · ${brokenVaults.length} 异常（悬停查看）`}
+            </div>
+          )}
           <input
             className={styles.search}
             type="search"
-            placeholder="过滤条目…"
+            placeholder={mode === 'search' ? '搜索全文…' : '搜索全文（FTS5）…'}
             value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            disabled={!loading && entries.length === 0}
+            onChange={onFilterChange}
+            disabled={!loading && entries.length === 0 && searchState === 'idle'}
           />
         </div>
 
         {error && <p className={styles.error}>⚠ {error}</p>}
         {loading && <p className={styles.empty}>加载中…</p>}
-        {!loading && !error && entries.length === 0 && (
+
+        {/* 浏览模式 */}
+        {mode === 'browse' && !loading && !error && entries.length === 0 && (
           <div className={styles.empty}>
             <p>该 vault 还没有索引条目。</p>
             <p className={styles.hint}>
@@ -175,7 +319,7 @@ export default function VaultPage() {
           </div>
         )}
 
-        {Object.entries(groups).map(([label, items]) => (
+        {mode === 'browse' && !loading && Object.entries(groups).map(([label, items]) => (
           <section key={label} className={styles.group}>
             <h3 className={styles.groupTitle}>{label} <span className={styles.groupCount}>{items.length}</span></h3>
             <ul className={styles.list}>
@@ -202,6 +346,48 @@ export default function VaultPage() {
             </ul>
           </section>
         ))}
+
+        {mode === 'browse' && !loading && entries.length > 0 && vaultFilter && hasMore && (
+          <button className={styles.loadMore} onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? '加载中…' : '加载更早'}
+          </button>
+        )}
+
+        {/* 搜索模式 */}
+        {mode === 'search' && (
+          <div className={styles.searchPane}>
+            {searching && <p className={styles.empty}>搜索中…</p>}
+            {searchState === 'error' && <p className={styles.error}>⚠ {searchError}</p>}
+            {searchState === 'done' && searchHits.length === 0 && (
+              <p className={styles.empty}>没有匹配的报告/条目。</p>
+            )}
+            {searchState === 'done' && searchHits.length > 0 && (
+              <>
+                <p className={styles.searchInfo}>{searchHits.length} 条命中</p>
+                <ul className={styles.list}>
+                  {searchHits.map((hit) => {
+                    const key = `${hit.vault}:${hit.tweetId}`;
+                    const active = selected?.tweetId === hit.tweetId && selected?.vault === hit.vault;
+                    return (
+                      <li key={key}>
+                        <button
+                          className={`${styles.row} ${active ? styles.rowActive : ''}`}
+                          onClick={() => openHit(hit)}
+                        >
+                          <span className={styles.rowTop}>
+                            <span className={styles.vaultBadge}>{hit.vault}</span>
+                            <span className={styles.rowTime}>{(hit.reportTs ?? '').slice(0, 10)}</span>
+                          </span>
+                          <span className={styles.rowText}>{highlightSnippet(hit.snippet)}</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+          </div>
+        )}
       </aside>
 
       {/* ── 右栏 ── */}
@@ -212,9 +398,19 @@ export default function VaultPage() {
           <article className={styles.entry}>
             <header>
               <span className={styles.vaultBadge}>{detail.data.vault}</span>
-              <h2>@{detail.data.author} <span className={styles.time}>{detail.data.createdAt}</span></h2>
+              <h2>
+                <a
+                  className={styles.authorLink}
+                  href={`https://x.com/${detail.data.author}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  @{detail.data.author}
+                </a>{' '}
+                <span className={styles.time}>{detail.data.createdAt}</span>
+              </h2>
             </header>
-            <p className={styles.entryText}>{detail.data.text}</p>
+            <p className={styles.entryText}>{linkify(detail.data.text)}</p>
             <p className={styles.meta}>
               ❤ {detail.data.likes} · ⇆ {detail.data.retweets}{' '}
               {reportMissing && <span className={styles.missing}>· 无对应报告（搜索可按全文命中）</span>}
@@ -234,13 +430,33 @@ export default function VaultPage() {
               <h2>{detail.data.reportTs} <span className={styles.time}>报告</span></h2>
             </header>
             {detail.data.frontmatter && (
-              <p className={styles.meta}>
-                tweet: {detail.data.frontmatter.tweetIds.join(', ')}
-                {detail.data.frontmatter.candidateCount != null && ` · 候选 ${detail.data.frontmatter.candidateCount}`}
-                {detail.data.frontmatter.subagentCount != null && ` · 子代理 ${detail.data.frontmatter.subagentCount}`}
-              </p>
+              <>
+                <div className={styles.metaRow}>
+                  <span className={styles.metaBadge}>📄 报告</span>
+                  <span className={styles.metaBadge}>🕒 {detail.data.reportTs}</span>
+                  {detail.data.frontmatter.tweetIds?.length > 0 && (
+                    <span className={styles.metaBadge}>🐦 {detail.data.frontmatter.tweetIds.join(', ')}</span>
+                  )}
+                  {detail.data.frontmatter.candidateCount != null && (
+                    <span className={styles.metaBadge}>候选 {detail.data.frontmatter.candidateCount}</span>
+                  )}
+                  {detail.data.frontmatter.subagentCount != null && (
+                    <span className={styles.metaBadge}>子代理 {detail.data.frontmatter.subagentCount}</span>
+                  )}
+                </div>
+                {detail.data.frontmatter.tags?.length > 0 && (
+                  <div className={styles.tags}>
+                    {detail.data.frontmatter.tags.map((t) => (
+                      <span key={t} className={styles.tag}>#{t}</span>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
-            <pre className={styles.markdown}>{detail.data.bodyMd}</pre>
+            <div
+              className={styles.markdown}
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.data.bodyMd) }}
+            />
           </article>
         )}
       </main>
