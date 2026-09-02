@@ -20,7 +20,8 @@
     "@ma-browser/shared": "workspace:*",
     "@ma-browser/vault": "workspace:^",
     "better-sqlite3": "^13.0.3",
-    "chokidar": "^5.0.0"
+    "chokidar": "^5.0.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
