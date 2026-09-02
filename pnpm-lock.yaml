@@ -100,6 +100,9 @@ importers:
       chokidar:
         specifier: ^5.0.0
         version: 5.0.0
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^9.6.0

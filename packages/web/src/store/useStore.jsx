@@ -132,6 +132,7 @@ export function StoreProvider({ children }) {
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- hook colocated with provider (legacy)
 export function useStore() {
   const context = useContext(StoreContext);
   if (!context) {

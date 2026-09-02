@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useStore } from '../store/useStore';
 import { daemon } from '../api/daemon';
 import ConnectionPanel from './ConnectionPanel';
@@ -20,12 +20,36 @@ function TraceStudio() {
     activeTab,
     traceRecording,
     setTraceRecording,
-    setTraceEvents,
     addTraceEvent,
     lastUpdated,
   } = useStore();
 
   const lastEventCursorRef = useRef(null);
+
+  // 加载标签页列表 — 保存全部 page 类型标签（包括 chrome://），
+  // TabPanel 负责显示时区分可录制和不可录制页面。
+  // 自动激活首个 http/https 标签作为默认录制目标。
+  // 定义在使用它的 effect 之前（避免 TDZ；handleConnected 依赖它）。
+  const loadTabs = useCallback(async () => {
+    try {
+      const response = await daemon.send('tab_list');
+      if (response.success && response.data.tabs) {
+        const allTabs = response.data.tabs;
+        setTabs(allTabs);
+        // 优先激活 daemon 标记的 active 标签；若它不可录制则回退到第一个 http/https 标签
+        const markedActive = allTabs.find(t => t.active);
+        const recordable = (t) => t.url && (t.url.startsWith('http://') || t.url.startsWith('https://'));
+        const target = (markedActive && recordable(markedActive))
+          ? markedActive
+          : allTabs.find(recordable);
+        if (target) {
+          setActiveTab(target, target.tabId);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load tabs:', err);
+    }
+  }, [setTabs, setActiveTab]);
 
   // 监听 daemon 连接状态
   useEffect(() => {
@@ -55,7 +79,7 @@ function TraceStudio() {
       daemon.off('disconnected', handleDisconnected);
       daemon.off('error', handleError);
     };
-  }, [setConnected, setConnecting, setConnectionError, setTabs]);
+  }, [setConnected, setConnecting, setConnectionError, setTabs, loadTabs]);
 
   // Reset cursor only when recording flips false→true (a real new session),
   // not every time the polling effect re-mounts (StrictMode, activeTab ref
@@ -134,30 +158,6 @@ function TraceStudio() {
       worker.terminate();
     };
   }, [traceRecording, connected, activeTab, setTraceRecording, addTraceEvent]);
-
-  // 加载标签页列表 — 保存全部 page 类型标签（包括 chrome://），
-  // TabPanel 负责显示时区分可录制和不可录制页面。
-  // 自动激活首个 http/https 标签作为默认录制目标。
-  const loadTabs = async () => {
-    try {
-      const response = await daemon.send('tab_list');
-      if (response.success && response.data.tabs) {
-        const allTabs = response.data.tabs;
-        setTabs(allTabs);
-        // 优先激活 daemon 标记的 active 标签；若它不可录制则回退到第一个 http/https 标签
-        const markedActive = allTabs.find(t => t.active);
-        const recordable = (t) => t.url && (t.url.startsWith('http://') || t.url.startsWith('https://'));
-        const target = (markedActive && recordable(markedActive))
-          ? markedActive
-          : allTabs.find(recordable);
-        if (target) {
-          setActiveTab(target, target.tabId);
-        }
-      }
-    } catch (err) {
-      console.error('Failed to load tabs:', err);
-    }
-  };
 
   return (
     <div className="trace-studio">

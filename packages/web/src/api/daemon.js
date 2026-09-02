@@ -37,7 +37,9 @@ export class DaemonClient {
           this._startHealthCheck();
           return;
         }
-      } catch {}
+      } catch {
+        // connection refused — retry loop below
+      }
       await new Promise(r => setTimeout(r, 1000));
     }
     throw new Error('Cannot connect to daemon at ' + BASE_URL);
