@@ -110,6 +110,7 @@ export default function VaultPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const [hasReport, setHasReport] = useState(false);
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   // ── 搜索模式状态 ──
   const [mode, setMode] = useState('browse'); // 'browse' | 'search'
   const [searchHits, setSearchHits] = useState([]);
@@ -137,15 +138,27 @@ export default function VaultPage() {
 
       const okNames = (selectedVault ? [selectedVault] : rows.filter((r) => r.ok).map((r) => r.name))
         .slice(0, 5); // 防御：超过 5 个 vault 时只取前 5，避免请求风暴
-      const batches = await Promise.all(
-        okNames.map((name) => daemon.send('vault_recent', { vaultName: name, limit: PAGE_SIZE, hasReport: hasReport || undefined })),
-      );
-      const merged = batches
-        .flatMap((b) => b?.data?.vaultEntries ?? [])
-        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-      setEntries(merged);
-      setHasMore(selectedVault ? merged.length === PAGE_SIZE : false);
-      if (selectedVault && merged.length < PAGE_SIZE) setHasMore(false);
+      if (favoritesOnly) {
+        // 只看收藏：逐 vault 拉收藏合并（收藏少，无分页）
+        const batches = await Promise.all(
+          okNames.map((name) => daemon.send('vault_list_favorites', { vaultName: name })),
+        );
+        const merged = batches
+          .flatMap((b) => b?.data?.vaultFavorites ?? [])
+          .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+        setEntries(merged);
+        setHasMore(false);
+      } else {
+        const batches = await Promise.all(
+          okNames.map((name) => daemon.send('vault_recent', { vaultName: name, limit: PAGE_SIZE, hasReport: hasReport || undefined })),
+        );
+        const merged = batches
+          .flatMap((b) => b?.data?.vaultEntries ?? [])
+          .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+        setEntries(merged);
+        setHasMore(selectedVault ? merged.length === PAGE_SIZE : false);
+        if (selectedVault && merged.length < PAGE_SIZE) setHasMore(false);
+      }
     } catch (err) {
       setError(err.message ?? String(err));
     } finally {
@@ -194,7 +207,7 @@ export default function VaultPage() {
     setMode(q ? 'search' : 'browse');
     if (q) runSearch(q);
     return () => clearTimeout(debounceRef.current);
-  }, [vaultFilter, hasReport]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [vaultFilter, hasReport, favoritesOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 搜索命中 → 拉完整 entry → 选中 ──
   const openHit = useCallback(async (hit) => {
@@ -291,6 +304,27 @@ export default function VaultPage() {
     await daemon.send('open', { url: selected.url });
   };
 
+  // ── 收藏 toggle ──
+  const toggleFavorite = async (entry) => {
+    if (!entry?.tweetId || !entry?.vault) return;
+    try {
+      const r = await daemon.send('vault_favorite', { vaultName: entry.vault, tweetId: entry.tweetId });
+      if (!r.success) return;
+      const fav = r.data?.vaultFavorite;
+      // 更新列表 + 选中态
+      setEntries((prev) => prev.map((e) =>
+        e.tweetId === entry.tweetId && e.vault === entry.vault ? { ...e, favorite: fav } : e,
+      ));
+      setSelected((prev) => (prev && prev.tweetId === entry.tweetId ? { ...prev, favorite: fav } : prev));
+      // 收藏模式下取消收藏 → 从列表移除
+      if (favoritesOnly && !fav) {
+        setEntries((prev) => prev.filter((e) => !(e.tweetId === entry.tweetId && e.vault === entry.vault)));
+      }
+    } catch {
+      setError('收藏操作失败');
+    }
+  };
+
   // ── 报告导出：复制 Markdown / 下载 .md ──
   const copyMarkdown = async (md) => {
     const invoke = window.__TAURI__?.core?.invoke;
@@ -360,7 +394,7 @@ export default function VaultPage() {
 
   // ── 实时刷新：浏览模式 10s 轮询 + 可见性/焦点即时补拉 ──
   useEffect(() => {
-    if (mode !== 'browse') return;
+    if (mode !== 'browse' || favoritesOnly) return;
     let cancelled = false;
     const tick = async () => {
       if (document.visibilityState === 'hidden' || !vaults.length) return;
@@ -398,7 +432,7 @@ export default function VaultPage() {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, [mode, vaultFilter, vaults, hasReport]);
+  }, [mode, vaultFilter, vaults, hasReport, favoritesOnly]);
 
   const searching = mode === 'search' && (searchState === 'typing' || searchState === 'searching');
 
@@ -424,6 +458,13 @@ export default function VaultPage() {
             title="只看有报告文件的条目"
           >
             📄 只看有报告
+          </button>
+          <button
+            className={`${styles.reportToggle} ${favoritesOnly ? styles.reportToggleActive : ''}`}
+            onClick={() => setFavoritesOnly((v) => !v)}
+            title="只看收藏的条目"
+          >
+            ⭐ 只看收藏
           </button>
           {vaults.length > 0 && (
             <div
@@ -481,7 +522,12 @@ export default function VaultPage() {
                       </span>
                       <span className={styles.rowAuthor}>@{e.author}</span>
                       <span className={styles.rowText}>{e.text}</span>
-                      {e.reportId && <span className={styles.rowReport}>📄 有报告</span>}
+                      {(e.reportId || e.favorite) && (
+                        <span className={styles.rowBadges}>
+                          {e.favorite && <span className={styles.rowFav}>⭐</span>}
+                          {e.reportId && <span className={styles.rowReport}>📄 有报告</span>}
+                        </span>
+                      )}
                     </button>
                   </li>
                 );
@@ -564,6 +610,12 @@ export default function VaultPage() {
                 <a className={styles.link} href={detail.data.url} target="_blank" rel="noreferrer">打开推文 ↗</a>
               )}
               <button className={styles.btn} onClick={openInBrowser}>在 ma-browser 浏览器打开</button>
+              <button
+                className={`${styles.btn} ${selected?.favorite ? styles.btnFavActive : ''}`}
+                onClick={() => toggleFavorite(selected)}
+              >
+                {selected?.favorite ? '⭐ 已收藏' : '☆ 收藏'}
+              </button>
             </div>
           </article>
         )}
@@ -604,6 +656,12 @@ export default function VaultPage() {
             <div className={styles.actions}>
               <button className={styles.btn} onClick={() => copyMarkdown(detail.data.bodyMd)}>复制 Markdown</button>
               <button className={styles.btn} onClick={() => saveMarkdown(detail.data.bodyMd, detail.data.tweetId)}>下载 .md</button>
+              <button
+                className={`${styles.btn} ${selected?.favorite ? styles.btnFavActive : ''}`}
+                onClick={() => toggleFavorite(selected)}
+              >
+                {selected?.favorite ? '⭐ 已收藏' : '☆ 收藏'}
+              </button>
               {exportMsg && <span className={styles.exportMsg}>{exportMsg}</span>}
             </div>
           </article>

@@ -538,9 +538,9 @@ const READ_ONLY_ALLOWED = new Set([
   // Site adapter discovery is pure catalog reads (no browser side effects).
   // site_run is intentionally excluded — it runs arbitrary adapter JS.
   "site_list", "site_search", "site_info", "site_recommend",
-  // Vault reads are file/SQLite queries. vault_register mutates the registry,
-  // so it is intentionally excluded.
-  "vault_list", "vault_recent", "vault_search", "vault_get_report", "vault_get_entry",
+  // Vault reads are file/SQLite queries. vault_register and vault_favorite
+  // mutate (registry / _favorites.json sidecar), so they are excluded.
+  "vault_list", "vault_recent", "vault_search", "vault_get_report", "vault_get_entry", "vault_list_favorites",
 ]);
 
 /** Returns true if the request involves running JavaScript via Runtime.evaluate. */
@@ -649,6 +649,22 @@ async function handleVaultRequest(request: Request, cdp: CdpConnection): Promise
       }
       const token = mgr.rotateRssToken(request.vaultName);
       return ok(request.id, { vaultToken: token, tab: `vault-${request.vaultName}`, seq: seq() });
+    }
+    case "vault_favorite": {
+      if (!request.vaultName) return fail(request.id, "Missing 'vaultName' parameter for vault_favorite");
+      if (!request.tweetId) return fail(request.id, "Missing 'tweetId' parameter for vault_favorite");
+      const next = mgr.toggleFavorite(request.vaultName, request.tweetId);
+      if (next === null) {
+        return fail(request.id, `Unknown vault or tweet — '${request.vaultName}'/'${request.tweetId}'`);
+      }
+      return ok(request.id, { vaultFavorite: next, tab: `vault-${request.vaultName}`, seq: seq() });
+    }
+    case "vault_list_favorites": {
+      if (!request.vaultName) return fail(request.id, "Missing 'vaultName' parameter for vault_list_favorites");
+      if (!mgr.vaultNames().includes(request.vaultName)) {
+        return fail(request.id, `Unknown vault '${request.vaultName}' — run vault_list for registered names`);
+      }
+      return ok(request.id, { vaultFavorites: mgr.listFavorites(request.vaultName), tab: `vault-${request.vaultName}`, seq: seq() });
     }
     default:
       return fail(request.id, `Unknown vault action '${request.action}'`);
