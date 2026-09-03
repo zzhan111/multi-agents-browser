@@ -158,9 +158,11 @@ export interface Request {
   /** 推文/条目 ID（vault_get_report / vault_get_entry 使用） */
   tweetId?: string;
   /** 时间窗口起点，ISO 8601（vault_recent 使用，可选；created_at >= vaultSince） */
-    vaultSince?: string;
-    /** 分页上界，ISO 8601（vault_recent 使用，可选；created_at < vaultBefore，向前翻页） */
-    vaultBefore?: string;
+  vaultSince?: string;
+  /** 分页上界，ISO 8601（vault_recent 使用，可选；created_at < vaultBefore，向前翻页） */
+  vaultBefore?: string;
+  /** 仅返回有报告文件的条目（vault_recent 使用，可选） */
+  hasReport?: boolean;
 }
 
 /** 元素引用信息 */

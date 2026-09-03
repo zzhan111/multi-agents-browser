@@ -109,6 +109,7 @@ export default function VaultPage() {
   const [reportMissing, setReportMissing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  const [hasReport, setHasReport] = useState(false);
   // ── 搜索模式状态 ──
   const [mode, setMode] = useState('browse'); // 'browse' | 'search'
   const [searchHits, setSearchHits] = useState([]);
@@ -137,7 +138,7 @@ export default function VaultPage() {
       const okNames = (selectedVault ? [selectedVault] : rows.filter((r) => r.ok).map((r) => r.name))
         .slice(0, 5); // 防御：超过 5 个 vault 时只取前 5，避免请求风暴
       const batches = await Promise.all(
-        okNames.map((name) => daemon.send('vault_recent', { vaultName: name, limit: PAGE_SIZE })),
+        okNames.map((name) => daemon.send('vault_recent', { vaultName: name, limit: PAGE_SIZE, hasReport: hasReport || undefined })),
       );
       const merged = batches
         .flatMap((b) => b?.data?.vaultEntries ?? [])
@@ -193,7 +194,7 @@ export default function VaultPage() {
     setMode(q ? 'search' : 'browse');
     if (q) runSearch(q);
     return () => clearTimeout(debounceRef.current);
-  }, [vaultFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [vaultFilter, hasReport]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 搜索命中 → 拉完整 entry → 选中 ──
   const openHit = useCallback(async (hit) => {
@@ -256,6 +257,7 @@ export default function VaultPage() {
               vaultName: vaultFilter,
               vaultBefore: oldest.createdAt,
               limit: PAGE_SIZE,
+              hasReport: hasReport || undefined,
             });
       const next = resp?.data?.vaultEntries ?? [];
       setEntries((prev) => {
@@ -366,7 +368,7 @@ export default function VaultPage() {
         const okNames = (vaultFilter ? [vaultFilter] : vaults.filter((v) => v.ok).map((v) => v.name))
           .slice(0, 5);
         const batches = await Promise.all(
-          okNames.map((name) => daemon.send('vault_recent', { vaultName: name, limit: PAGE_SIZE })),
+          okNames.map((name) => daemon.send('vault_recent', { vaultName: name, limit: PAGE_SIZE, hasReport: hasReport || undefined })),
         );
         const fresh = batches.flatMap((b) => b?.data?.vaultEntries ?? []);
         if (cancelled || fresh.length === 0) return;
@@ -396,7 +398,7 @@ export default function VaultPage() {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, [mode, vaultFilter, vaults]);
+  }, [mode, vaultFilter, vaults, hasReport]);
 
   const searching = mode === 'search' && (searchState === 'typing' || searchState === 'searching');
 
@@ -416,6 +418,13 @@ export default function VaultPage() {
               <option key={v.name} value={v.name}>{v.displayName} ({v.name})</option>
             ))}
           </select>
+          <button
+            className={`${styles.reportToggle} ${hasReport ? styles.reportToggleActive : ''}`}
+            onClick={() => setHasReport((v) => !v)}
+            title="只看有报告文件的条目"
+          >
+            📄 只看有报告
+          </button>
           {vaults.length > 0 && (
             <div
               className={brokenVaults.length ? styles.healthBad : styles.healthOk}

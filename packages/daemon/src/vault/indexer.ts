@@ -103,6 +103,15 @@ function reportTsFromFilename(fileName: string, filePath: string): string {
   return new Date(statSync(filePath).mtimeMs).toISOString();
 }
 
+/** Extract tweet ids from a v0 report body's `x.com/.../status/<id>` links. */
+function extractTweetIdsFromBody(md: string): string[] {
+  const ids = new Set<string>();
+  const re = /x\.com\/[A-Za-z0-9_]+\/status\/(\d{15,25})/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(md)) !== null) ids.add(m[1]);
+  return [...ids];
+}
+
 interface IndexRow {
   tweet_id: string;
   vault: string;
@@ -141,16 +150,30 @@ export class VaultIndexer {
     private readonly stateDir: string,
   ) {
     mkdirSync(stateDir, { recursive: true });
-    this.db = new Database(join(stateDir, "index.sqlite"));
-    this.db.pragma("journal_mode = WAL");
-    this.db.exec(SCHEMA);
-    for (const row of this.db.prepare("SELECT path, mtime_ms FROM index_state").all() as Array<{
-      path: string;
-      mtime_ms: number;
-    }>) {
-      this.mtimeMap.set(row.path, row.mtime_ms);
-    }
-  }
+        this.db = new Database(join(stateDir, "index.sqlite"));
+        this.db.pragma("journal_mode = WAL");
+        this.db.exec(SCHEMA);
+        // One-time migration: v0 report body extraction. Existing indexes (built
+        // before the body fallback existed) marked every report file as indexed
+        // without the body-extracted tweet_ids — reconcile's mtime gate would skip
+        // them forever. Clear index_state once so reconcile re-ingests and the
+        // fallback runs; the meta flag ensures this never clears again.
+        const migrated = this.db
+          .prepare("SELECT value FROM meta WHERE key = ?")
+          .get("migration_v1_report_body_extract");
+        if (!migrated) {
+          this.db.prepare("DELETE FROM index_state").run();
+          this.db
+            .prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+            .run("migration_v1_report_body_extract", "1");
+        }
+        for (const row of this.db.prepare("SELECT path, mtime_ms FROM index_state").all() as Array<{
+          path: string;
+          mtime_ms: number;
+        }>) {
+          this.mtimeMap.set(row.path, row.mtime_ms);
+        }
+      }
 
   /** P3 dedup gate: true only when the file changed since the last index. */
   shouldIndex(absPath: string): boolean {
@@ -257,7 +280,12 @@ export class VaultIndexer {
           n++;
         }
       } else if (fm.ok && fm.schemaVersion === 0) {
-        for (const id of indexTweetIds) {
+        // v0 reports have no frontmatter tweetIds; _index.json is the primary
+        // mapping. When absent (batch-summary reports where tweet ids only live
+        // in body x.com/.../status/<id> links), fall back to body extraction so
+        // "has report" reflects reality instead of only the 5 _index.json rows.
+        const ids = indexTweetIds.length > 0 ? indexTweetIds : extractTweetIdsFromBody(md);
+        for (const id of ids) {
           insert.run(id, reportTs, vault, absPath, null, null, 0);
           n++;
         }
@@ -367,17 +395,28 @@ export class VaultIndexer {
     }
   }
 
-  recent(sinceIso: string | null, beforeIso: string | null, limit = 50): Entry[] {
+  recent(sinceIso: string | null, beforeIso: string | null, limit = 50, hasReport = false): Entry[] {
+      const reportFilter = hasReport
+        ? "EXISTS (SELECT 1 FROM reports r WHERE r.tweet_id = entries.tweet_id)"
+        : null;
       const rows = (
         beforeIso
           ? this.db.prepare(
-              "SELECT * FROM entries WHERE created_at < ? ORDER BY created_at DESC LIMIT ?",
+              reportFilter
+                ? "SELECT * FROM entries WHERE created_at < ? AND " + reportFilter + " ORDER BY created_at DESC LIMIT ?"
+                : "SELECT * FROM entries WHERE created_at < ? ORDER BY created_at DESC LIMIT ?",
             ).all(beforeIso, limit)
           : sinceIso
             ? this.db.prepare(
-                "SELECT * FROM entries WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+                reportFilter
+                  ? "SELECT * FROM entries WHERE created_at >= ? AND " + reportFilter + " ORDER BY created_at DESC LIMIT ?"
+                  : "SELECT * FROM entries WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
               ).all(sinceIso, limit)
-            : this.db.prepare("SELECT * FROM entries ORDER BY created_at DESC LIMIT ?").all(limit)
+            : this.db.prepare(
+                reportFilter
+                  ? "SELECT * FROM entries WHERE " + reportFilter + " ORDER BY created_at DESC LIMIT ?"
+                  : "SELECT * FROM entries ORDER BY created_at DESC LIMIT ?",
+              ).all(limit)
       ) as Array<IndexRow & { source_file: string }>;
       return rows.map((r) => this.rowToEntry(r));
     }

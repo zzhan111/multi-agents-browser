@@ -241,6 +241,39 @@ fresh body
   }
 });
 
+test("v0 report without _index.json mapping falls back to body x.com/status extraction; recent(hasReport) filters", async () => {
+  const fx = makeFixture();
+  try {
+    writeBatch(fx, "20260729_080000_mixed.jsonl", [
+      { id: "3101000000000000001", author: "a", text: "reported tweet", created_at: JUL_29 },
+      { id: "3102000000000000002", author: "b", text: "unreported tweet", created_at: AUG_01 },
+    ]);
+    // v0 report, no _index.json entry, but body mentions tweet 3101 via status link
+    writeFileSync(
+      join(fx.dataDir, "reports", "20260730_091000_report.md"),
+      "# 报告\n\n- **链接**：https://x.com/a/status/3101000000000000001\n\n见 https://x.com/a/status/3101000000000000001 的分析\n",
+    );
+
+    const idx = makeIndexer(fx);
+    await idx.reconcile();
+    // 1 report row for 3101 (dedup'd); 3102 has none
+    assert.equal(idx.counts().reports, 1);
+    assert.ok(idx.getEntry("3101000000000000001")?.reportId, "3101 should have a report via body extraction");
+    assert.equal(idx.getEntry("3102000000000000002")?.reportId ?? null, null, "3102 should have no report");
+
+    // hasReport=true returns only 3101; default returns both
+    const only = idx.recent(null, null, 10, true);
+    assert.deepEqual(only.map((e) => e.tweetId), ["3101000000000000001"]);
+    const all = idx.recent(null, null, 10);
+    assert.deepEqual(all.map((e) => e.tweetId).sort(), ["3101000000000000001", "3102000000000000002"]);
+
+    idx.close();
+  } finally {
+    cleanup(fx.dataDir);
+    cleanup(fx.stateDir);
+  }
+});
+
 test("malformed jsonl lines are skipped without aborting the batch", async () => {
   const fx = makeFixture();
   try {

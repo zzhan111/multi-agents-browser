@@ -613,7 +613,7 @@ async function handleVaultRequest(request: Request, cdp: CdpConnection): Promise
     case "vault_recent": {
       const name = request.vaultName;
       if (!name) return fail(request.id, "Missing 'vaultName' parameter for vault_recent");
-      const entries = mgr.recent(name, request.vaultSince ?? null, request.vaultBefore ?? null, request.limit ?? 50);
+      const entries = mgr.recent(name, request.vaultSince ?? null, request.vaultBefore ?? null, request.limit ?? 50, request.hasReport ?? false);
       if (entries.length === 0 && !mgr.vaultNames().includes(name)) {
         return fail(request.id, `Unknown vault '${name}' — run vault_list for registered names`);
       }
