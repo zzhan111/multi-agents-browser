@@ -68,6 +68,31 @@ pub fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
+/// Save `text` to a user-chosen file via the native save dialog.
+/// Returns the chosen path (string) or `None` if the user cancelled.
+#[tauri::command]
+pub async fn save_text_file(
+    app: tauri::AppHandle,
+    text: String,
+    filename: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let chosen = app
+        .dialog()
+        .file()
+        .set_file_name(&filename)
+        .add_filter("Markdown", &["md"])
+        .blocking_save_file();
+    match chosen {
+        Some(file_path) => {
+            let path = file_path.into_path().map_err(|e| e.to_string())?;
+            std::fs::write(&path, text).map_err(|e| e.to_string())?;
+            Ok(Some(path.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Restart the daemon. From `Stopped/Failed/GaveUp` it does a fresh start;
 /// from `Running/Starting` it issues `UserRestart` which clears the crash
 /// budget and respawns.

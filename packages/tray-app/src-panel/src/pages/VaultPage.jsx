@@ -64,6 +64,24 @@ function highlightSnippet(snippet) {
   );
 }
 
+/** 行唯一键：vault + tweetId。 */
+function keyFor(item) {
+  return `${item.vault}:${item.tweetId}`;
+}
+
+/** vite dev 环境兜底：Blob 下载（Tauri 下走原生 save dialog）。 */
+function downloadViaBlob(text, filename) {
+  const blob = new Blob([text], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 /** 时间分组：Today / Yesterday / Earlier（本地时区语义足够）。 */
 function groupLabel(iso, now) {
   const d = new Date(iso);
@@ -96,9 +114,14 @@ export default function VaultPage() {
   const [searchHits, setSearchHits] = useState([]);
   const [searchState, setSearchState] = useState('idle'); // idle|typing|searching|done|error
   const [searchError, setSearchError] = useState(null);
+  // ── 键盘导航焦点 + 导出反馈 ──
+  const [focusKey, setFocusKey] = useState(null);
+  const [exportMsg, setExportMsg] = useState(null);
   const debounceRef = useRef(null);
   const filterRef = useRef(filter);
   filterRef.current = filter;
+  const searchRef = useRef(null);
+  const listPaneRef = useRef(null);
 
   const now = useMemo(() => new Date(), []);
 
@@ -173,7 +196,7 @@ export default function VaultPage() {
   }, [vaultFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 搜索命中 → 拉完整 entry → 选中 ──
-  const openHit = async (hit) => {
+  const openHit = useCallback(async (hit) => {
     try {
       const r = await daemon.send('vault_get_entry', { vaultName: hit.vault, tweetId: hit.tweetId });
       const entry = r?.data?.vaultEntry;
@@ -181,7 +204,7 @@ export default function VaultPage() {
     } catch {
       setSelected({ ...hit, text: hit.snippet, likes: 0, retweets: 0, url: '' });
     }
-  };
+  }, []);
 
   // ── 选中行 → 详情（报告优先，无报告回退条目） ──
   useEffect(() => {
@@ -266,12 +289,121 @@ export default function VaultPage() {
     await daemon.send('open', { url: selected.url });
   };
 
+  // ── 报告导出：复制 Markdown / 下载 .md ──
+  const copyMarkdown = async (md) => {
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (invoke) {
+      try { await invoke('copy_text', { text: md }); setExportMsg('已复制 Markdown'); return; } catch {}
+    }
+    try { await navigator.clipboard.writeText(md); setExportMsg('已复制 Markdown'); }
+    catch { setExportMsg('复制失败'); }
+  };
+
+  const saveMarkdown = async (md, tweetId) => {
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (!invoke) { downloadViaBlob(md, `report-${tweetId}.md`); setExportMsg('已开始下载'); return; }
+    try {
+      const path = await invoke('save_text_file', { text: md, filename: `report-${tweetId}.md` });
+      setExportMsg(path ? '已保存' : '已取消');
+    } catch (e) {
+      setExportMsg('保存失败: ' + (e?.message ?? String(e)));
+    }
+  };
+
+  // 导出反馈自动消失
+  useEffect(() => {
+    if (!exportMsg) return;
+    const t = setTimeout(() => setExportMsg(null), 2500);
+    return () => clearTimeout(t);
+  }, [exportMsg]);
+
+  // ── 键盘导航：↑/↓ 移动焦点、Enter 打开、/ 聚焦搜索 ──
+  useEffect(() => {
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+      if (e.key === '/') {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Enter') return;
+      const items = mode === 'browse' ? entries : searchHits;
+      if (items.length === 0) return;
+      let idx = items.findIndex((i) => keyFor(i) === focusKey);
+      if (idx === -1) idx = 0;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setFocusKey(keyFor(items[Math.min(idx + 1, items.length - 1)]));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setFocusKey(keyFor(items[Math.max(idx - 1, 0)]));
+      } else {
+        e.preventDefault();
+        const item = items[idx];
+        if (mode === 'browse') setSelected(item);
+        else openHit(item);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mode, entries, searchHits, focusKey, openHit]);
+
+  // 焦点变化 → 滚动到可见
+  useEffect(() => {
+    if (!focusKey) return;
+    const el = listPaneRef.current?.querySelector(`[data-focus-key="${focusKey}"]`);
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [focusKey]);
+
+  // ── 实时刷新：浏览模式 10s 轮询 + 可见性/焦点即时补拉 ──
+  useEffect(() => {
+    if (mode !== 'browse') return;
+    let cancelled = false;
+    const tick = async () => {
+      if (document.visibilityState === 'hidden' || !vaults.length) return;
+      try {
+        const okNames = (vaultFilter ? [vaultFilter] : vaults.filter((v) => v.ok).map((v) => v.name))
+          .slice(0, 5);
+        const batches = await Promise.all(
+          okNames.map((name) => daemon.send('vault_recent', { vaultName: name, limit: PAGE_SIZE })),
+        );
+        const fresh = batches.flatMap((b) => b?.data?.vaultEntries ?? []);
+        if (cancelled || fresh.length === 0) return;
+        setEntries((prev) => {
+          const seen = new Set(prev.map((e) => keyFor(e)));
+          const merged = prev.slice();
+          let changed = false;
+          for (const e of fresh) {
+            const k = keyFor(e);
+            if (!seen.has(k)) { seen.add(k); merged.push(e); changed = true; }
+          }
+          if (!changed) return prev;
+          merged.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+          return merged;
+        });
+      } catch {
+        /* transient poll error — ignore */
+      }
+    };
+    const id = setInterval(tick, 10000);
+    const onVisible = () => { if (document.visibilityState === 'visible') tick(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [mode, vaultFilter, vaults]);
+
   const searching = mode === 'search' && (searchState === 'typing' || searchState === 'searching');
 
   return (
     <div className={styles.root}>
       {/* ── 左栏 ── */}
-      <aside className={styles.listPane}>
+      <aside className={styles.listPane} ref={listPaneRef}>
         <div className={styles.controls}>
           <select
             className={styles.select}
@@ -299,6 +431,7 @@ export default function VaultPage() {
           <input
             className={styles.search}
             type="search"
+            ref={searchRef}
             placeholder={mode === 'search' ? '搜索全文…' : '搜索全文（FTS5）…'}
             value={filter}
             onChange={onFilterChange}
@@ -329,8 +462,9 @@ export default function VaultPage() {
                 return (
                   <li key={key}>
                     <button
-                      className={`${styles.row} ${active ? styles.rowActive : ''}`}
-                      onClick={() => setSelected(e)}
+                      data-focus-key={key}
+                      className={`${styles.row} ${active ? styles.rowActive : ''} ${focusKey === key ? styles.rowFocused : ''}`}
+                      onClick={() => { setFocusKey(key); setSelected(e); }}
                     >
                       <span className={styles.rowTop}>
                         <span className={styles.vaultBadge}>{e.vault}</span>
@@ -371,8 +505,9 @@ export default function VaultPage() {
                     return (
                       <li key={key}>
                         <button
-                          className={`${styles.row} ${active ? styles.rowActive : ''}`}
-                          onClick={() => openHit(hit)}
+                          data-focus-key={key}
+                          className={`${styles.row} ${active ? styles.rowActive : ''} ${focusKey === key ? styles.rowFocused : ''}`}
+                          onClick={() => { setFocusKey(key); openHit(hit); }}
                         >
                           <span className={styles.rowTop}>
                             <span className={styles.vaultBadge}>{hit.vault}</span>
@@ -457,6 +592,11 @@ export default function VaultPage() {
               className={styles.markdown}
               dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.data.bodyMd) }}
             />
+            <div className={styles.actions}>
+              <button className={styles.btn} onClick={() => copyMarkdown(detail.data.bodyMd)}>复制 Markdown</button>
+              <button className={styles.btn} onClick={() => saveMarkdown(detail.data.bodyMd, detail.data.tweetId)}>下载 .md</button>
+              {exportMsg && <span className={styles.exportMsg}>{exportMsg}</span>}
+            </div>
           </article>
         )}
       </main>

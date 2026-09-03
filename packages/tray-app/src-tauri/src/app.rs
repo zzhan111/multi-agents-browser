@@ -86,6 +86,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             crate::commands::get_status,
             crate::commands::copy_text,
+            crate::commands::save_text_file,
             crate::commands::restart_daemon,
             crate::commands::start_daemon,
             crate::commands::stop_daemon,
