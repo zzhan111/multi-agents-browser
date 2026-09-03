@@ -171,6 +171,17 @@
   color: #7ed07e;
 }
 
+.rowBadges {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.rowFav {
+  font-size: 11px;
+  color: #e7c44c;
+}
+
 /* FTS5 命中高亮 */
 .hitMark {
   background: rgba(231, 168, 76, 0.35);
@@ -290,6 +301,11 @@
 
 .btn:hover {
   border-color: var(--accent, #4c8dff);
+}
+
+.btnFavActive {
+  border-color: #e7c44c;
+  color: #e7c44c;
 }
 
 .exportMsg {
