@@ -92,6 +92,14 @@
   color: var(--foreground, #e6e6e6);
   cursor: pointer;
   margin-bottom: 4px;
+  /* 渲染虚拟化：跳过屏外行的布局/绘制（保留 DOM 供键盘导航 scrollIntoView） */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 88px;
+}
+
+.rowFocused {
+  outline: 1px solid var(--accent, #4c8dff);
+  outline-offset: -1px;
 }
 
 .row:hover {
@@ -261,6 +269,12 @@
 
 .btn:hover {
   border-color: var(--accent, #4c8dff);
+}
+
+.exportMsg {
+  font-size: 12px;
+  color: #7ed07e;
+  align-self: center;
 }
 
 /* 报告元信息徽章 + 标签 */
