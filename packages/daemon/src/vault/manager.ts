@@ -144,9 +144,9 @@ export class VaultManager {
     return null;
   }
 
-  recent(vaultName: string, sinceIso: string | null, beforeIso: string | null, limit: number): Entry[] {
+  recent(vaultName: string, sinceIso: string | null, beforeIso: string | null, limit: number, hasReport = false): Entry[] {
       const v = this.find(vaultName);
-      return v ? v.indexer.recent(sinceIso, beforeIso, limit) : [];
+      return v ? v.indexer.recent(sinceIso, beforeIso, limit, hasReport) : [];
     }
 
   search(vaultName: string | null, query: string, limit: number): ReportHit[] {

@@ -38,6 +38,27 @@
   font-size: 13px;
 }
 
+.reportToggle {
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2a2f3a);
+  background: transparent;
+  color: var(--muted-foreground, #9aa3b2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.reportToggle:hover {
+  border-color: var(--accent, #4c8dff);
+}
+
+.reportToggleActive {
+  color: var(--foreground, #e6e6e6);
+  border-color: var(--accent, #4c8dff);
+  background: rgba(76, 141, 255, 0.12);
+}
+
 .healthOk,
 .healthBad {
   font-size: 11px;
