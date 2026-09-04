@@ -69,6 +69,28 @@ function keyFor(item) {
   return `${item.vault}:${item.tweetId}`;
 }
 
+/**
+ * 从批量报告正文中提取覆盖 `entry` 的那一节（## 条目 N — @author …）。
+ * 批量报告（v0，1 文件含 4-8 条候选）命中→返回该节；无此结构（如 v1
+ * 单推文候选报告）或未命中 → 返回 null，调用方回退全文渲染。
+ * 匹配优先 tweetId（status/<id> 链接），其次 @author。
+ */
+function extractEntrySection(bodyMd, entry) {
+  if (!bodyMd || !entry) return null;
+  // 报告生成器用 "## 条目 N — @author"（v0 批量）；无此结构算单条报告
+  const headings = [...bodyMd.matchAll(/^## 条目 \d+[^\n]*/gm)];
+  if (headings.length < 2) return null;
+  const idRe = entry.tweetId ? new RegExp(`status/${entry.tweetId}(?![0-9])`) : null;
+  for (let i = 0; i < headings.length; i += 1) {
+    const start = headings[i].index;
+    const end = i + 1 < headings.length ? headings[i + 1].index : bodyMd.length;
+    const section = bodyMd.slice(start, end).trim();
+    if (idRe && idRe.test(section)) return section;
+    if (entry.author && section.includes(`@${entry.author}`)) return section;
+  }
+  return null;
+}
+
 /** vite dev 环境兜底：Blob 下载（Tauri 下走原生 save dialog）。 */
 function downloadViaBlob(text, filename) {
   const blob = new Blob([text], { type: 'text/markdown' });
@@ -518,10 +540,10 @@ export default function VaultPage() {
                     >
                       <span className={styles.rowTop}>
                         <span className={styles.vaultBadge}>{e.vault}</span>
-                        <span className={styles.rowTime}>{e.createdAt.slice(11, 16)}</span>
+                        <span className={styles.rowTime}>{e.createdAt?.slice(11, 16) ?? ''}</span>
                       </span>
-                      <span className={styles.rowAuthor}>@{e.author}</span>
-                      <span className={styles.rowText}>{e.text}</span>
+                      <span className={styles.rowAuthor}>@{e.author || '未知作者'}</span>
+                      <span className={styles.rowText}>{e.text?.trim() ? e.text : '（无正文）'}</span>
                       {(e.reportId || e.favorite) && (
                         <span className={styles.rowBadges}>
                           {e.favorite && <span className={styles.rowFav}>⭐</span>}
@@ -619,53 +641,77 @@ export default function VaultPage() {
             </div>
           </article>
         )}
-        {detail?.kind === 'report' && (
-          <article className={styles.entry}>
-            <header>
-              <span className={styles.vaultBadge}>{detail.data.vault}</span>
-              <h2>{detail.data.reportTs} <span className={styles.time}>报告</span></h2>
-            </header>
-            {detail.data.frontmatter && (
-              <>
-                <div className={styles.metaRow}>
-                  <span className={styles.metaBadge}>📄 报告</span>
-                  <span className={styles.metaBadge}>🕒 {detail.data.reportTs}</span>
-                  {detail.data.frontmatter.tweetIds?.length > 0 && (
-                    <span className={styles.metaBadge}>🐦 {detail.data.frontmatter.tweetIds.join(', ')}</span>
-                  )}
-                  {detail.data.frontmatter.candidateCount != null && (
-                    <span className={styles.metaBadge}>候选 {detail.data.frontmatter.candidateCount}</span>
-                  )}
-                  {detail.data.frontmatter.subagentCount != null && (
-                    <span className={styles.metaBadge}>子代理 {detail.data.frontmatter.subagentCount}</span>
-                  )}
-                </div>
-                {detail.data.frontmatter.tags?.length > 0 && (
-                  <div className={styles.tags}>
-                    {detail.data.frontmatter.tags.map((t) => (
-                      <span key={t} className={styles.tag}>#{t}</span>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
-            <div
-              className={styles.markdown}
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.data.bodyMd) }}
-            />
-            <div className={styles.actions}>
-              <button className={styles.btn} onClick={() => copyMarkdown(detail.data.bodyMd)}>复制 Markdown</button>
-              <button className={styles.btn} onClick={() => saveMarkdown(detail.data.bodyMd, detail.data.tweetId)}>下载 .md</button>
-              <button
-                className={`${styles.btn} ${selected?.favorite ? styles.btnFavActive : ''}`}
-                onClick={() => toggleFavorite(selected)}
-              >
-                {selected?.favorite ? '⭐ 已收藏' : '☆ 收藏'}
-              </button>
-              {exportMsg && <span className={styles.exportMsg}>{exportMsg}</span>}
-            </div>
-          </article>
-        )}
+        {detail?.kind === 'report' && (() => {
+                  const scoped = extractEntrySection(detail.data.bodyMd, selected);
+                  const bodyMd = scoped ?? detail.data.bodyMd;
+                  const isScoped = scoped != null;
+                  const title = isScoped
+                    ? (selected?.author ? `@${selected.author}` : detail.data.reportTs)
+                    : detail.data.reportTs;
+                  return (
+                    <article className={styles.entry}>
+                      <header>
+                        <span className={styles.vaultBadge}>{detail.data.vault}</span>
+                        <h2>
+                          {title}{' '}
+                          <span className={styles.time}>
+                            {isScoped ? `条目 · 来自 ${detail.data.reportTs} 报告` : '报告'}
+                          </span>
+                        </h2>
+                      </header>
+                      {isScoped && (
+                        <p className={styles.note}>
+                          {selected?.tweetId
+                            ? `已定位到该条目所属的批量报告小节（全文 ${detail.data.filePath.split(/[\\/]/).pop() ?? ''}）`
+                            : '批量报告包含多个候选 — 当前显示选中条目的那一节'}
+                        </p>
+                      )}
+                      {detail.data.frontmatter && (
+                        <>
+                          <div className={styles.metaRow}>
+                            <span className={styles.metaBadge}>📄 报告</span>
+                            <span className={styles.metaBadge}>🕒 {detail.data.reportTs}</span>
+                            {detail.data.frontmatter.tweetIds?.length > 0 && (
+                              <span className={styles.metaBadge}>🐦 {detail.data.frontmatter.tweetIds.join(', ')}</span>
+                            )}
+                            {detail.data.frontmatter.candidateCount != null && (
+                              <span className={styles.metaBadge}>候选 {detail.data.frontmatter.candidateCount}</span>
+                            )}
+                            {detail.data.frontmatter.subagentCount != null && (
+                              <span className={styles.metaBadge}>子代理 {detail.data.frontmatter.subagentCount}</span>
+                            )}
+                          </div>
+                          {detail.data.frontmatter.tags?.length > 0 && (
+                            <div className={styles.tags}>
+                              {detail.data.frontmatter.tags.map((t) => (
+                                <span key={t} className={styles.tag}>#{t}</span>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                      <div
+                        className={styles.markdown}
+                        dangerouslySetInnerHTML={{ __html: renderMarkdown(bodyMd) }}
+                      />
+                      <div className={styles.actions}>
+                        <button className={styles.btn} onClick={() => copyMarkdown(bodyMd)}>
+                          {isScoped ? '复制该条目' : '复制 Markdown'}
+                        </button>
+                        <button className={styles.btn} onClick={() => saveMarkdown(bodyMd, detail.data.tweetId)}>
+                          {isScoped ? '下载该条目' : '下载 .md'}
+                        </button>
+                        <button
+                          className={`${styles.btn} ${selected?.favorite ? styles.btnFavActive : ''}`}
+                          onClick={() => toggleFavorite(selected)}
+                        >
+                          {selected?.favorite ? '⭐ 已收藏' : '☆ 收藏'}
+                        </button>
+                        {exportMsg && <span className={styles.exportMsg}>{exportMsg}</span>}
+                      </div>
+                    </article>
+                  );
+                })()}
       </main>
     </div>
   );

@@ -182,6 +182,15 @@
   color: #e7c44c;
 }
 
+.note {
+  font-size: 12px;
+  color: var(--muted-foreground, #9aa3b2);
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  background: rgba(76, 141, 255, 0.08);
+  border-radius: 4px;
+}
+
 /* FTS5 命中高亮 */
 .hitMark {
   background: rgba(231, 168, 76, 0.35);
