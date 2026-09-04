@@ -12,7 +12,7 @@
 // manager absolutizes them once (withDataDir) so indexer/watcher never
 // re-derive.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Entry, Report, ReportHit, VaultManifest } from "@ma-browser/vault";
@@ -135,10 +135,10 @@ export class VaultManager {
     return { ok: true, row };
   }
 
-  private find(name: string): { manifest: VaultManifest; indexer: VaultIndexer } | null {
+  private find(name: string): { manifest: VaultManifest; indexer: VaultIndexer; manifestPath: string } | null {
     for (const v of this.vaults.values()) {
       if (v.indexer && v.manifest && v.manifest.name === name) {
-        return { manifest: v.manifest, indexer: v.indexer };
+        return { manifest: v.manifest, indexer: v.indexer, manifestPath: v.loaded.manifestPath };
       }
     }
     return null;
@@ -146,7 +146,11 @@ export class VaultManager {
 
   recent(vaultName: string, sinceIso: string | null, beforeIso: string | null, limit: number, hasReport = false): Entry[] {
       const v = this.find(vaultName);
-      return v ? v.indexer.recent(sinceIso, beforeIso, limit, hasReport) : [];
+      if (!v) return [];
+      const favs = this.readFavorites(v.manifestPath);
+      return v.indexer.recent(sinceIso, beforeIso, limit, hasReport).map((e) =>
+        favs.has(e.tweetId) ? { ...e, favorite: true } : e,
+      );
     }
 
   search(vaultName: string | null, query: string, limit: number): ReportHit[] {
@@ -167,7 +171,10 @@ export class VaultManager {
 
   getEntry(vaultName: string, tweetId: string): Entry | null {
     const v = this.find(vaultName);
-    return v ? v.indexer.getEntry(tweetId) : null;
+    if (!v) return null;
+    const e = v.indexer.getEntry(tweetId);
+    if (!e) return null;
+    return this.readFavorites(v.manifestPath).has(tweetId) ? { ...e, favorite: true } : e;
   }
 
   /** Resolve vault by name; throws nothing, returns null when unknown. */
@@ -205,6 +212,68 @@ export class VaultManager {
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, `${token}\n`, { mode: 0o600 });
     return token;
+  }
+
+  // -------------------------------------------------------------------------
+  // Favorites (sidecar _favorites.json at the vault source root)
+  // -------------------------------------------------------------------------
+
+  /** Absolute path of a vault's favorites sidecar file (vault source root). */
+  private favoritesPath(manifestPath: string): string {
+    return join(dirname(manifestPath), "_favorites.json");
+  }
+
+  /** Read favorites as a Set of tweetIds. Missing/corrupt file → empty. */
+  private readFavorites(manifestPath: string): Set<string> {
+    const p = this.favoritesPath(manifestPath);
+    if (!existsSync(p)) return new Set();
+    try {
+      const parsed = JSON.parse(readFileSync(p, "utf-8")) as { tweetIds?: unknown };
+      if (Array.isArray(parsed.tweetIds)) {
+        return new Set(parsed.tweetIds.filter((x): x is string => typeof x === "string"));
+      }
+    } catch {
+      // corrupt sidecar — treat as empty (next toggle rewrites it)
+    }
+    return new Set();
+  }
+
+  /** Persist favorites atomically (tmp + rename). */
+  private writeFavorites(manifestPath: string, ids: Set<string>): void {
+    const p = this.favoritesPath(manifestPath);
+    mkdirSync(dirname(p), { recursive: true });
+    const tmp = `${p}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ version: 1, tweetIds: [...ids] }, null, 2) + "\n", "utf-8");
+    renameSync(tmp, p);
+  }
+
+  /**
+   * Toggle a tweet's favorite status. Returns the new state (true = now
+   * favorited). Returns null when the vault or tweet is unknown.
+   */
+  toggleFavorite(name: string, tweetId: string): boolean | null {
+    const v = this.find(name);
+    if (!v) return null;
+    if (!v.indexer.getEntry(tweetId)) return null;
+    const ids = this.readFavorites(v.manifestPath);
+    let next: boolean;
+    if (ids.has(tweetId)) { ids.delete(tweetId); next = false; }
+    else { ids.add(tweetId); next = true; }
+    this.writeFavorites(v.manifestPath, ids);
+    return next;
+  }
+
+  /** List favorited entries (new→old), skipping tweets that no longer exist. */
+  listFavorites(name: string): Entry[] {
+    const v = this.find(name);
+    if (!v) return [];
+    const ids = this.readFavorites(v.manifestPath);
+    const out: Entry[] = [];
+    for (const id of ids) {
+      const e = v.indexer.getEntry(id);
+      if (e) out.push({ ...e, favorite: true });
+    }
+    return out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   }
 
   shutdown(): void {
