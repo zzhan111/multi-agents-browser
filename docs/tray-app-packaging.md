@@ -58,6 +58,9 @@ directly-usable `mcpServers` block (absolute `node.exe` + `mcp.js` paths,
 `MA_BROWSER_CONNECT_ONLY=1`). The tray also offers a "复制 MCP 配置" menu
 item as a human manual-copy fallback. See spec §9.
 
+The generated config metadata carries the same version as the root
+`package.json`, Cargo/Tauri metadata, and portable zip name.
+
 ## Upgrade the bundled Node
 
 Edit `NODE_VERSION` at the top of `packages/tray-app/scripts/package-win.mjs`,
@@ -65,12 +68,14 @@ delete `packages/tray-app/.cache/`, and rerun `pnpm package:win`.
 
 ## Release a new version
 
-1. Bump `version` in the repo-root `package.json`
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`
-3. `pnpm package:win` → produces the zip
-4. Create a Release on GitHub (zzhan111/multi-agents-browser), tag = `vX.Y.Z`
-5. Upload the zip to the Release assets
-6. Users' trays detect the new version on next startup (GitHub Releases API)
+1. Bump `version` in the repo-root `package.json`; update all workspace package
+   manifests in the same change.
+2. Run `pnpm package:win`; its Phase 0 syncs Cargo/Tauri and the resulting zip
+   uses `ma-browser-tray-portable-vX.Y.Z.zip`.
+3. Create a Release on GitHub (zzhan111/multi-agents-browser), using the
+   repository's `ma-browser-vX.Y.Z` tag convention.
+4. Upload the zip to the Release assets
+5. Users' trays detect the new version on next startup (GitHub Releases API)
 
 ## Verify
 

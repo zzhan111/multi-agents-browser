@@ -72,12 +72,20 @@ ClawHub Skill: [ma-browser-openclaw](https://clawhub.ai/yan5xu/ma-browser)
 
 ### MCP 接入（Claude Code / Cursor）
 
+v0.12.x 托盘版优先使用压缩包内生成的 `mcp-config.json`。它与下面的配置
+一样固定 `MA_BROWSER_CONNECT_ONLY=1`，MCP 只连接托盘管理的 daemon，不会再
+启动第二个 daemon。
+
 ```json
 {
   "mcpServers": {
     "ma-browser": {
       "command": "npx",
-      "args": ["-y", "ma-browser", "--mcp"]
+      "args": ["-y", "ma-browser", "--mcp"],
+      "env": {
+        "MA_BROWSER_CONNECT_ONLY": "1",
+        "BB_SESSION_SCOPE": "no-eval"
+      }
     }
   }
 }

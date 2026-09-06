@@ -44,7 +44,8 @@ const NODE_VERSION = 'v24.13.0'; // pinned LTS; bump here to upgrade bundled Nod
 // mcp-config.json template. <APP_DIR> is filled at first tray run with the
 // actual extraction root (current_exe().parent()). Backslashes are doubled
 // because this is JSON; the tray's fill_placeholders escapes them too.
-const MCP_CONFIG_TEMPLATE = `{
+function mcpConfigTemplate(version) {
+  return `{
   "mcpServers": {
     "ma-browser": {
       "command": "<APP_DIR>\\\\node\\\\node.exe",
@@ -53,6 +54,7 @@ const MCP_CONFIG_TEMPLATE = `{
     }
   },
   "_meta": {
+    "version": "${version}",
     "description": "ma-browser MCP server (connect-only; connects to the tray-owned daemon via ~/.bb-browser/daemon.json)",
     "app_dir_placeholder": "<APP_DIR>",
     "requires_daemon_running": true,
@@ -60,6 +62,7 @@ const MCP_CONFIG_TEMPLATE = `{
   }
 }
 `;
+}
 
 // --- helpers ----------------------------------------------------------------
 
@@ -169,7 +172,7 @@ async function stageResources(resDir) {
   // MCP server bundle
   copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(resDir, 'mcp', 'mcp.js'));
   // mcp-config.json template (with <APP_DIR> placeholder; tray fills it at first run)
-  writeFileSync(join(resDir, 'mcp-config.json'), MCP_CONFIG_TEMPLATE);
+  writeFileSync(join(resDir, 'mcp-config.json'), mcpConfigTemplate(readJson(join(REPO_ROOT, 'package.json')).version));
 }
 
 async function build() {
@@ -221,7 +224,7 @@ async function assembleStaging(staging) {
   await ensureDaemonRuntimeDeps(join(staging, 'daemon'));
   mkdirSync(join(staging, 'mcp'), { recursive: true });
   copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(staging, 'mcp', 'mcp.js'));
-  writeFileSync(join(staging, 'mcp-config.json'), MCP_CONFIG_TEMPLATE);
+  writeFileSync(join(staging, 'mcp-config.json'), mcpConfigTemplate(readJson(join(REPO_ROOT, 'package.json')).version));
   mkdirSync(join(staging, 'node'), { recursive: true });
   ensureNodeExe(join(staging, 'node', 'node.exe'));
   copyDir(join(TRAY_DIR, 'icons'), join(staging, 'icons'));

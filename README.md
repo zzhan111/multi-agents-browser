@@ -72,6 +72,10 @@ Skill on ClawHub: [ma-browser-openclaw](https://clawhub.ai/yan5xu/ma-browser)
 
 ### MCP (Claude Code / Cursor)
 
+For the v0.12.x tray release, use the generated `mcp-config.json` when it is
+available. It contains the same connect-only setting shown below, so the MCP
+process connects to the tray-owned daemon instead of starting a second one.
+
 ```json
 {
   "mcpServers": {

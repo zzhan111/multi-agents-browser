@@ -881,7 +881,7 @@ export async function dispatchRequest(
     return handleSiteRun(cdp, request, session);
   }
   if (request.action === "site_update") {
-    const result = updateAdapters();
+    const result = await updateAdapters();
     if ("error" in result) return fail(request.id, `${result.error} — manual fix: ${result.action}`);
     return ok(request.id, result as unknown as ExtResponseData);
   }
