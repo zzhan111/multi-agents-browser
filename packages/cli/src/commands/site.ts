@@ -17,20 +17,21 @@ import { generateId, type Request, type Response, type TabInfo } from "@ma-brows
 import { handleJqResponse, sendCommand } from "../client.js";
 import { getHistoryDomains } from "../history-sqlite.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
-import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { homedir } from "node:os";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 const BB_DIR = process.env.BB_BROWSER_HOME || join(homedir(), ".bb-browser");
 const LOCAL_SITES_DIR = join(BB_DIR, "sites");
 const COMMUNITY_SITES_DIR = join(BB_DIR, "bb-sites");
 const COMMUNITY_REPO = "https://github.com/zzhan111/bb-sites.git";
+const COMMUNITY_PIN_FILE = join(BB_DIR, "community-adapters-pin.json");
 
 function checkCliUpdate(): void {
   try {
-    const current = execSync("ma-browser --version", { timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
-    const latest = execSync("npm view ma-browser version", { timeout: 5000, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+    const current = execFileSync("ma-browser", ["--version"], { timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+    const latest = execFileSync("npm", ["view", "ma-browser", "version"], { timeout: 5000, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
     if (latest && current && latest !== current && latest.localeCompare(current, undefined, { numeric: true }) > 0) {
       console.log(`\n📦 ma-browser ${latest} available (current: ${current}). Run: npm install -g ma-browser`);
     }
@@ -304,7 +305,7 @@ function siteUpdate(options: SiteOptions = {}): void {
       console.log("更新社区 site adapter 库...");
     }
     try {
-      execSync("git pull --ff-only", { cwd: COMMUNITY_SITES_DIR, stdio: "pipe" });
+      execFileSync("git", ["pull", "--ff-only"], { cwd: COMMUNITY_SITES_DIR, stdio: "pipe" });
       if (!options.json) {
         console.log("更新完成。");
         console.log("");
@@ -325,7 +326,7 @@ function siteUpdate(options: SiteOptions = {}): void {
       console.log(`克隆社区 adapter 库: ${COMMUNITY_REPO}`);
     }
     try {
-      execSync(`git clone ${COMMUNITY_REPO} ${COMMUNITY_SITES_DIR}`, { stdio: "pipe" });
+      execFileSync("git", ["clone", COMMUNITY_REPO, COMMUNITY_SITES_DIR], { stdio: "pipe" });
       if (!options.json) {
         console.log("克隆完成。");
         console.log("");
@@ -343,6 +344,26 @@ function siteUpdate(options: SiteOptions = {}): void {
     }
   }
 
+  let commit: string;
+  try {
+    commit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: COMMUNITY_SITES_DIR,
+      stdio: "pipe",
+    }).toString().trim();
+    writeFileSync(
+      COMMUNITY_PIN_FILE,
+      JSON.stringify({ repository: COMMUNITY_REPO, commit, updatedAt: new Date().toISOString() }, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (options.json) {
+      exitJsonError(`无法记录社区 adapter commit: ${message}`, { action: "ma-browser site update" });
+    }
+    console.error(`无法记录社区 adapter commit: ${message}`);
+    process.exit(1);
+  }
+
   const sites = scanSites(COMMUNITY_SITES_DIR, "community");
   if (options.json) {
     console.log(JSON.stringify({
@@ -350,6 +371,7 @@ function siteUpdate(options: SiteOptions = {}): void {
       updateMode,
       communityRepo: COMMUNITY_REPO,
       communityDir: COMMUNITY_SITES_DIR,
+      commit,
       siteCount: sites.length,
     }, null, 2));
     return;

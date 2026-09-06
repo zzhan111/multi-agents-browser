@@ -169,10 +169,84 @@ describe("daemon lifecycle (no Chrome needed)", () => {
 
     assert.equal(typeof info.pid, "number");
     assert.equal(typeof info.host, "string");
+    assert.equal(info.bindHost, "127.0.0.1");
     assert.equal(info.port, daemonPort);
     assert.equal(typeof info.token, "string");
     assert.ok((info.token as string).length > 0);
     assert.ok(info.pid as number > 0, "daemon PID should be positive");
+  });
+
+  it("GET /ping is unauthenticated and never returns a token", async () => {
+    const { daemonPort, cdpPort } = nextPorts();
+    await cleanupDaemonJson();
+    fakeCdp = await startFakeCdp(cdpPort);
+    daemon = spawnDaemon(daemonPort, cdpPort);
+
+    const info = await waitForDaemonJson();
+    const res = await fetch(`http://${info.host as string}:${info.port as number}/ping`);
+    const body = await res.json();
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(body, { pong: true });
+    assert.equal(Object.prototype.hasOwnProperty.call(body, "token"), false);
+    assert.equal(JSON.stringify(body).includes(info.token as string), false);
+  });
+
+  it("rejects write commands without X-BB-Session", async () => {
+    const { daemonPort, cdpPort } = nextPorts();
+    await cleanupDaemonJson();
+    fakeCdp = await startFakeCdp(cdpPort);
+    daemon = spawnDaemon(daemonPort, cdpPort);
+
+    const info = await waitForDaemonJson();
+    const res = await fetch(`http://${info.host as string}:${info.port as number}/command`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${info.token as string}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ id: "missing-session", action: "tab_new" }),
+    });
+    const body = await res.json() as Record<string, unknown>;
+
+    assert.equal(res.status, 400);
+    assert.match(body.error as string, /X-BB-Session/);
+  });
+
+  it("does not let an unauthenticated CORS preflight bypass auth", async () => {
+    const { daemonPort, cdpPort } = nextPorts();
+    await cleanupDaemonJson();
+    fakeCdp = await startFakeCdp(cdpPort);
+    daemon = spawnDaemon(daemonPort, cdpPort);
+
+    const info = await waitForDaemonJson();
+    const res = await fetch(`http://${info.host as string}:${info.port as number}/command`, {
+      method: "OPTIONS",
+      headers: { Origin: "http://localhost:5173" },
+    });
+
+    assert.equal(res.status, 401);
+  });
+
+  it("returns 413 for an oversized POST body", async () => {
+    const { daemonPort, cdpPort } = nextPorts();
+    await cleanupDaemonJson();
+    fakeCdp = await startFakeCdp(cdpPort);
+    daemon = spawnDaemon(daemonPort, cdpPort);
+
+    const info = await waitForDaemonJson();
+    const body = Buffer.alloc(8 * 1024 * 1024 + 1, 97);
+    const res = await fetch(`http://${info.host as string}:${info.port as number}/command`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${info.token as string}`,
+        "Content-Type": "application/json",
+        "Content-Length": String(body.length),
+      },
+      body,
+    });
+
+    assert.equal(res.status, 413);
   });
 
   it("GET /status returns running: true", async () => {

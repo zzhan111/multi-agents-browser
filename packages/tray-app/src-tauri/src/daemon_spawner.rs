@@ -1,7 +1,7 @@
 //! Spawn and supervise the ma-browser daemon as a Node subprocess.
 //!
 //! The daemon writes a single READY line to stdout in the form
-//! `BB_DAEMON_READY {"daemonPort":N,"cdpPort":M,"token":"..."}` after it
+//! `BB_DAEMON_READY {"daemonPort":N,"cdpPort":M}` after it
 //! has finished port discovery and is accepting requests. We parse that
 //! line to learn its concrete configuration.
 //!
@@ -32,7 +32,6 @@ pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct ReadyInfo {
     pub daemon_port: u16,
     pub cdp_port: u16,
-    pub token: String,
 }
 
 /// Configuration for spawning the daemon.
@@ -211,11 +210,10 @@ mod tests {
 
     #[test]
     fn ready_info_parses_camel_case_json() {
-        let json = r#"{"daemonPort":19824,"cdpPort":19825,"token":"abc"}"#;
+        let json = r#"{"daemonPort":19824,"cdpPort":19825}"#;
         let info: ReadyInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.daemon_port, 19824);
         assert_eq!(info.cdp_port, 19825);
-        assert_eq!(info.token, "abc");
     }
 
     #[test]

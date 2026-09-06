@@ -49,7 +49,7 @@ const MCP_CONFIG_TEMPLATE = `{
     "ma-browser": {
       "command": "<APP_DIR>\\\\node\\\\node.exe",
       "args": ["<APP_DIR>\\\\mcp\\\\mcp.js"],
-      "env": { "MA_BROWSER_CONNECT_ONLY": "1" }
+      "env": { "MA_BROWSER_CONNECT_ONLY": "1", "BB_SESSION_SCOPE": "no-eval" }
     }
   },
   "_meta": {

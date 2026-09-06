@@ -337,13 +337,10 @@ fn build_spawn_config(app: &AppHandle) -> Result<SpawnConfig, String> {
         program: node_program,
         args: vec![
             entry_str,
-            // Bind the wildcard address so agents inside WSL2 can reach the
-            // daemon via the Windows host IP (WSL2's loopback is a separate
-            // network namespace and can't dial Windows' 127.0.0.1). The daemon
-            // still advertises loopback in daemon.json, and Bearer-token auth
-            // gates the now-LAN-reachable port.
+            // Loopback is the safe default. Cross-namespace/LAN access is an
+            // explicit opt-in via BB_DAEMON_BIND_HOST.
             "--host".into(),
-            "0.0.0.0".into(),
+            std::env::var("BB_DAEMON_BIND_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             "--port".into(),
             daemon.to_string(),
             "--cdp-port".into(),
@@ -497,10 +494,17 @@ fn run_watcher(
 ) {
     // Phase 1: wait for the daemon to emit BB_DAEMON_READY.
     let outcome = process.wait_for_ready(ready_timeout);
-    let (poll_port, poll_token) = match outcome {
+    let (poll_host, poll_port, poll_token) = match outcome {
         SpawnOutcome::Ready(info) => {
-            let identity = (info.daemon_port, info.token.clone());
-            on_ready(&app, info);
+            let Some(config) = daemon_config_path()
+                .and_then(|path| read_config(&path).ok().flatten()) else {
+                eprintln!("[runner] READY received but daemon.json is unavailable; refusing unauthenticated polling");
+                let _ = process.kill();
+                on_early_exit(&app);
+                return;
+            };
+            let identity = (config.host.clone(), config.port, config.token.clone());
+            on_ready(&app, info, config);
             identity
         }
         SpawnOutcome::ExitedEarly { exit_code } => {
@@ -554,7 +558,7 @@ fn run_watcher(
         // Poll /status every ~1.5s (every 3rd 500ms tick). A tray-spawned daemon
         // advertises loopback, so dial 127.0.0.1.
         if ticks % 3 == 0 {
-            if let Some(status) = poll_status("127.0.0.1", poll_port, &poll_token) {
+            if let Some(status) = poll_status(&poll_host, poll_port, &poll_token) {
                 if last_connected != Some(status.cdp_connected) {
                     last_connected = Some(status.cdp_connected);
                     on_cdp_status(&app, status.cdp_connected);
@@ -598,8 +602,8 @@ fn run_adopt_watcher(
         ReadyInfo {
             daemon_port: info.port,
             cdp_port,
-            token: info.token.clone(),
         },
+        info.clone(),
     );
 
     let mut last_connected: Option<bool> = None;
@@ -835,14 +839,19 @@ fn on_cdp_status(app: &AppHandle, connected: bool) {
     });
 }
 
-fn on_ready(app: &AppHandle, info: ReadyInfo) {
+fn on_ready(app: &AppHandle, info: ReadyInfo, config: DaemonConfig) {
     let app_clone = app.clone();
     let _ = app.run_on_main_thread(move || {
-        // Update the controller's identity first, then dispatch ready.
+        // READY never carries credentials. Load the token from daemon.json,
+        // which is permission-restricted and owned by the daemon.
         {
             let state = app_clone.state::<crate::app::AppState>();
             let mut c = state.controller.lock().unwrap();
-            c.set_daemon_identity(info.daemon_port, info.cdp_port, info.token.clone());
+            c.set_daemon_identity(info.daemon_port, info.cdp_port, config.token.clone());
+            let exposed = config.bind_host.as_deref().is_some_and(|host| {
+                host != "127.0.0.1" && host != "::1" && host != "localhost"
+            });
+            c.set_network_exposed(exposed);
         }
         crate::app::dispatch_event(&app_clone, Event::DaemonReady);
     });

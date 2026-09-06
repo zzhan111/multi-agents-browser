@@ -44,7 +44,7 @@ fn ready_line_is_parsed() {
         eprintln!("skipped: node not available on PATH");
         return;
     }
-    let script = r#"console.log('BB_DAEMON_READY {"daemonPort":19824,"cdpPort":19825,"token":"abc"}'); setInterval(()=>{}, 1000);"#;
+    let script = r#"console.log('BB_DAEMON_READY {"daemonPort":19824,"cdpPort":19825}'); setInterval(()=>{}, 1000);"#;
     let cfg = cfg_with_script(script, DEFAULT_READY_TIMEOUT);
     let mut proc = DaemonProcess::spawn(&cfg).expect("spawn");
     let outcome = proc.wait_for_ready(cfg.ready_timeout);
@@ -56,7 +56,6 @@ fn ready_line_is_parsed() {
                 ReadyInfo {
                     daemon_port: 19824,
                     cdp_port: 19825,
-                    token: "abc".into(),
                 }
             );
         }

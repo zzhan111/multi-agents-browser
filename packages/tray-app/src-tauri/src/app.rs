@@ -689,6 +689,7 @@ pub fn dispatch_event(app: &AppHandle, event: Event) {
         c.set_daemon_port(None);
         c.set_cdp_port(None);
         c.set_token(None);
+        c.set_network_exposed(false);
     }
     refresh_tray(app);
 }
@@ -713,6 +714,7 @@ pub fn dispatch_toggle(app: &AppHandle) {
         c.set_daemon_port(None);
         c.set_cdp_port(None);
         c.set_token(None);
+        c.set_network_exposed(false);
     }
     refresh_tray(app);
 }

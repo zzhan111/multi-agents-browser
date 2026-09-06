@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 const CDP_PORT = Number(process.env.BB_TEST_CDP_PORT ?? 19222);
 const DAEMON_PORT = Number(process.env.BB_TEST_DAEMON_PORT ?? 19899);
 const TOKEN = "test-token-protocol-drift";
+const SESSION_ID = "protocol-drift-test";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DAEMON_ENTRY = path.resolve(__dirname, "../../dist/daemon.js");
@@ -58,6 +59,8 @@ async function sendCommand(
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${TOKEN}`,
+      "X-BB-Session": SESSION_ID,
+      "X-BB-Session-Scope": "full",
     },
     body: JSON.stringify({ id: `drift-${Date.now()}`, action, ...params }),
   });

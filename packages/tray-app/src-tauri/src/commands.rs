@@ -51,8 +51,7 @@ pub fn get_status(state: State<'_, AppState>) -> StatusPayload {
         },
         status_text: snap.status_text,
         daemon_port: c.daemon_port_value(),
-        // Phase 2.6 stubs — CDP port + token will be populated by the
-        // spawner (Phase 2.8) and CDP watcher (post-MVP1).
+        // The spawner populates the CDP port and daemon token from daemon.json.
         cdp_port: c.cdp_port_value(),
         token: c.token_value(),
         chrome_info: "Chrome 未连接".to_string(),

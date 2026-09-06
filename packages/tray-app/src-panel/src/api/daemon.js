@@ -6,7 +6,7 @@
  *   getCommands()  → GET /api/commands?limit=N
  *   getLogs()      → GET /api/logs?level=&limit=N
  *
- * 端口/Token 从 daemon 的 /ping 端点自动获取（复用 web 版逻辑）。
+ * 端口/Token 从 Tauri IPC 获取；daemon 的 /ping 端点只用于健康检查。
  */
 
 const DEFAULT_DAEMON_PORT = 19824;
@@ -47,6 +47,7 @@ export class DaemonClient {
   constructor() {
     this._connected = false;
     this._token = null;
+    this._sessionId = generateId();
     this._port = DEFAULT_DAEMON_PORT;
     this._healthTimer = null;
     this._handlers = new Map();
@@ -65,10 +66,10 @@ export class DaemonClient {
       try {
         const res = await fetch(`${this._baseUrl()}/ping`);
         if (res.ok) {
-          const data = await res.json();
-          // Prefer the token from Rust state; fall back to the one /ping
-          // echoes (so it also works in vite dev without Tauri IPC).
-          this._token = token ?? data.token ?? null;
+          await res.json();
+          // /ping is deliberately secret-free; credentials come from the
+          // tray's local daemon.json reader via get_status IPC.
+          this._token = token ?? null;
           this._connected = true;
           this._emit('connected');
           this._startHealthCheck();
@@ -104,10 +105,7 @@ export class DaemonClient {
         }
         const res = await fetch(`${this._baseUrl()}/ping`);
         if (!res.ok) throw new Error('ping failed');
-        // Always refresh token from ping response — handles daemon restarts
-        // where the old token would cause 401 on authed endpoints.
-        const data = await res.json();
-        if (data.token) this._token = data.token;
+        await res.json();
         if (!this._connected) {
           this._connected = true;
           this._emit('connected');
@@ -124,8 +122,7 @@ export class DaemonClient {
   // ── Core command ──────────────────────────────────────────
 
   async send(action, params = {}) {
-    const headers = { 'Content-Type': 'application/json' };
-    if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+    const headers = this._authHeaders({ 'Content-Type': 'application/json' });
 
     const res = await fetch(`${this._baseUrl()}/command`, {
       method: 'POST',
@@ -188,8 +185,7 @@ export class DaemonClient {
   }
 
   async releaseBinding(bbTabId) {
-    const headers = {};
-    if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+    const headers = this._authHeaders();
     const res = await fetch(
       `${this._baseUrl()}/api/bindings/${encodeURIComponent(bbTabId)}/release`,
       { method: 'POST', headers },
@@ -199,8 +195,7 @@ export class DaemonClient {
   }
 
   async renameAgent(agentId, label) {
-    const headers = { 'Content-Type': 'application/json' };
-    if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+    const headers = this._authHeaders({ 'Content-Type': 'application/json' });
     const res = await fetch(`${this._baseUrl()}/api/agents/${encodeURIComponent(agentId)}`, {
       method: 'PATCH',
       headers,
@@ -212,9 +207,18 @@ export class DaemonClient {
 
   // ── Internal helpers ──────────────────────────────────────
 
-  async _get(path, retry = true) {
-    const headers = {};
+  _authHeaders(extra = {}) {
+    const headers = {
+      ...extra,
+      'X-BB-Session': this._sessionId,
+      'X-BB-Session-Scope': 'no-eval',
+    };
     if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+    return headers;
+  }
+
+  async _get(path, retry = true) {
+    const headers = this._authHeaders();
     const res = await fetch(`${this._baseUrl()}${path}`, { headers });
     if (res.status === 401 && retry) {
       // Token may have rotated (daemon restart). Re-resolve identity once.

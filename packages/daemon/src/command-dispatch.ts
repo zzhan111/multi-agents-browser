@@ -532,9 +532,8 @@ const READ_ONLY_ALLOWED = new Set([
   "tab_list",
   "history",
   "wait",
-  // Lease management is exempt: a session must always be able to release or
-  // reclaim the tab it holds, regardless of scope.
-  "tab_release", "tab_claim",
+  // Lease management remains permitted in read-only scope below so a caller
+  // can release or reclaim its tab, but it still requires a session header.
   // Site adapter discovery is pure catalog reads (no browser side effects).
   // site_run is intentionally excluded — it runs arbitrary adapter JS.
   "site_list", "site_search", "site_info", "site_recommend",
@@ -542,6 +541,14 @@ const READ_ONLY_ALLOWED = new Set([
   // mutate (registry / _favorites.json sidecar), so they are excluded.
   "vault_list", "vault_recent", "vault_search", "vault_get_report", "vault_get_entry", "vault_list_favorites",
 ]);
+
+export function isReadOnlyAction(action: string): boolean {
+  return READ_ONLY_ALLOWED.has(action);
+}
+
+function isReadOnlyScopeAllowed(action: string): boolean {
+  return READ_ONLY_ALLOWED.has(action) || action === "tab_release" || action === "tab_claim";
+}
 
 /** Returns true if the request involves running JavaScript via Runtime.evaluate. */
 function isEvalLike(request: Request): boolean {
@@ -773,7 +780,7 @@ export async function dispatchRequest(
   const scratchpadManager = ctx?.scratchpadManager;
   // Scope enforcement — fast-fail before any CDP work.
   if (session?.scope === "read-only") {
-    if (!READ_ONLY_ALLOWED.has(request.action)) {
+    if (!isReadOnlyScopeAllowed(request.action)) {
       return fail(request.id, `Action '${request.action}' is not allowed in read-only scope`);
     }
   } else if (session?.scope === "no-eval") {
@@ -987,12 +994,13 @@ export async function dispatchRequest(
         "Page.captureScreenshot",
         { format: "png", fromSurface: true },
       );
-      const dataDir = path.join(process.env.PINIX_HOME || path.join(os.homedir(), ".pinix"), "data", "browser", "screenshots");
+      const browserHome = process.env.BB_BROWSER_HOME || path.join(os.homedir(), ".bb-browser");
+      const dataDir = path.join(browserHome, "screenshots");
       mkdirSync(dataDir, { recursive: true });
       const filename = `${Date.now()}.png`;
       writeFileSync(path.join(dataDir, filename), Buffer.from(result.data, "base64"));
       const data: Record<string, unknown> = {
-        path: `pinix://browser/screenshots/${filename}`,
+        path: path.join(dataDir, filename),
         tab: shortId,
       };
       if (request.includeBase64) {

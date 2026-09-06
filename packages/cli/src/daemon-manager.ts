@@ -3,7 +3,6 @@
  */
 
 import { spawn } from "node:child_process";
-import { unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
@@ -29,12 +28,6 @@ let daemonReady = false;
 // daemon.json helpers
 // ---------------------------------------------------------------------------
 
-async function deleteDaemonJson(): Promise<void> {
-  try {
-    await unlink(DAEMON_JSON);
-  } catch {}
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -53,7 +46,7 @@ export function getDaemonPath(): string {
  * Ensure the daemon is running and ready to accept commands.
  * - Reads ~/.bb-browser/daemon.json for pid, host, port, token
  * - Checks if pid is alive via signal 0
- * - If pid dead, deletes stale daemon.json and spawns new daemon
+ * - If daemon.json exists, never spawns a second daemon; the tray owns startup
  * - Checks health via GET /status
  * - If not running, spawns daemon process (detached) and waits for health
  */
@@ -74,32 +67,29 @@ export async function ensureDaemon(): Promise<void> {
     cachedInfo = null;
   }
 
-  // Try reading existing daemon.json and checking if daemon is alive
+  // daemon.json is the tray's ownership marker. Never remove it or spawn a
+  // second daemon around it, even when the advertised process is restarting.
+  const daemonJsonPresent = existsSync(DAEMON_JSON);
   let info = await readDaemonJson();
-  if (info) {
-    // PID liveness check — detect stale daemon.json from crashed daemon
-    if (!isProcessAlive(info.pid)) {
-      await deleteDaemonJson();
-      info = null;
-    } else {
-      try {
-        const status = await httpJson<{ running?: boolean }>("GET", "/status", info, undefined, 2000);
-        if (status.running) {
-          // Accept the daemon whether or not CDP is connected yet.
-          // cdpConnected=false is a transient state managed by the tray or
-          // the daemon's own reconnect loop — killing it here would race with
-          // the tray's supervisor and potentially create two daemon instances.
-          cachedInfo = info;
-          daemonReady = true;
-          return;
-        }
-        // Daemon HTTP is reachable but not reporting running — fall through to spawn.
-      } catch {
-        // Daemon process exists but HTTP not responding — fall through to spawn.
-      }
+  if (daemonJsonPresent) {
+    if (!info) {
+      throw new Error("ma-browser: daemon.json exists but is unreadable; start or restart the tray");
     }
+    if (!isProcessAlive(info.pid)) {
+      throw new Error("ma-browser: daemon.json belongs to a stopped daemon; start or restart the tray");
+    }
+    try {
+      const status = await httpJson<{ running?: boolean }>("GET", "/status", info, undefined, 2000);
+      if (status.running) {
+        cachedInfo = info;
+        daemonReady = true;
+        return;
+      }
+    } catch {
+      // The tray remains the sole owner while its daemon is restarting.
+    }
+    throw new Error("ma-browser: cannot reach the tray-owned daemon; wait for the tray to become ready");
   }
-
   // Discover CDP port (auto-launches Chrome if needed)
   const cdpInfo = await discoverCdpPort();
   if (!cdpInfo) {

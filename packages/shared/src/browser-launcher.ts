@@ -15,7 +15,7 @@
  * managed profile and persist across runs.
  */
 
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -95,7 +95,7 @@ export function findBrowserExecutable(): string | null {
     const candidates = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"];
     for (const candidate of candidates) {
       try {
-        const resolved = execSync(`which ${candidate}`, {
+        const resolved = execFileSync("which", [candidate], {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
         }).trim();
@@ -153,7 +153,7 @@ function killPreviousManagedBrowser(): void {
   if (pid !== null) {
     try {
       if (process.platform === "win32") {
-        execSync(`taskkill /F /PID ${pid} /T`, { stdio: "ignore" });
+        execFileSync("taskkill", ["/F", "/PID", String(pid), "/T"], { stdio: "ignore" });
       } else {
         process.kill(-pid, "SIGKILL");
       }
@@ -162,20 +162,8 @@ function killPreviousManagedBrowser(): void {
     }
   }
 
-  // Sweep any orphaned renderer/GPU children that share our managed profile
-  // path — they accumulate when the browser process crashes without cleaning up.
-  // Match by command line only (no name filter) so Chrome, Edge, Brave, etc.
-  // are all covered.
-  if (process.platform === "win32") {
-    try {
-      execSync(
-        `wmic process where "commandline like '%ma-browser%profile%'" call terminate`,
-        { stdio: "ignore" },
-      );
-    } catch {
-      // best-effort
-    }
-  }
+  // Do not sweep unrelated processes by command line. Only the recorded
+  // managed process tree is eligible for cleanup.
 }
 
 /**

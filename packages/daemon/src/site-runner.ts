@@ -8,17 +8,18 @@
  * WSL side. The actual adapter JS executes via the daemon's eval path.
  */
 
-import { readFileSync, mkdirSync, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { readFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { DAEMON_DIR } from "@ma-browser/shared";
 import { getCatalog, queryCatalog, invalidateCatalog, type SiteAdapter } from "./site-catalog.js";
 
 const COMMUNITY_REPO = "https://github.com/zzhan111/bb-sites.git";
 const COMMUNITY_SITES_DIR = path.join(DAEMON_DIR, "bb-sites");
+const COMMUNITY_PIN_FILE = path.join(DAEMON_DIR, "community-adapters-pin.json");
 
 export type UpdateResult =
-  | { updateMode: "pull" | "clone"; siteCount: number }
+  | { updateMode: "pull" | "clone"; siteCount: number; commit: string }
   | { error: string; action: string };
 
 /**
@@ -34,9 +35,9 @@ export function updateAdapters(): UpdateResult {
   const updateMode = existsSync(path.join(COMMUNITY_SITES_DIR, ".git")) ? "pull" : "clone";
   try {
     if (updateMode === "pull") {
-      execSync("git pull --ff-only", { cwd: COMMUNITY_SITES_DIR, stdio: "pipe" });
+      execFileSync("git", ["pull", "--ff-only"], { cwd: COMMUNITY_SITES_DIR, stdio: "pipe" });
     } else {
-      execSync(`git clone ${COMMUNITY_REPO} ${COMMUNITY_SITES_DIR}`, { stdio: "pipe" });
+      execFileSync("git", ["clone", COMMUNITY_REPO, COMMUNITY_SITES_DIR], { stdio: "pipe" });
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -46,9 +47,25 @@ export function updateAdapters(): UpdateResult {
     return { error: `site_update failed: ${msg}`, action };
   }
 
+  let commit: string;
+  try {
+    commit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: COMMUNITY_SITES_DIR,
+      stdio: "pipe",
+    }).toString().trim();
+    writeFileSync(
+      COMMUNITY_PIN_FILE,
+      JSON.stringify({ repository: COMMUNITY_REPO, commit, updatedAt: new Date().toISOString() }, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { error: `site_update pin failed: ${msg}`, action: `git -C ${COMMUNITY_SITES_DIR} rev-parse HEAD` };
+  }
+
   invalidateCatalog();
   const siteCount = getCatalog(DAEMON_DIR).adapters.length;
-  return { updateMode, siteCount };
+  return { updateMode, siteCount, commit };
 }
 
 /** All adapters in the catalog (local overrides community). */

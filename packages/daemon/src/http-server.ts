@@ -27,7 +27,7 @@ import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
 import type { JournalManager } from "./agent-journal.js";
 import type { ScratchpadManager } from "./scratchpad-manager.js";
-import { dispatchRequest, type DispatchContext } from "./command-dispatch.js";
+import { dispatchRequest, isReadOnlyAction, type DispatchContext } from "./command-dispatch.js";
 import { getVaultManager } from "./vault/manager.js";
 import { buildAtomFeed, type FeedEntry } from "./vault/rss.js";
 
@@ -37,6 +37,25 @@ function envInt(name: string, fallback: number): number {
   if (raw === undefined) return fallback;
   const n = parseInt(raw, 10);
   return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/** Maximum accepted request body. Keep command and panel writes bounded. */
+export const MAX_BODY_BYTES = 8 * 1024 * 1024;
+
+/** Return the exact configured CORS origin, or null when CORS is disabled. */
+export function allowCorsOrigin(req: IncomingMessage): string | null {
+  const origin = req.headers.origin;
+  if (typeof origin !== "string" || !origin) return null;
+  const allowed = (process.env.BB_CORS_ORIGINS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return allowed.includes(origin) ? origin : null;
+}
+
+function headerString(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 /** Parse `Basic <base64(user:pass)>`. Returns null when absent/malformed. */
@@ -168,12 +187,24 @@ export class HttpServer {
   // ---------------------------------------------------------------------------
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
-    // CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-BB-Session, X-BB-Session-Label, X-BB-Session-Scope");
+    // CORS: default off. Optional allow-list via BB_CORS_ORIGINS (comma-separated).
+    // OPTIONS must not bypass auth when CORS is disabled.
+    const corsOrigin = allowCorsOrigin(req);
+    if (corsOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-BB-Session, X-BB-Session-Label, X-BB-Session-Scope");
+      res.setHeader("Vary", "Origin");
+    }
 
     if (req.method === "OPTIONS") {
+      // Preflight is not an authentication bypass. A caller must still
+      // present the daemon bearer token before receiving route metadata.
+      if (!this.checkAuth(req, res)) return;
+      if (!corsOrigin) {
+        this.sendJson(res, 403, { error: "CORS disabled" });
+        return;
+      }
       res.writeHead(204);
       res.end();
       return;
@@ -181,15 +212,8 @@ export class HttpServer {
 
     const url = req.url ?? "/";
 
-    // /ping 不需要认证（前端连接检测用）。
-    // 只对 loopback 调用方回显 token：daemon 现在绑定 0.0.0.0 以便 WSL 访问，
-    // 若对 LAN 回显 token 等于把浏览器控制权拱手让人。本机（控制面板 vite-dev
-    // 回退路径）仍能拿到 token；WSL / 远程 client 从 daemon.json 取 token。
     if (req.method === "GET" && url === "/ping") {
-      this.sendJson(res, 200, {
-        pong: true,
-        token: isLoopback(req) ? this.token : null,
-      });
+      this.sendJson(res, 200, { pong: true });
       return;
     }
 
@@ -225,7 +249,7 @@ export class HttpServer {
     } else if (req.method === "GET" && url.startsWith("/api/agents")) {
       this.handleAgents(res);
     } else if (req.method === "POST" && /^\/api\/bindings\/[^/]+\/release$/.test(url)) {
-      this.handleBindingRelease(url, res);
+      this.handleBindingRelease(url, req, res);
     } else if (req.method === "GET" && url.startsWith("/api/bindings")) {
       this.handleBindings(url, res);
     } else {
@@ -292,14 +316,24 @@ export class HttpServer {
   // ---------------------------------------------------------------------------
   private async handleCommand(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
-      const body = await this.readBody(req);
+      const body = await this.readBodyOr413(req, res);
+      if (body === null) return;
       const request = JSON.parse(body) as Request;
+      const requestedSessionId = headerString(req, "x-bb-session");
+      if (request.action !== "resume" && !requestedSessionId && !isReadOnlyAction(request.action)) {
+        this.sendJson(res, 400, {
+          id: request.id,
+          success: false,
+          error: "X-BB-Session header is required for write operations",
+        });
+        return;
+      }
 
       // resume is pure-state — no CDP needed; handle before the CDP wait
       if (request.action === "resume") {
-        const sessionId = (req.headers["x-bb-session"] as string | undefined) ?? "default";
-        const sessionLabel = req.headers["x-bb-session-label"] as string | undefined;
-        const explicitAgentId = req.headers["x-bb-agent"] as string | undefined;
+        const sessionId = headerString(req, "x-bb-session") ?? "anonymous";
+        const sessionLabel = headerString(req, "x-bb-session-label");
+        const explicitAgentId = headerString(req, "x-bb-agent");
         const agentRec = this.agentRegistry?.resolveOrCreate({ sessionId, explicitAgentId, label: sessionLabel });
         const session = this.sessions.getOrCreate(sessionId, sessionLabel, undefined, agentRec?.agentId);
         // agentId is always set (case 3 falls back to sessionId); anonymous agents
@@ -337,12 +371,14 @@ export class HttpServer {
       }
 
       // Resolve the calling agent's session (isolates per-session "current tab").
-      const sessionId = (req.headers["x-bb-session"] as string | undefined) ?? "default";
-      const sessionLabel = req.headers["x-bb-session-label"] as string | undefined;
-      const explicitAgentId = req.headers["x-bb-agent"] as string | undefined;
-      const rawScope = req.headers["x-bb-session-scope"] as string | undefined;
+      // Browser-affecting commands must be attributable to a stable caller.
+      // Pure observation commands may use an isolated anonymous session.
+      const sessionId = requestedSessionId ?? "anonymous";
+      const sessionLabel = headerString(req, "x-bb-session-label");
+      const explicitAgentId = headerString(req, "x-bb-agent");
+      const rawScope = headerString(req, "x-bb-session-scope");
       const sessionScope = (
-        rawScope === "read-only" || rawScope === "no-eval" ? rawScope : undefined
+        rawScope === "read-only" || rawScope === "no-eval" || rawScope === "full" ? rawScope : undefined
       ) as SessionScope | undefined;
       const agentRec = this.agentRegistry?.resolveOrCreate({
         sessionId,
@@ -494,10 +530,16 @@ export class HttpServer {
   // ---------------------------------------------------------------------------
 
   private async handleAgentPatch(url: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!headerString(req, "x-bb-session")) {
+      this.sendJson(res, 400, { error: "X-BB-Session header is required for write operations" });
+      return;
+    }
     const agentId = url.split("/")[3] ?? "";
     let body: Record<string, unknown>;
     try {
-      body = JSON.parse(await this.readBody(req)) as Record<string, unknown>;
+      const rawBody = await this.readBodyOr413(req, res);
+      if (rawBody === null) return;
+      body = JSON.parse(rawBody) as Record<string, unknown>;
     } catch {
       this.sendJson(res, 400, { error: "Invalid JSON" });
       return;
@@ -552,7 +594,11 @@ export class HttpServer {
   // POST /api/bindings/:bbTabId/release  — operator force-release
   // ---------------------------------------------------------------------------
 
-  private handleBindingRelease(url: string, res: ServerResponse): void {
+  private handleBindingRelease(url: string, req: IncomingMessage, res: ServerResponse): void {
+    if (!headerString(req, "x-bb-session")) {
+      this.sendJson(res, 400, { error: "X-BB-Session header is required for write operations" });
+      return;
+    }
     // URL: /api/bindings/<bbTabId>/release
     const bbTabId = url.split("/")[3] ?? "";
     if (!bbTabId) {
@@ -593,12 +639,62 @@ export class HttpServer {
   // Utility
   // ---------------------------------------------------------------------------
 
-  private readBody(req: IncomingMessage): Promise<string> {
+  private async readBodyOr413(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+    try {
+      return await this.readBody(req);
+    } catch (err) {
+      const status = (err as { statusCode?: number })?.statusCode;
+      if (status === 413) {
+        this.sendJson(res, 413, { error: "Request body too large", limit: MAX_BODY_BYTES });
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  private readBody(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<string> {
     return new Promise((resolve, reject) => {
       const chunks: Buffer[] = [];
-      req.on("data", (chunk: Buffer) => chunks.push(chunk));
-      req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-      req.on("error", reject);
+      let total = 0;
+      let settled = false;
+      const contentLength = Number(req.headers["content-length"]);
+      const tooLarge = () => Object.assign(new Error("Request body too large"), { statusCode: 413 });
+      const cleanup = () => {
+        req.removeListener("data", onData);
+        req.removeListener("end", onEnd);
+        req.removeListener("error", onError);
+      };
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        // Drain the request so the server can send the 413 response instead
+        // of resetting the connection while unread bytes are still queued.
+        req.resume();
+        reject(err);
+      };
+      const onData = (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > limit) {
+          fail(tooLarge());
+          return;
+        }
+        chunks.push(chunk);
+      };
+      const onEnd = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(Buffer.concat(chunks).toString("utf-8"));
+      };
+      const onError = (err: Error) => fail(err);
+      if (Number.isFinite(contentLength) && contentLength > limit) {
+        fail(tooLarge());
+        return;
+      }
+      req.on("data", onData);
+      req.on("end", onEnd);
+      req.on("error", onError);
     });
   }
 
@@ -680,12 +776,7 @@ const METHOD_TO_LEVEL: Record<string, LogEntry["level"]> = {
   debug: "debug",
 };
 
-/**
- * True if the request originates from the local loopback interface. Used to
- * decide whether /ping may echo the auth token: the daemon binds 0.0.0.0 (so
- * WSL2 agents can reach it via the Windows host IP), and we must not hand the
- * token to non-local callers on the LAN.
- */
+/** True if the request originates from the local loopback interface. */
 export function isLoopback(req: IncomingMessage): boolean {
   const addr = req.socket?.remoteAddress ?? "";
   return (

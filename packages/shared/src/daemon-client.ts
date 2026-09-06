@@ -7,6 +7,7 @@
 
 import { readFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
+import { randomUUID } from "node:crypto";
 import { homedir, release } from "node:os";
 import { join } from "node:path";
 
@@ -24,9 +25,18 @@ export const DAEMON_JSON = join(DAEMON_DIR, "daemon.json");
 export interface DaemonInfo {
   pid: number;
   host: string;
+  /** Address the daemon actually binds; absent in older daemon.json files. */
+  bindHost?: string;
   port: number;
   token: string;
 }
+
+const CLIENT_SESSION_ID = process.env.BB_SESSION_ID?.trim() || randomUUID();
+const CLIENT_SESSION_LABEL = process.env.BB_SESSION_LABEL?.trim();
+const configuredScope = process.env.BB_SESSION_SCOPE?.trim();
+const CLIENT_SESSION_SCOPE = configuredScope === "read-only" || configuredScope === "full"
+  ? configuredScope
+  : "no-eval";
 
 // ---------------------------------------------------------------------------
 // daemon.json
@@ -162,6 +172,9 @@ export function httpJson<T>(
         method,
         headers: {
           Authorization: `Bearer ${info.token}`,
+          "X-BB-Session": CLIENT_SESSION_ID,
+          ...(CLIENT_SESSION_LABEL ? { "X-BB-Session-Label": CLIENT_SESSION_LABEL } : {}),
+          "X-BB-Session-Scope": CLIENT_SESSION_SCOPE,
           ...(payload
             ? {
                 "Content-Type": "application/json",

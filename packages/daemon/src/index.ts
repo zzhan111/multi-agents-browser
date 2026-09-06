@@ -10,7 +10,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { writeFileSync, renameSync, readFileSync, unlinkSync } from "node:fs";
+import { chmodSync, writeFileSync, renameSync, readFileSync, unlinkSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
@@ -40,8 +40,6 @@ import { ScratchpadManager } from "./scratchpad-manager.js";
 
 const DAEMON_DIR = process.env.BB_BROWSER_HOME || path.join(os.homedir(), ".bb-browser");
 const DAEMON_JSON = path.join(DAEMON_DIR, "daemon.json");
-/** Bare token file — simpler than daemon.json; WSL agent reads this first. */
-const TOKEN_FILE = path.join(DAEMON_DIR, "token");
 const DEFAULT_CDP_PORT = 19825;
 
 // ---------------------------------------------------------------------------
@@ -135,6 +133,7 @@ Endpoints:
 interface DaemonInfo {
   pid: number;
   host: string;
+  bindHost: string;
   port: number;
   token: string;
 }
@@ -159,12 +158,14 @@ function writeDaemonJson(info: DaemonInfo): void {
     const tmp = path.join(DAEMON_DIR, `daemon.json.${process.pid}.tmp`);
     writeFileSync(tmp, JSON.stringify(info), { mode: 0o600 });
     renameSync(tmp, DAEMON_JSON);
+    chmodSync(DAEMON_JSON, 0o600);
   } catch (err) {
     console.error("[Daemon] Failed to write daemon.json (atomic):", (err as Error)?.message ?? err);
     // Fall back to a direct write if rename isn't available (e.g. a transient
     // sharing violation on Windows). A brief non-atomic window beats no file.
     try {
       writeFileSync(DAEMON_JSON, JSON.stringify(info), { mode: 0o600 });
+      chmodSync(DAEMON_JSON, 0o600);
     } catch (err2) {
       console.error("[Daemon] Failed to write daemon.json (fallback):", (err2 as Error)?.message ?? err2);
     }
@@ -199,16 +200,6 @@ function safeRemoveStaleDaemonJson(): void {
     } catch {}
   }
   // Otherwise: another live daemon owns this file — leave it alone.
-}
-
-/** Write the bearer token to a bare file so WSL agents can discover it. */
-function writeTokenFile(token: string): void {
-  try {
-    mkdirSync(DAEMON_DIR, { recursive: true });
-    writeFileSync(TOKEN_FILE, token, { mode: 0o600 });
-  } catch (err) {
-    console.error("[Daemon] Failed to write token file:", (err as Error)?.message ?? err);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -352,10 +343,10 @@ async function main(): Promise<void> {
   writeDaemonJson({
     pid: process.pid,
     host: advertisedHost(options.host),
+    bindHost: options.host,
     port: options.port,
     token: options.token,
   });
-  writeTokenFile(options.token);
 
   // Emit a machine-readable READY line on stdout so the tray supervisor
   // (packages/tray-app/src-tauri/src/daemon_spawner.rs) can pick up the
@@ -365,18 +356,18 @@ async function main(): Promise<void> {
   // NOTE: write directly to stdout — NOT console.log — because
   // installLogInterceptor() rewrites console.log to prepend "[Daemon] ",
   // which would corrupt the READY line and break the Rust parser.
+  // S4: never emit token on READY/stdout — supervisors read daemon.json (0600).
   process.stdout.write(
     `BB_DAEMON_READY ${JSON.stringify({
       daemonPort: options.port,
       cdpPort: options.cdpPort,
-      token: options.token,
     })}\n`,
   );
 
   console.error(
     `[Daemon] HTTP server listening on http://${options.host}:${options.port}`,
   );
-  console.error(`[Daemon] Auth token: ${options.token}`);
+  console.error("[Daemon] Auth token written to daemon.json (not logged)");
 
   // ----- Phase 2: connect to CDP in the background, retrying until ready -----
   //
