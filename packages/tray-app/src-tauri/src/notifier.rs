@@ -54,6 +54,15 @@ pub fn port_fallback(app: &AppHandle, original: u16, used: u16) {
     );
 }
 
+/// Surface a CDP port fallback separately from the daemon HTTP port fallback.
+pub fn cdp_port_fallback(app: &AppHandle, original: u16, used: u16) {
+    send(
+        app,
+        "ma-browser · CDP 端口已切换",
+        &format!("Chrome 调试端口使用 {used}（{original} 被占用）"),
+    );
+}
+
 /// §6.1 scenario 2 — supervisor auto-restarted after a crash.
 pub fn auto_restart(app: &AppHandle, count: usize) {
     send(

@@ -17,7 +17,7 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ma_browser_tray::daemon_config::{
     daemon_config_path, decide_reap, kill_process, read_config, remove_config, DaemonConfig,
@@ -316,6 +316,12 @@ fn build_spawn_config(app: &AppHandle) -> Result<SpawnConfig, String> {
     let cdp = find_odd_port(&OsPortChecker, DEFAULT_CDP_PORT)
         .map_err(|e| format!("cdp port discovery failed: {e:?}"))?;
     eprintln!("[runner] using daemon={daemon}, cdp={cdp}");
+    if daemon != DEFAULT_DAEMON_PORT {
+        crate::notifier::port_fallback(app, DEFAULT_DAEMON_PORT, daemon);
+    }
+    if cdp != DEFAULT_CDP_PORT {
+        crate::notifier::cdp_port_fallback(app, DEFAULT_CDP_PORT, cdp);
+    }
 
     // Node.js cannot run a main module given a Windows extended-length
     // ("verbatim") path like `\\?\Z:\Apps\...\index.js` — it fails with
@@ -433,7 +439,15 @@ fn resources_root(app: &AppHandle) -> Option<PathBuf> {
 fn bundled_node_path(app: &AppHandle) -> Option<PathBuf> {
     let dir = resources_root(app)?;
     let candidate = dir.join("node").join("node.exe");
-    candidate.exists().then_some(candidate)
+    if !candidate.exists() {
+        return None;
+    }
+    // Tauri may return an extended-length path (`\\?\\...`) on Windows.
+    // Keep the spawn argument as a real PathBuf and normalize only that
+    // prefix; never pass the path through a shell or quote it by hand.
+    Some(PathBuf::from(strip_verbatim_prefix(
+        &candidate.to_string_lossy(),
+    )))
 }
 
 /// True if Google Chrome appears to be installed. Checks the two standard
@@ -533,7 +547,7 @@ fn run_watcher(
     // real CDP status. READY only means the HTTP server is up — the tray must
     // turn green once Chrome is actually attached, which the daemon reports as
     // `"cdpConnected":true` from GET /status.
-    let mut last_connected: Option<bool> = None;
+    let mut cdp_health = CdpHealth::default();
     let mut ticks: u32 = 0;
     let mut vault_state = VaultPollState::default();
     loop {
@@ -541,11 +555,9 @@ fn run_watcher(
         if kill_rx.try_recv().is_ok() {
             eprintln!("[runner] kill requested");
             let _ = process.kill();
-            // Treat user-requested kills as the same as a runtime crash so
-            // the supervisor enters Stopped via its UserStop path. We use
-            // DaemonExited here so the watcher contract stays simple — the
-            // controller decides what state to move into.
-            on_crash(&app);
+            // User stop/restart and supervisor replacement are intentional.
+            // Do not report them as crashes: during a manual restart the
+            // supervisor is already in Starting for the replacement process.
             return;
         }
 
@@ -559,9 +571,12 @@ fn run_watcher(
         // advertises loopback, so dial 127.0.0.1.
         if ticks % 3 == 0 {
             if let Some(status) = poll_status(&poll_host, poll_port, &poll_token) {
-                if last_connected != Some(status.cdp_connected) {
-                    last_connected = Some(status.cdp_connected);
-                    on_cdp_status(&app, status.cdp_connected);
+                let observation = cdp_health.observe(status.cdp_connected);
+                if observation.changed {
+                    on_cdp_status(&app, observation.state);
+                }
+                if observation.notify_disconnected {
+                    crate::notifier::cdp_disconnected(&app);
                 }
             }
         }
@@ -606,21 +621,23 @@ fn run_adopt_watcher(
         info.clone(),
     );
 
-    let mut last_connected: Option<bool> = None;
+    let mut cdp_health = CdpHealth::default();
     let mut misses: u32 = 0;
     loop {
         if kill_rx.try_recv().is_ok() {
             eprintln!("[runner] adopt watcher: stop requested (leaving adopted daemon running)");
-            on_crash(&app);
             return;
         }
 
         match poll_status(&info.host, info.port, &info.token) {
             Some(status) => {
                 misses = 0;
-                if last_connected != Some(status.cdp_connected) {
-                    last_connected = Some(status.cdp_connected);
-                    on_cdp_status(&app, status.cdp_connected);
+                let observation = cdp_health.observe(status.cdp_connected);
+                if observation.changed {
+                    on_cdp_status(&app, observation.state);
+                }
+                if observation.notify_disconnected {
+                    crate::notifier::cdp_disconnected(&app);
                 }
             }
             None => {
@@ -821,19 +838,68 @@ fn poll_vault_new_entries(
     }
 }
 
+const CDP_RECONNECT_WINDOW: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy)]
+struct CdpObservation {
+    state: CdpState,
+    changed: bool,
+    notify_disconnected: bool,
+}
+
+#[derive(Default)]
+struct CdpHealth {
+    disconnected_since: Option<Instant>,
+    last_state: Option<CdpState>,
+    notified_disconnected: bool,
+}
+
+impl CdpHealth {
+    fn observe(&mut self, connected: bool) -> CdpObservation {
+        self.observe_at(connected, Instant::now())
+    }
+
+    fn observe_at(&mut self, connected: bool, now: Instant) -> CdpObservation {
+        if connected {
+            self.disconnected_since = None;
+            self.notified_disconnected = false;
+        } else {
+            self.disconnected_since.get_or_insert(now);
+        }
+
+        let state = if connected {
+            CdpState::Connected
+        } else if self
+            .disconnected_since
+            .is_some_and(|since| now.duration_since(since) >= CDP_RECONNECT_WINDOW)
+        {
+            CdpState::Disconnected
+        } else {
+            CdpState::Reconnecting
+        };
+        let changed = self.last_state != Some(state);
+        let notify_disconnected = state == CdpState::Disconnected && !self.notified_disconnected;
+        if notify_disconnected {
+            self.notified_disconnected = true;
+        }
+        self.last_state = Some(state);
+        CdpObservation {
+            state,
+            changed,
+            notify_disconnected,
+        }
+    }
+}
+
 /// Push a CDP connection-status change into the controller and repaint.
-fn on_cdp_status(app: &AppHandle, connected: bool) {
-    eprintln!("[runner] cdp status poll -> connected={connected}");
+fn on_cdp_status(app: &AppHandle, state: CdpState) {
+    eprintln!("[runner] cdp status poll -> state={state:?}");
     let app_clone = app.clone();
     let _ = app.run_on_main_thread(move || {
         {
-            let state = app_clone.state::<crate::app::AppState>();
-            let mut c = state.controller.lock().unwrap();
-            c.set_cdp_state(if connected {
-                CdpState::Connected
-            } else {
-                CdpState::Reconnecting
-            });
+            let app_state = app_clone.state::<crate::app::AppState>();
+            let mut c = app_state.controller.lock().unwrap();
+            c.set_cdp_state(state);
         }
         crate::app::refresh_tray_public(&app_clone);
     });
@@ -892,7 +958,8 @@ fn now_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_verbatim_prefix;
+    use super::{strip_verbatim_prefix, CdpHealth, CdpState, CDP_RECONNECT_WINDOW};
+    use std::time::Instant;
 
     #[test]
     fn strips_plain_verbatim_prefix() {
@@ -916,5 +983,30 @@ mod tests {
             strip_verbatim_prefix(r"Z:\Apps\daemon\index.js"),
             r"Z:\Apps\daemon\index.js"
         );
+    }
+
+    #[test]
+    fn cdp_health_turns_red_after_reconnect_window_and_notifies_once() {
+        let start = Instant::now();
+        let mut health = CdpHealth::default();
+
+        let reconnecting = health.observe_at(false, start);
+        assert_eq!(reconnecting.state, CdpState::Reconnecting);
+        assert!(reconnecting.changed);
+        assert!(!reconnecting.notify_disconnected);
+
+        let disconnected = health.observe_at(false, start + CDP_RECONNECT_WINDOW);
+        assert_eq!(disconnected.state, CdpState::Disconnected);
+        assert!(disconnected.changed);
+        assert!(disconnected.notify_disconnected);
+
+        let still_disconnected = health.observe_at(false, start + CDP_RECONNECT_WINDOW * 2);
+        assert_eq!(still_disconnected.state, CdpState::Disconnected);
+        assert!(!still_disconnected.changed);
+        assert!(!still_disconnected.notify_disconnected);
+
+        let connected = health.observe_at(true, start + CDP_RECONNECT_WINDOW * 2);
+        assert_eq!(connected.state, CdpState::Connected);
+        assert!(connected.changed);
     }
 }
