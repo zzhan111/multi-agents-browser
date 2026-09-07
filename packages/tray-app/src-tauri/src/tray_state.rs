@@ -49,7 +49,19 @@ pub struct TraySnapshot {
 ///
 /// `daemon_port` is included in the tooltip when the daemon is running.
 pub fn calculate(daemon: DaemonState, cdp: CdpState, daemon_port: Option<u16>) -> TraySnapshot {
-    let (color, status_text) = match (daemon, cdp) {
+    calculate_with_exposure(daemon, cdp, daemon_port, false)
+}
+
+/// Compute tray state while marking an explicitly non-loopback bind as a
+/// warning. A reachable daemon is still healthy, but exposing it beyond the
+/// local machine deserves a persistent yellow indicator.
+pub fn calculate_with_exposure(
+    daemon: DaemonState,
+    cdp: CdpState,
+    daemon_port: Option<u16>,
+    network_exposed: bool,
+) -> TraySnapshot {
+    let (mut color, mut status_text) = match (daemon, cdp) {
         // Daemon up, CDP fully connected → green.
         (DaemonState::Running, CdpState::Connected) => (TrayColor::Green, "已连接"),
 
@@ -68,12 +80,33 @@ pub fn calculate(daemon: DaemonState, cdp: CdpState, daemon_port: Option<u16>) -
         (DaemonState::GaveUp, _) => (TrayColor::Red, "已停止重启"),
     };
 
+    if network_exposed && daemon == DaemonState::Running && cdp == CdpState::Connected {
+        color = TrayColor::Yellow;
+        status_text = "\u{7f51}\u{7edc}\u{5f00}\u{653e}";
+    }
     let tooltip = build_tooltip(status_text, daemon_port, daemon);
 
     TraySnapshot {
         color,
         tooltip,
         status_text: status_text.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod exposure_tests {
+    use super::*;
+
+    #[test]
+    fn explicitly_exposed_daemon_is_yellow() {
+        let snap = calculate_with_exposure(
+            DaemonState::Running,
+            CdpState::Connected,
+            Some(19826),
+            true,
+        );
+        assert_eq!(snap.color, TrayColor::Yellow);
+        assert_eq!(snap.status_text, "\u{7f51}\u{7edc}\u{5f00}\u{653e}");
     }
 }
 

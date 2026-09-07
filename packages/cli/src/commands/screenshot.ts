@@ -24,7 +24,8 @@ export interface ScreenshotOptions {
 function getDefaultPath(): string {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const filename = `bb-screenshot-${timestamp}.png`;
-  return path.join(os.tmpdir(), filename);
+  const browserHome = process.env.BB_BROWSER_HOME || path.join(os.homedir(), ".bb-browser");
+  return path.join(browserHome, "screenshots", filename);
 }
 
 /**
@@ -77,7 +78,6 @@ export async function screenshotCommand(
       console.log(JSON.stringify({
         success: true,
         path: filePath,
-        pinixPath: response.data.path,
       }, null, 2));
     } else {
       console.log(`截图已保存: ${filePath}`);

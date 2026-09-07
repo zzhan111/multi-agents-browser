@@ -532,16 +532,23 @@ const READ_ONLY_ALLOWED = new Set([
   "tab_list",
   "history",
   "wait",
-  // Lease management is exempt: a session must always be able to release or
-  // reclaim the tab it holds, regardless of scope.
-  "tab_release", "tab_claim",
+  // Lease management remains permitted in read-only scope below so a caller
+  // can release or reclaim its tab, but it still requires a session header.
   // Site adapter discovery is pure catalog reads (no browser side effects).
   // site_run is intentionally excluded — it runs arbitrary adapter JS.
   "site_list", "site_search", "site_info", "site_recommend",
-  // Vault reads are file/SQLite queries. vault_register mutates the registry,
-  // so it is intentionally excluded.
-  "vault_list", "vault_recent", "vault_search", "vault_get_report", "vault_get_entry",
+  // Vault reads are file/SQLite queries. vault_register and vault_favorite
+  // mutate (registry / _favorites.json sidecar), so they are excluded.
+  "vault_list", "vault_recent", "vault_search", "vault_get_report", "vault_get_entry", "vault_list_favorites",
 ]);
+
+export function isReadOnlyAction(action: string): boolean {
+  return READ_ONLY_ALLOWED.has(action);
+}
+
+function isReadOnlyScopeAllowed(action: string): boolean {
+  return READ_ONLY_ALLOWED.has(action) || action === "tab_release" || action === "tab_claim";
+}
 
 /** Returns true if the request involves running JavaScript via Runtime.evaluate. */
 function isEvalLike(request: Request): boolean {
@@ -650,6 +657,22 @@ async function handleVaultRequest(request: Request, cdp: CdpConnection): Promise
       const token = mgr.rotateRssToken(request.vaultName);
       return ok(request.id, { vaultToken: token, tab: `vault-${request.vaultName}`, seq: seq() });
     }
+    case "vault_favorite": {
+      if (!request.vaultName) return fail(request.id, "Missing 'vaultName' parameter for vault_favorite");
+      if (!request.tweetId) return fail(request.id, "Missing 'tweetId' parameter for vault_favorite");
+      const next = mgr.toggleFavorite(request.vaultName, request.tweetId);
+      if (next === null) {
+        return fail(request.id, `Unknown vault or tweet — '${request.vaultName}'/'${request.tweetId}'`);
+      }
+      return ok(request.id, { vaultFavorite: next, tab: `vault-${request.vaultName}`, seq: seq() });
+    }
+    case "vault_list_favorites": {
+      if (!request.vaultName) return fail(request.id, "Missing 'vaultName' parameter for vault_list_favorites");
+      if (!mgr.vaultNames().includes(request.vaultName)) {
+        return fail(request.id, `Unknown vault '${request.vaultName}' — run vault_list for registered names`);
+      }
+      return ok(request.id, { vaultFavorites: mgr.listFavorites(request.vaultName), tab: `vault-${request.vaultName}`, seq: seq() });
+    }
     default:
       return fail(request.id, `Unknown vault action '${request.action}'`);
   }
@@ -757,7 +780,7 @@ export async function dispatchRequest(
   const scratchpadManager = ctx?.scratchpadManager;
   // Scope enforcement — fast-fail before any CDP work.
   if (session?.scope === "read-only") {
-    if (!READ_ONLY_ALLOWED.has(request.action)) {
+    if (!isReadOnlyScopeAllowed(request.action)) {
       return fail(request.id, `Action '${request.action}' is not allowed in read-only scope`);
     }
   } else if (session?.scope === "no-eval") {
@@ -858,7 +881,7 @@ export async function dispatchRequest(
     return handleSiteRun(cdp, request, session);
   }
   if (request.action === "site_update") {
-    const result = updateAdapters();
+    const result = await updateAdapters();
     if ("error" in result) return fail(request.id, `${result.error} — manual fix: ${result.action}`);
     return ok(request.id, result as unknown as ExtResponseData);
   }
@@ -971,12 +994,13 @@ export async function dispatchRequest(
         "Page.captureScreenshot",
         { format: "png", fromSurface: true },
       );
-      const dataDir = path.join(process.env.PINIX_HOME || path.join(os.homedir(), ".pinix"), "data", "browser", "screenshots");
+      const browserHome = process.env.BB_BROWSER_HOME || path.join(os.homedir(), ".bb-browser");
+      const dataDir = path.join(browserHome, "screenshots");
       mkdirSync(dataDir, { recursive: true });
       const filename = `${Date.now()}.png`;
       writeFileSync(path.join(dataDir, filename), Buffer.from(result.data, "base64"));
       const data: Record<string, unknown> = {
-        path: `pinix://browser/screenshots/${filename}`,
+        path: path.join(dataDir, filename),
         tab: shortId,
       };
       if (request.includeBase64) {

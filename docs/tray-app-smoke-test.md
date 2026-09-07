@@ -20,9 +20,12 @@ Pre-release verification on a clean Windows 10 environment.
 4. **[Expected]** A tray icon appears and turns **green within 10 seconds**
    (bundled node starts the daemon, daemon attaches to Chrome).
 5. Right-click the tray → click "复制 MCP 配置" → the clipboard contains a
-   valid `mcpServers` JSON object with absolute paths (no `<APP_DIR>`).
+   valid `mcpServers` JSON object with absolute paths (no `<APP_DIR>`),
+   `MA_BROWSER_CONNECT_ONLY=1`, `BB_SESSION_SCOPE=no-eval`, and a non-empty
+   `BB_SESSION_ID`.
 6. Verify `mcp-config.json` in the extracted dir has `<APP_DIR>` replaced
-   with the real path (e.g. `C:\ma-browser-tray\node\node.exe`).
+   with the real path (e.g. `C:\ma-browser-tray\node\node.exe`) and has a
+   non-placeholder `BB_SESSION_ID`.
 7. Launch the MCP server manually to confirm it connects:
    ```
    set MA_BROWSER_CONNECT_ONLY=1

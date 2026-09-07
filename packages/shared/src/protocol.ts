@@ -54,7 +54,9 @@ export type ActionType =
   | "vault_search"
   | "vault_get_report"
   | "vault_get_entry"
-  | "vault_rotate_rss_token";
+  | "vault_rotate_rss_token"
+  | "vault_favorite"
+  | "vault_list_favorites";
 
 /** 请求类型 */
 export interface Request {
@@ -396,6 +398,10 @@ export interface ResponseData {
   vaultEntry?: Entry;
   /** 新的 RSS Basic Auth token（vault_rotate_rss_token 返回） */
   vaultToken?: string;
+  /** 收藏 toggle 后的新状态（vault_favorite 返回） */
+  vaultFavorite?: boolean;
+  /** 收藏条目列表（vault_list_favorites 返回） */
+  vaultFavorites?: Entry[];
   /** site_recommend：基于当前活跃 tab 的 adapter 推荐 */
   siteRecommendations?: Array<{
     /** tab 短 ID */

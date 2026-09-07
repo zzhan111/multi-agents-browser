@@ -10,8 +10,8 @@
 //   4. zip + structure verify
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
-  createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -42,24 +42,35 @@ const NODE_VERSION = 'v24.13.0'; // pinned LTS; bump here to upgrade bundled Nod
 // would fail to load the NAPI prebuild. v24.13.0 matches the dev/tested ABI.
 
 // mcp-config.json template. <APP_DIR> is filled at first tray run with the
-// actual extraction root (current_exe().parent()). Backslashes are doubled
-// because this is JSON; the tray's fill_placeholders escapes them too.
-const MCP_CONFIG_TEMPLATE = `{
+// actual extraction root (current_exe().parent()). <SESSION_ID> is replaced
+// with a per-install session on first run; the tray rotates it when copying
+// the config so separate agent clients can receive separate sessions.
+// Backslashes are doubled because this is JSON; the tray's fill_placeholders
+// escapes them too.
+function mcpConfigTemplate(version) {
+  return `{
   "mcpServers": {
     "ma-browser": {
       "command": "<APP_DIR>\\\\node\\\\node.exe",
       "args": ["<APP_DIR>\\\\mcp\\\\mcp.js"],
-      "env": { "MA_BROWSER_CONNECT_ONLY": "1" }
+      "env": {
+        "MA_BROWSER_CONNECT_ONLY": "1",
+        "BB_SESSION_ID": "<SESSION_ID>",
+        "BB_SESSION_SCOPE": "no-eval"
+      }
     }
   },
   "_meta": {
+    "version": "${version}",
     "description": "ma-browser MCP server (connect-only; connects to the tray-owned daemon via ~/.bb-browser/daemon.json)",
     "app_dir_placeholder": "<APP_DIR>",
+    "session_id_placeholder": "<SESSION_ID>",
     "requires_daemon_running": true,
     "daemon_status_hint": "Tray icon must be green (daemon running) before MCP calls will succeed"
   }
 }
 `;
+}
 
 // --- helpers ----------------------------------------------------------------
 
@@ -169,7 +180,7 @@ async function stageResources(resDir) {
   // MCP server bundle
   copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(resDir, 'mcp', 'mcp.js'));
   // mcp-config.json template (with <APP_DIR> placeholder; tray fills it at first run)
-  writeFileSync(join(resDir, 'mcp-config.json'), MCP_CONFIG_TEMPLATE);
+  writeFileSync(join(resDir, 'mcp-config.json'), mcpConfigTemplate(readJson(join(REPO_ROOT, 'package.json')).version));
 }
 
 async function build() {
@@ -221,7 +232,7 @@ async function assembleStaging(staging) {
   await ensureDaemonRuntimeDeps(join(staging, 'daemon'));
   mkdirSync(join(staging, 'mcp'), { recursive: true });
   copyFileSync(join(REPO_ROOT, 'dist', 'mcp.js'), join(staging, 'mcp', 'mcp.js'));
-  writeFileSync(join(staging, 'mcp-config.json'), MCP_CONFIG_TEMPLATE);
+  writeFileSync(join(staging, 'mcp-config.json'), mcpConfigTemplate(readJson(join(REPO_ROOT, 'package.json')).version));
   mkdirSync(join(staging, 'node'), { recursive: true });
   ensureNodeExe(join(staging, 'node', 'node.exe'));
   copyDir(join(TRAY_DIR, 'icons'), join(staging, 'icons'));
@@ -283,16 +294,21 @@ async function zipAndVerify(staging, version) {
   if (existsSync(zipPath)) rmSync(zipPath);
   // Use PowerShell Compress-Archive on Windows; tar fallback otherwise.
   if (process.platform === 'win32') {
-    const ps = `Compress-Archive -Path '${staging}' -DestinationPath '${zipPath}' -Force`;
-    spawnSync('powershell', ['-NoProfile', '-Command', ps], {
+    const psQuote = (value) => `'${value.replaceAll("'", "''")}'`;
+    const ps = `$ErrorActionPreference = 'Stop'; Compress-Archive -LiteralPath ${psQuote(staging)} -DestinationPath ${psQuote(zipPath)} -Force`;
+    const result = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], {
       stdio: 'inherit',
-      shell: true,
     });
+    if (result.status !== 0) {
+      throw new Error(`Compress-Archive exited with ${result.status}`);
+    }
   } else {
     run('tar', ['-a', '-c', '-f', zipPath, '-C', dirname(staging), 'ma-browser-tray']);
   }
+  if (!existsSync(zipPath)) throw new Error(`zip was not created: ${zipPath}`);
   // Verify structure (extract to temp and assert required files).
   verifyStructure(staging);
+  const checksumPath = writeSha256(zipPath, zipName);
   console.log(`\n✓ Built ${zipPath}`);
 
   // Convenience: also drop a copy in the user's Downloads dir so it's easy
@@ -302,11 +318,20 @@ async function zipAndVerify(staging, version) {
     if (existsSync(downloads)) {
       const dest = join(downloads, zipName);
       copyFileSync(zipPath, dest);
+      const checksumDest = join(downloads, `${zipName}.sha256`);
+      copyFileSync(checksumPath, checksumDest);
       console.log(`✓ Copied to ${dest}`);
     }
   } catch (e) {
     console.warn(`(could not copy to Downloads: ${e})`);
   }
+}
+
+function writeSha256(zipPath, zipName) {
+  const digest = createHash('sha256').update(readFileSync(zipPath)).digest('hex');
+  const checksumPath = `${zipPath}.sha256`;
+  writeFileSync(checksumPath, `${digest} *${zipName}\n`);
+  return checksumPath;
 }
 
 function verifyStructure(staging) {

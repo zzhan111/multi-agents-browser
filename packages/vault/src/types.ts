@@ -87,4 +87,6 @@ export interface Entry {
   createdAt: string;
   indexedAt: string;
   reportId: string | null;
+  /** true when the user favorited this entry (sidecar _favorites.json). */
+  favorite?: boolean;
 }

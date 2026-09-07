@@ -17,20 +17,38 @@ import { generateId, type Request, type Response, type TabInfo } from "@ma-brows
 import { handleJqResponse, sendCommand } from "../client.js";
 import { getHistoryDomains } from "../history-sqlite.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
-import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { homedir } from "node:os";
-import { execSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 
 const BB_DIR = process.env.BB_BROWSER_HOME || join(homedir(), ".bb-browser");
 const LOCAL_SITES_DIR = join(BB_DIR, "sites");
 const COMMUNITY_SITES_DIR = join(BB_DIR, "bb-sites");
 const COMMUNITY_REPO = "https://github.com/zzhan111/bb-sites.git";
+const COMMUNITY_PIN_FILE = join(BB_DIR, "community-adapters-pin.json");
+
+function runFile(command: string, args: string[], options: { cwd?: string; timeout?: number } = {}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { ...options, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        const detail = stderr.toString().trim();
+        reject(detail ? new Error(`${error.message}: ${detail}`) : error);
+        return;
+      }
+      resolve(stdout.toString().trim());
+    });
+  });
+}
+
+function runGit(args: string[], cwd = COMMUNITY_SITES_DIR): Promise<string> {
+  return runFile("git", args, { cwd, timeout: 30_000 });
+}
 
 function checkCliUpdate(): void {
   try {
-    const current = execSync("ma-browser --version", { timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
-    const latest = execSync("npm view ma-browser version", { timeout: 5000, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+    const current = execFileSync("ma-browser", ["--version"], { timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
+    const latest = execFileSync("npm", ["view", "ma-browser", "version"], { timeout: 5000, stdio: ["pipe", "pipe", "pipe"] }).toString().trim();
     if (latest && current && latest !== current && latest.localeCompare(current, undefined, { numeric: true }) > 0) {
       console.log(`\n📦 ma-browser ${latest} available (current: ${current}). Run: npm install -g ma-browser`);
     }
@@ -295,7 +313,7 @@ function siteSearch(query: string, options: SiteOptions): void {
   }
 }
 
-function siteUpdate(options: SiteOptions = {}): void {
+async function siteUpdate(options: SiteOptions = {}): Promise<void> {
   mkdirSync(BB_DIR, { recursive: true });
   const updateMode = existsSync(join(COMMUNITY_SITES_DIR, ".git")) ? "pull" : "clone";
 
@@ -304,7 +322,7 @@ function siteUpdate(options: SiteOptions = {}): void {
       console.log("更新社区 site adapter 库...");
     }
     try {
-      execSync("git pull --ff-only", { cwd: COMMUNITY_SITES_DIR, stdio: "pipe" });
+      await runGit(["pull", "--ff-only"]);
       if (!options.json) {
         console.log("更新完成。");
         console.log("");
@@ -325,7 +343,7 @@ function siteUpdate(options: SiteOptions = {}): void {
       console.log(`克隆社区 adapter 库: ${COMMUNITY_REPO}`);
     }
     try {
-      execSync(`git clone ${COMMUNITY_REPO} ${COMMUNITY_SITES_DIR}`, { stdio: "pipe" });
+      await runGit(["clone", COMMUNITY_REPO, COMMUNITY_SITES_DIR], BB_DIR);
       if (!options.json) {
         console.log("克隆完成。");
         console.log("");
@@ -343,6 +361,26 @@ function siteUpdate(options: SiteOptions = {}): void {
     }
   }
 
+  let commit: string;
+  try {
+    commit = await runGit(["rev-parse", "HEAD"]);
+    if (!/^[0-9a-f]{40,64}$/i.test(commit)) {
+      throw new Error(`git returned an invalid commit SHA: ${commit}`);
+    }
+    writeFileSync(
+      COMMUNITY_PIN_FILE,
+      JSON.stringify({ repository: COMMUNITY_REPO, commit, updatedAt: new Date().toISOString() }, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (options.json) {
+      exitJsonError(`无法记录社区 adapter commit: ${message}`, { action: "ma-browser site update" });
+    }
+    console.error(`无法记录社区 adapter commit: ${message}`);
+    process.exit(1);
+  }
+
   const sites = scanSites(COMMUNITY_SITES_DIR, "community");
   if (options.json) {
     console.log(JSON.stringify({
@@ -350,6 +388,7 @@ function siteUpdate(options: SiteOptions = {}): void {
       updateMode,
       communityRepo: COMMUNITY_REPO,
       communityDir: COMMUNITY_SITES_DIR,
+      commit,
       siteCount: sites.length,
     }, null, 2));
     return;
@@ -814,7 +853,7 @@ export async function siteCommand(
     case "recommend":
       await siteRecommend(options);
       break;
-    case "update":  siteUpdate(options); break;
+    case "update":  await siteUpdate(options); break;
     case "run":
       if (!args[1]) {
         console.error("[error] site run: <name> is required.");
@@ -865,14 +904,17 @@ async function silentUpdate(options: SiteOptions = {}): Promise<void> {
     return;
   }
 
-  import("node:child_process").then(({ spawn }) => {
-    const child = spawn("git", ["pull", "--ff-only"], {
+  execFile("git", ["pull", "--ff-only"], {
       cwd: COMMUNITY_SITES_DIR,
-      stdio: "ignore",
-      detached: true,
+      timeout: 30_000,
+      encoding: "utf8",
+    }, (error, _stdout, stderr) => {
+      if (error && !options.json) {
+        const detail = stderr.toString().trim();
+        console.error(`[ma-browser] 社区 adapter 自动更新失败：${detail || error.message}`);
+        console.error(`  修复后运行 ma-browser site update（库目录 ${COMMUNITY_SITES_DIR}）`);
+      }
     });
-    child.unref();
-  }).catch(() => {});
 }
 
 /**
@@ -881,30 +923,22 @@ async function silentUpdate(options: SiteOptions = {}): Promise<void> {
  * 异步执行，3s 超时后放弃检查（视为健康），不阻塞 CLI 主线程。
  */
 async function communityUpdateBlocker(): Promise<string | null> {
-  const run = (cmd: string): Promise<string> =>
-    import("node:child_process").then(({ execFile }) =>
-      new Promise<string>((resolve, reject) => {
-        execFile("git", cmd.replace(/^git /, "").split(" "), {
-          cwd: COMMUNITY_SITES_DIR,
-          timeout: 3000,
-        }, (err, stdout) => {
-          if (err) reject(err);
-          else resolve(stdout.toString().trim());
-        });
-      }),
-    );
+  const run = (args: string[]): Promise<string> => runFile("git", args, {
+    cwd: COMMUNITY_SITES_DIR,
+    timeout: 3000,
+  });
 
   const deadline = Date.now() + 3000;
 
   try {
     let upstream: string;
     try {
-      upstream = await run("git rev-parse --abbrev-ref --symbolic-full-name @{u}");
+      upstream = await run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
     } catch {
       return "当前分支未跟踪上游（无法 git pull）";
     }
     if (Date.now() > deadline) return null;
-    const ahead = await run("git rev-list --count @{u}..HEAD");
+    const ahead = await run(["rev-list", "--count", "@{u}..HEAD"]);
     if (ahead !== "0") {
       return `本地领先 ${upstream} ${ahead} 个提交，--ff-only 无法快进`;
     }

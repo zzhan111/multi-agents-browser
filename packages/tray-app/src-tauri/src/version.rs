@@ -67,8 +67,8 @@ mod tests {
 
     #[test]
     fn strips_leading_v() {
-        let v = Version::parse("v0.11.6").unwrap();
-        assert_eq!(v, Version { major: 0, minor: 11, patch: 6 });
+        let v = Version::parse("v0.12.0").unwrap();
+        assert_eq!(v, Version { major: 0, minor: 12, patch: 0 });
     }
 
     #[test]
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn is_newer_handles_v_prefix_on_both() {
-        assert!(is_newer("v0.12.0", "v0.11.6"));
+        assert!(is_newer("v0.13.0", "v0.12.0"));
     }
 
     #[test]

@@ -3,8 +3,8 @@
  * can work in parallel without sharing a single global currentTargetId.
  *
  * Identity is opt-in: callers pass X-BB-Session (HTTP) / env BB_SESSION_ID.
- * A missing header falls back to the "default" session so old clients are
- * unaffected.
+ * Missing or malformed scope values default to no-eval so an untrusted caller
+ * cannot gain Runtime.evaluate access by omission.
  */
 
 export type SessionScope = "full" | "read-only" | "no-eval";
@@ -18,7 +18,7 @@ export interface AgentSession {
   currentTargetId?: string;
   /**
    * Permission scope for this session.
-   *   full      — all commands (default, existing behaviour)
+   *   full      — all commands (explicit opt-in)
    *   read-only — observe-only: snapshot/get/screenshot/network/console/errors/tab_list/history/wait
    *   no-eval   — everything except eval and trace-start (which both run Runtime.evaluate)
    */
@@ -39,7 +39,7 @@ export class SessionManager {
   getOrCreate(id: string, label?: string, scope?: SessionScope, agentId?: string): AgentSession {
     let session = this.sessions.get(id);
     if (!session) {
-      session = { id, label, agentId, scope: scope ?? "full", lastSeen: Date.now() };
+      session = { id, label, agentId, scope: scope ?? "no-eval", lastSeen: Date.now() };
       this.sessions.set(id, session);
     } else {
       session.lastSeen = Date.now();

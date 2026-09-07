@@ -9,6 +9,7 @@
 //! {
 //!   "pid": 12345,
 //!   "host": "127.0.0.1",
+//!   "bindHost": "127.0.0.1",
 //!   "port": 19824,
 //!   "token": "0d50a5e3..."
 //! }
@@ -32,6 +33,9 @@ pub struct DaemonConfig {
     pub pid: Option<u32>,
     /// Connectable host the daemon advertises (loopback when it bound 0.0.0.0).
     pub host: String,
+    /// Address the daemon actually binds; absent in older daemon.json files.
+    #[serde(default, rename = "bindHost", skip_serializing_if = "Option::is_none")]
+    pub bind_host: Option<String>,
     /// Daemon HTTP port.
     pub port: u16,
     /// Bearer token for the daemon HTTP API.
@@ -43,6 +47,7 @@ impl DaemonConfig {
         Self {
             pid: None,
             host: "127.0.0.1".into(),
+            bind_host: Some("127.0.0.1".into()),
             port,
             token: token.into(),
         }
@@ -168,7 +173,7 @@ pub fn kill_process(pid: u32) -> bool {
         // Suppress the console window the tray GUI would otherwise flash.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map(|o| o.status.success())
@@ -283,6 +288,7 @@ mod tests {
         let cfg = DaemonConfig {
             pid: Some(12345),
             host: "127.0.0.1".into(),
+            bind_host: Some("127.0.0.1".into()),
             port: 19828,
             token: "xyz".into(),
         };
@@ -350,6 +356,7 @@ mod tests {
         DaemonConfig {
             pid,
             host: "127.0.0.1".into(),
+            bind_host: Some("127.0.0.1".into()),
             port: 19824,
             token: "t".into(),
         }

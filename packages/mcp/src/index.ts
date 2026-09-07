@@ -25,13 +25,14 @@ const sessionOpenedTabs = new Set<string>();
 // interfere with other concurrent agents sharing the same daemon.
 const BB_SESSION_ID = process.env.BB_SESSION_ID ?? generateId();
 const BB_SESSION_LABEL = process.env.BB_SESSION_LABEL;
-const BB_SESSION_SCOPE = process.env.BB_SESSION_SCOPE; // "read-only" | "no-eval" | unset
+const configuredSessionScope = process.env.BB_SESSION_SCOPE?.trim();
+const BB_SESSION_SCOPE = configuredSessionScope === "read-only" || configuredSessionScope === "full"
+  ? configuredSessionScope
+  : "no-eval";
 
 // Connect-only mode: never spawn a daemon, only connect to an
-// externally-managed one. Set this for MCP clients that must defer daemon
-// ownership to the Windows tray (which binds 0.0.0.0 so WSL agents can reach
-// it). Without it, ensureDaemon() auto-spawns a daemon bound to 127.0.0.1,
-// which races the tray and breaks WSL connectivity (see daemon.json/topology).
+// externally-managed one. The tray-owned daemon is the single owner on
+// Windows.
 const MA_BROWSER_CONNECT_ONLY =
   process.env.MA_BROWSER_CONNECT_ONLY === "1" ||
   process.env.MA_BROWSER_CONNECT_ONLY === "true";
@@ -55,7 +56,7 @@ function daemonHeaders(info: DaemonInfo): Record<string, string> {
     Authorization: `Bearer ${info.token}`,
     "X-BB-Session": BB_SESSION_ID,
     ...(BB_SESSION_LABEL ? { "X-BB-Session-Label": BB_SESSION_LABEL } : {}),
-    ...(BB_SESSION_SCOPE ? { "X-BB-Session-Scope": BB_SESSION_SCOPE } : {}),
+    "X-BB-Session-Scope": BB_SESSION_SCOPE,
   };
 }
 
@@ -89,7 +90,7 @@ async function isDaemonRunning(): Promise<boolean> {
     const t = setTimeout(() => controller.abort(), 2000);
     const res = await fetch(`${daemonBaseUrl(info)}/status`, {
       signal: controller.signal,
-      headers: { Authorization: `Bearer ${info.token}` },
+      headers: daemonHeaders(info),
     });
     clearTimeout(t);
     return res.ok;
@@ -99,9 +100,14 @@ async function isDaemonRunning(): Promise<boolean> {
 async function ensureDaemon(): Promise<void> {
   if (await isDaemonRunning()) return;
 
+  // daemon.json means the tray owns lifecycle. Do not spawn a competing
+  // daemon while that owner is restarting or its daemon is unhealthy.
+  if (existsSync(path.join(DAEMON_DIR, "daemon.json"))) return;
+
   // Connect-only: defer daemon ownership to the tray. Don't spawn — a
-  // 127.0.0.1-bound daemon here would race the tray's 0.0.0.0 daemon and
-  // break WSL access. sendCommand surfaces a clear "no daemon" error instead.
+  // a second standalone daemon here would race the tray-owned daemon and
+  // break the tray ownership contract. sendCommand surfaces a clear "no daemon"
+  // error instead.
   if (MA_BROWSER_CONNECT_ONLY) return;
 
   // Invalidate cache — daemon is not running so cached info is stale

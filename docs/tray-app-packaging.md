@@ -32,7 +32,8 @@ The script:
 - Phase 1: `pnpm build` (daemon + mcp bundles) + `tauri build` (exe with embedded resources)
 - Phase 2: assembles a staging dir (exe + daemon + mcp + node + icons + README + mcp-config.json)
 - Phase 3: downloads the pinned Node.js LTS, extracts `node.exe` (cached in `.cache/`)
-- Phase 4: zips the staging dir + verifies all required files are present
+- Phase 4: zips the staging dir, writes a SHA256 sidecar, and verifies all
+  required files are present
 
 ## Artifact structure
 
@@ -55,8 +56,13 @@ The zip ships `mcp-config.json` with a `<APP_DIR>` placeholder. On first
 tray startup, `mcp_config::fill_placeholders` replaces `<APP_DIR>` with the
 actual extraction root and writes it back, so coding agents read a
 directly-usable `mcpServers` block (absolute `node.exe` + `mcp.js` paths,
-`MA_BROWSER_CONNECT_ONLY=1`). The tray also offers a "复制 MCP 配置" menu
-item as a human manual-copy fallback. See spec §9.
+`MA_BROWSER_CONNECT_ONLY=1`, a generated `BB_SESSION_ID`, and the default
+`BB_SESSION_SCOPE=no-eval`. The tray also offers a "复制 MCP 配置" menu item
+as a human manual-copy fallback; each copy rotates the session id so separate
+Cursor/Claude clients do not silently share one session. See spec §9.
+
+The generated config metadata carries the same version as the root
+`package.json`, Cargo/Tauri metadata, and portable zip name.
 
 ## Upgrade the bundled Node
 
@@ -65,12 +71,19 @@ delete `packages/tray-app/.cache/`, and rerun `pnpm package:win`.
 
 ## Release a new version
 
-1. Bump `version` in the repo-root `package.json`
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`
-3. `pnpm package:win` → produces the zip
-4. Create a Release on GitHub (zzhan111/multi-agents-browser), tag = `vX.Y.Z`
-5. Upload the zip to the Release assets
-6. Users' trays detect the new version on next startup (GitHub Releases API)
+1. Bump `version` in the repo-root `package.json`; update all workspace package
+   manifests in the same change.
+2. Run `pnpm package:win`; its Phase 0 syncs Cargo/Tauri and the resulting zip
+   uses `ma-browser-tray-portable-vX.Y.Z.zip` and writes the matching
+   `.zip.sha256` sidecar.
+3. Create a Release on GitHub (zzhan111/multi-agents-browser), using the
+   repository's `ma-browser-vX.Y.Z` tag convention.
+4. Upload the zip to the Release assets
+5. Users' trays detect the new version on next startup (GitHub Releases API)
+
+For a release upload, attach both the zip and its `.sha256` sidecar. The
+packaging script stops before building if the vendored WebView2 Evergreen
+Bootstrapper is missing and prints the required Microsoft download location.
 
 ## Verify
 

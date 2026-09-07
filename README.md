@@ -72,12 +72,20 @@ Skill on ClawHub: [ma-browser-openclaw](https://clawhub.ai/yan5xu/ma-browser)
 
 ### MCP (Claude Code / Cursor)
 
+For the v0.12.x tray release, use the generated `mcp-config.json` when it is
+available. It contains the same connect-only setting shown below, so the MCP
+process connects to the tray-owned daemon instead of starting a second one.
+
 ```json
 {
   "mcpServers": {
     "ma-browser": {
       "command": "npx",
-      "args": ["-y", "ma-browser", "--mcp"]
+      "args": ["-y", "ma-browser", "--mcp"],
+      "env": {
+        "MA_BROWSER_CONNECT_ONLY": "1",
+        "BB_SESSION_SCOPE": "no-eval"
+      }
     }
   }
 }
@@ -164,11 +172,11 @@ ma-browser site info xueqiu/stock   # view adapter args, example, domain
 
 ## Daemon configuration
 
-The daemon binds to `127.0.0.1:19824` by default. You can customize the host with `--host`:
+The daemon binds to `127.0.0.1:19824` by default. When using the tray, the tray owns daemon startup and CLI/MCP connect through `daemon.json`. You can explicitly expose a standalone daemon with `--host`:
 
 ```bash
 ma-browser daemon --host 127.0.0.1    # IPv4 only (fix macOS IPv6 issues)
-ma-browser daemon --host 0.0.0.0      # listen on all interfaces (for Tailscale / ZeroTier remote access)
+ma-browser daemon --host 0.0.0.0      # explicit opt-in: listen on all interfaces
 ```
 
 ## Architecture

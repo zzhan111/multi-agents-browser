@@ -8,25 +8,61 @@
  * WSL side. The actual adapter JS executes via the daemon's eval path.
  */
 
-import { readFileSync, mkdirSync, existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { readFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import path from "node:path";
 import { DAEMON_DIR } from "@ma-browser/shared";
 import { getCatalog, queryCatalog, invalidateCatalog, type SiteAdapter } from "./site-catalog.js";
 
 const COMMUNITY_REPO = "https://github.com/zzhan111/bb-sites.git";
 const COMMUNITY_SITES_DIR = path.join(DAEMON_DIR, "bb-sites");
+const COMMUNITY_PIN_FILE = path.join(DAEMON_DIR, "community-adapters-pin.json");
 
 export type UpdateResult =
-  | { updateMode: "pull" | "clone"; siteCount: number }
+  | { updateMode: "pull" | "clone"; siteCount: number; commit: string }
   | { error: string; action: string };
+
+function runFile(command: string, args: string[], options: { cwd?: string; timeout?: number } = {}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { ...options, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        const detail = stderr.toString().trim();
+        reject(detail ? new Error(`${error.message}: ${detail}`) : error);
+        return;
+      }
+      resolve(stdout.toString().trim());
+    });
+  });
+}
+
+function runGit(args: string[], cwd = COMMUNITY_SITES_DIR, timeout = 30_000): Promise<string> {
+  return runFile("git", args, { cwd, timeout });
+}
+
+/** Purely local preflight for a fast-forward-only community update. */
+async function communityUpdateBlocker(): Promise<string | null> {
+  try {
+    const upstream = await runGit(
+      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+      COMMUNITY_SITES_DIR,
+      3000,
+    );
+    const ahead = await runGit(["rev-list", "--count", "@{u}..HEAD"], COMMUNITY_SITES_DIR, 3000);
+    if (ahead !== "0") {
+      return `local branch is ahead of ${upstream} by ${ahead} commit(s); --ff-only cannot advance`;
+    }
+    return null;
+  } catch {
+    return "community adapter branch has no usable upstream; git pull is blocked";
+  }
+}
 
 /**
  * Pull (or clone) the community adapter repository and refresh the catalog.
  * Mirrors cli/src/commands/site.ts:siteUpdate, but runs in the daemon process
  * (no stdout; returns a structured result instead).
  */
-export function updateAdapters(): UpdateResult {
+export async function updateAdapters(): Promise<UpdateResult> {
   try {
     mkdirSync(DAEMON_DIR, { recursive: true });
   } catch { /* dir already exists */ }
@@ -34,9 +70,16 @@ export function updateAdapters(): UpdateResult {
   const updateMode = existsSync(path.join(COMMUNITY_SITES_DIR, ".git")) ? "pull" : "clone";
   try {
     if (updateMode === "pull") {
-      execSync("git pull --ff-only", { cwd: COMMUNITY_SITES_DIR, stdio: "pipe" });
+      const blocker = await communityUpdateBlocker();
+      if (blocker) {
+        return {
+          error: `site_update blocked: ${blocker}`,
+          action: `cd ${COMMUNITY_SITES_DIR} && git pull --ff-only`,
+        };
+      }
+      await runGit(["pull", "--ff-only"]);
     } else {
-      execSync(`git clone ${COMMUNITY_REPO} ${COMMUNITY_SITES_DIR}`, { stdio: "pipe" });
+      await runGit(["clone", COMMUNITY_REPO, COMMUNITY_SITES_DIR], DAEMON_DIR);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -46,9 +89,25 @@ export function updateAdapters(): UpdateResult {
     return { error: `site_update failed: ${msg}`, action };
   }
 
+  let commit: string;
+  try {
+    commit = await runGit(["rev-parse", "HEAD"]);
+    if (!/^[0-9a-f]{40,64}$/i.test(commit)) {
+      throw new Error(`git returned an invalid commit SHA: ${commit}`);
+    }
+    writeFileSync(
+      COMMUNITY_PIN_FILE,
+      JSON.stringify({ repository: COMMUNITY_REPO, commit, updatedAt: new Date().toISOString() }, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { error: `site_update pin failed: ${msg}`, action: `git -C ${COMMUNITY_SITES_DIR} rev-parse HEAD` };
+  }
+
   invalidateCatalog();
   const siteCount = getCatalog(DAEMON_DIR).adapters.length;
-  return { updateMode, siteCount };
+  return { updateMode, siteCount, commit };
 }
 
 /** All adapters in the catalog (local overrides community). */

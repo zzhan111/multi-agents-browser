@@ -9,7 +9,7 @@
 //! Per docs/system-tray-design.md §9 (lifecycle) + §3 (tray visuals).
 
 use crate::supervisor::{DaemonState, Event, Supervisor, SupervisorAction};
-use crate::tray_state::{calculate, CdpState, TraySnapshot};
+use crate::tray_state::{calculate_with_exposure, CdpState, TraySnapshot};
 
 /// Combined runtime state that the tray needs to render itself.
 ///
@@ -23,6 +23,7 @@ pub struct TrayController {
     daemon_port: Option<u16>,
     cdp_port: Option<u16>,
     token: Option<String>,
+    network_exposed: bool,
     /// Latest detected update (version + release URL). Plain strings keep
     /// this lib module Tauri-free (it cannot reference `update_checker`,
     /// which lives in the tauri-app binary crate).
@@ -43,13 +44,19 @@ impl TrayController {
             daemon_port: None,
             cdp_port: None,
             token: None,
+            network_exposed: false,
             update_info: None,
         }
     }
 
     /// Compute the visual snapshot (color + tooltip) for the current state.
     pub fn snapshot(&self) -> TraySnapshot {
-        calculate(self.supervisor.state(), self.cdp_state, self.daemon_port)
+        calculate_with_exposure(
+            self.supervisor.state(),
+            self.cdp_state,
+            self.daemon_port,
+            self.network_exposed,
+        )
     }
 
     /// Current daemon lifecycle state.
@@ -84,6 +91,12 @@ impl TrayController {
     /// Set the daemon's session token (shown to user for MCP config).
     pub fn set_token(&mut self, token: Option<String>) {
         self.token = token;
+    }
+
+    /// Mark the daemon as reachable beyond loopback. The tray keeps this as a
+    /// yellow warning while the daemon is otherwise healthy.
+    pub fn set_network_exposed(&mut self, exposed: bool) {
+        self.network_exposed = exposed;
     }
 
     /// Store the latest release info as `(latest_version, release_url)`.
@@ -125,8 +138,8 @@ impl TrayController {
         }
     }
 
-    /// Bulk-update all daemon-side identity after the spawner has seen
-    /// `BB_DAEMON_READY {...}` (used by Phase 2.8 wiring).
+    /// Bulk-update daemon identity after READY and daemon.json have both been
+    /// read by the spawner (the READY line itself never carries credentials).
     pub fn set_daemon_identity(
         &mut self,
         daemon_port: u16,
