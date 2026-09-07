@@ -644,7 +644,7 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Site tools — route through CLI instead of daemon
+// Site tools — discovery reads go through the daemon catalog boundary
 // ---------------------------------------------------------------------------
 
 server.tool(
@@ -662,6 +662,12 @@ server.tool(
           const data = await res.json() as { adapters: unknown[] };
           return textResult(data.adapters);
         }
+        if (BB_SESSION_SCOPE === "read-only") {
+          return errorResult(`Daemon site catalog request failed: HTTP ${res.status}`);
+        }
+      }
+      if (BB_SESSION_SCOPE === "read-only") {
+        return errorResult("Daemon site catalog is unavailable for the read-only session");
       }
       const result = await runSiteCli(["list", "--json"]);
       return textResult(result);
@@ -691,6 +697,12 @@ server.tool(
           const data = await res.json() as { adapters: unknown[] };
           return textResult(data.adapters);
         }
+        if (BB_SESSION_SCOPE === "read-only") {
+          return errorResult(`Daemon site catalog request failed: HTTP ${res.status}`);
+        }
+      }
+      if (BB_SESSION_SCOPE === "read-only") {
+        return errorResult("Daemon site catalog is unavailable for the read-only session");
       }
       const result = await runSiteCli(["search", query, "--json"]);
       return textResult(result);
@@ -708,8 +720,11 @@ server.tool(
   },
   async ({ name }) => {
     try {
-      const result = await runSiteCli(["info", name, "--json"]);
-      return textResult(result);
+      // Use the daemon discovery boundary so read-only sessions cannot
+      // discover write-capable adapters through a CLI-only side channel.
+      const resp = await runCommand({ action: "site_info", name });
+      if (!resp.success) return responseError(resp);
+      return textResult(resp.data);
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }
@@ -764,6 +779,20 @@ server.tool(
   },
   async ({ name, args, namedArgs, tab, openclaw }) => {
     try {
+      if (!openclaw) {
+        // Keep ordinary adapter calls on the daemon path so the shared
+        // command ring records siteName/tab/seq for discovery heat and Trace.
+        const resp = await runCommand({
+          action: "site_run",
+          name,
+          args,
+          namedArgs,
+          ...(tab !== undefined ? { tabId: tab } : {}),
+        });
+        if (!resp.success) return responseError(resp);
+        return textResult(resp.data);
+      }
+
       const cliArgs = ["run", name];
 
       for (const arg of args || []) {

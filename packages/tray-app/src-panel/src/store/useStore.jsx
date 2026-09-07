@@ -120,8 +120,13 @@ function reducer(state, action) {
     // Overview
     case 'SET_OVERVIEW': return { ...state, overview: action.payload };
 
-    // Commands
-    case 'SET_COMMANDS': return { ...state, commands: action.payload };
+    // Commands (accept React-style functional updates for incremental polling)
+    case 'SET_COMMANDS': {
+      const commands = typeof action.payload === 'function'
+        ? action.payload(state.commands)
+        : action.payload;
+      return { ...state, commands };
+    }
 
     // Logs
     case 'SET_LOGS':         return { ...state, logs: action.payload };

@@ -32,6 +32,26 @@ export interface SiteAdapter {
   prerequisites?: string;
 }
 
+/** Recent-call heat keyed by adapter name. Higher values sort first. */
+export type AdapterCallHeat = ReadonlyMap<string, number>;
+
+export interface CatalogQueryOptions {
+  q?: string;
+  domain?: string;
+  /** Optional heat from the daemon's bounded command history ring. */
+  recentCallHeat?: AdapterCallHeat;
+}
+
+/** Apply the discovery policy shared by daemon commands and panel APIs. */
+export function filterAdaptersForScope(
+  adapters: SiteAdapter[],
+  readOnlySession: boolean,
+): SiteAdapter[] {
+  return readOnlySession
+    ? adapters.filter((adapter) => adapter.readOnly !== false)
+    : adapters;
+}
+
 // ---------------------------------------------------------------------------
 // @meta parser (mirrors packages/cli/src/commands/site.ts logic)
 // ---------------------------------------------------------------------------
@@ -165,7 +185,7 @@ export function invalidateCatalog(): void {
 
 export function queryCatalog(
   adapters: SiteAdapter[],
-  options: { q?: string; domain?: string },
+  options: CatalogQueryOptions,
 ): SiteAdapter[] {
   let results = adapters;
 
@@ -184,5 +204,16 @@ export function queryCatalog(
     );
   }
 
-  return results;
+  if (!options.recentCallHeat || options.recentCallHeat.size === 0) return results;
+
+  // Keep the catalog's deterministic name order for ties. This makes the
+  // result stable while still putting recently-used adapters first.
+  return results
+    .map((adapter, index) => ({
+      adapter,
+      index,
+      heat: options.recentCallHeat?.get(adapter.name) ?? 0,
+    }))
+    .sort((a, b) => b.heat - a.heat || a.index - b.index)
+    .map(({ adapter }) => adapter);
 }

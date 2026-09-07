@@ -22,6 +22,8 @@ import type { TabState } from "./tab-state.js";
 import type { AgentSession } from "./session-state.js";
 import type { BindingStore } from "./binding-store.js";
 import type { ScratchpadManager } from "./scratchpad-manager.js";
+import type { CommandHistory } from "./command-history.js";
+import { filterAdaptersForScope } from "./site-catalog.js";
 import {
   listAdapters,
   searchAdapters,
@@ -36,6 +38,7 @@ import { getVaultManager } from "./vault/manager.js";
 export interface DispatchContext {
   bindingStore?: BindingStore;
   scratchpadManager?: ScratchpadManager;
+  commandHistory?: CommandHistory;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,8 +97,13 @@ function ok(id: string, data?: ExtResponseData): Response {
   return { id, success: true, data: data as ResponseData };
 }
 
-function fail(id: string, error: unknown): Response {
-  return { id, success: false, error: buildRequestError(error).message };
+function fail(id: string, error: unknown, data?: ExtResponseData): Response {
+  return {
+    id,
+    success: false,
+    error: buildRequestError(error).message,
+    ...(data ? { data: data as ResponseData } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +558,31 @@ function isReadOnlyScopeAllowed(action: string): boolean {
   return READ_ONLY_ALLOWED.has(action) || action === "tab_release" || action === "tab_claim";
 }
 
+function visibleSiteAdapters(session: AgentSession | undefined) {
+  // A read-only caller must not even discover adapters that can write. Keep
+  // this boundary in the daemon so CLI, MCP, and panel callers get the same
+  // result instead of relying on a UI-only filter.
+  return filterAdaptersForScope(listAdapters(), session?.scope === "read-only");
+}
+
+function resolveRecommendationTarget(
+  targets: CdpTargetInfo[],
+  cdp: CdpConnection,
+  session: AgentSession | undefined,
+  tabRef: string | number | undefined,
+): CdpTargetInfo | undefined {
+  if (tabRef !== undefined) {
+    const ref = String(tabRef);
+    const resolvedTargetId = cdp.tabManager.resolveShortId(ref);
+    return (
+      (resolvedTargetId ? targets.find((target) => target.id === resolvedTargetId) : undefined) ??
+      targets.find((target) => target.id === ref) ??
+      targets[Number.isNaN(Number(ref)) ? -1 : Number(ref)]
+    );
+  }
+  return targets.find((target) => target.id === session?.currentTargetId) ?? targets[0];
+}
+
 /** Returns true if the request involves running JavaScript via Runtime.evaluate. */
 function isEvalLike(request: Request): boolean {
   return (
@@ -741,13 +774,17 @@ async function handleSiteRun(
     ) {
       return fail(request.id, `Tab ${tab.shortId} is exclusively held by another session`);
     }
-    tab?.recordAction();
+    const seq = tab?.recordAction();
+    const attribution = {
+      ...(tab ? { tab: tab.shortId } : {}),
+      ...(seq !== undefined ? { seq } : {}),
+    };
 
     let raw: unknown;
     try {
       raw = await cdp.evaluate<unknown>(targetId, prep.script, true);
     } catch (e) {
-      return fail(request.id, `Adapter execution failed: ${buildRequestError(e).message}`);
+      return fail(request.id, `Adapter execution failed: ${buildRequestError(e).message}`, attribution);
     }
 
     let parsed: unknown = raw;
@@ -763,10 +800,16 @@ async function handleSiteRun(
       const login = adapter.domain
         ? ` — make sure you are logged in to ${adapter.domain} in Chrome`
         : "";
-      return fail(request.id, `${base}${hint}${login}`);
+      return fail(request.id, `${base}${hint}${login}`, attribution);
     }
 
-    return ok(request.id, parsed as unknown as ExtResponseData);
+    // Preserve the adapter's object-shaped result while attaching the daemon
+    // metadata required by CommandLog. Primitive/array results are wrapped so
+    // tab and seq remain available without inventing object keys in the data.
+    const data = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { ...(parsed as Record<string, unknown>), ...attribution }
+      : { result: parsed, ...attribution };
+    return ok(request.id, data);
   });
 }
 
@@ -839,43 +882,58 @@ export async function dispatchRequest(
   // resolves/creates its own domain-matched tab, so all are handled before
   // ensurePageTarget() (which would throw when no page exists yet).
   if (request.action === "site_list") {
-    return ok(request.id, listAdapters() as unknown as ExtResponseData);
+    return ok(request.id, visibleSiteAdapters(session) as unknown as ExtResponseData);
   }
   if (request.action === "site_search") {
+    const adapters = visibleSiteAdapters(session);
     return ok(
       request.id,
-      searchAdapters(request.query, request.domain) as unknown as ExtResponseData,
+      searchAdapters(request.query, request.domain, ctx?.commandHistory?.siteHeat())
+        .filter((adapter) => adapters.some((visible) => visible.name === adapter.name)) as unknown as ExtResponseData,
     );
   }
   if (request.action === "site_info") {
     if (!request.name) return fail(request.id, "Missing 'name' parameter for site_info");
     const adapter = findAdapter(request.name);
-    if (!adapter) return fail(request.id, `Site adapter '${request.name}' not found`);
+    if (!adapter || (session?.scope === "read-only" && adapter.readOnly === false)) {
+      return fail(request.id, `Site adapter '${request.name}' not found`);
+    }
     return ok(request.id, adapter as unknown as ExtResponseData);
   }
   if (request.action === "site_recommend") {
-    // Recommend adapters whose domain matches any currently open page tab.
-    // Mirrors the tab-origin matching used by site_run, so recommendations are
-    // immediately runnable. Pure read (getTargets + catalog) — no side effects.
+    // Recommend adapters for this session's active tab. The session cursor is
+    // intentionally used instead of a process-global "active tab" so two
+    // agents can receive different recommendations without crossing scopes.
     const targets = (await cdp.getTargets()).filter((t) => t.type === "page");
-    const adapters = listAdapters();
-    const recommendations = targets
-      .map((t) => {
-        const tState = cdp.tabManager.getTab(t.id);
-        const matched = adapters.filter((a) => matchTabOrigin(t.url, a.domain));
-        return {
-          tab: tState?.shortId ?? t.id.slice(-4).toLowerCase(),
-          url: t.url,
-          adapters: matched.map((a) => ({
-            name: a.name,
-            description: a.description,
-            domain: a.domain,
-            ...(a.example ? { example: a.example } : {}),
-          })),
-        };
-      })
-      .filter((r) => r.adapters.length > 0);
-    return ok(request.id, { siteRecommendations: recommendations });
+    if (request.tabId !== undefined && !resolveRecommendationTarget(targets, cdp, session, request.tabId)) {
+      return fail(request.id, `Tab not found: ${String(request.tabId)}`);
+    }
+    const target = resolveRecommendationTarget(targets, cdp, session, request.tabId);
+    const tab = target ? cdp.tabManager.getTab(target.id) : undefined;
+    const adapters = visibleSiteAdapters(session);
+    const matched = target
+      ? searchAdapters(undefined, undefined, ctx?.commandHistory?.siteHeat())
+        .filter((adapter) => matchTabOrigin(target.url, adapter.domain))
+        .filter((adapter) => adapters.some((visible) => visible.name === adapter.name))
+        .map((adapter) => ({
+          name: adapter.name,
+          description: adapter.description,
+          domain: adapter.domain,
+          ...(adapter.example ? { example: adapter.example } : {}),
+        }))
+      : [];
+    return ok(request.id, {
+      siteRecommendations: matched.length > 0 && target
+        ? [{
+            tab: tab?.shortId ?? target.id.slice(-4).toLowerCase(),
+            url: target.url,
+            adapters: matched,
+          }]
+        : [],
+      // Discovery is still attributable to the active tab for CommandLog.
+      tab: tab?.shortId ?? "catalog",
+      seq: cdp.tabManager.nextSeq(),
+    });
   }
   if (request.action === "site_run") {
     return handleSiteRun(cdp, request, session);
