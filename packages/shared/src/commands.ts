@@ -445,10 +445,10 @@ export const COMMANDS: CommandDef[] = [
   {
     name: "site_recommend",
     action: "site_recommend",
-    description: "Recommend site adapters based on browsing history",
+    description: "Recommend adapters for the session's active tab domain",
     category: "site",
     args: z.object({
-      days: z.number().default(30).describe("Number of days of history to analyze"),
+      tab: z.string().optional().describe("Optional tab short ID to recommend for"),
     }),
   },
   {

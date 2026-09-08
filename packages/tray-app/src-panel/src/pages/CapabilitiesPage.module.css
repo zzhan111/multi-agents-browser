@@ -123,6 +123,16 @@
   line-height: 1.4;
 }
 
+.signature {
+  display: block;
+  margin: 0 12px 8px 29px;
+  color: var(--text-secondary);
+  font-family: "Cascadia Code", monospace;
+  font-size: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ── Expanded details ── */
 .details {
   padding: 0 12px 12px 29px;

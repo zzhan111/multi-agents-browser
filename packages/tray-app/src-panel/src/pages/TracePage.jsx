@@ -93,7 +93,13 @@ export default function TracePage() {
   // Poll the daemon command history (incremental via since=seq).
   const lastCommandSeqRef = useRef(0);
   useEffect(() => {
-    if (!connected) return;
+    if (!connected) {
+      // CommandHistory is process-local; do not merge a restarted daemon's
+      // sequence space into the previous process's CommandLog.
+      lastCommandSeqRef.current = 0;
+      setCommands([]);
+      return;
+    }
     let cancelled = false;
     const poll = async () => {
       try {

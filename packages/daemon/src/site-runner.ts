@@ -12,7 +12,13 @@ import { readFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { DAEMON_DIR } from "@ma-browser/shared";
-import { getCatalog, queryCatalog, invalidateCatalog, type SiteAdapter } from "./site-catalog.js";
+import {
+  getCatalog,
+  queryCatalog,
+  invalidateCatalog,
+  type AdapterCallHeat,
+  type SiteAdapter,
+} from "./site-catalog.js";
 
 const COMMUNITY_REPO = "https://github.com/zzhan111/bb-sites.git";
 const COMMUNITY_SITES_DIR = path.join(DAEMON_DIR, "bb-sites");
@@ -116,8 +122,16 @@ export function listAdapters(): SiteAdapter[] {
 }
 
 /** Filter the catalog by free-text query and/or domain. */
-export function searchAdapters(query?: string, domain?: string): SiteAdapter[] {
-  return queryCatalog(getCatalog(DAEMON_DIR).adapters, { q: query, domain });
+export function searchAdapters(
+  query?: string,
+  domain?: string,
+  recentCallHeat?: AdapterCallHeat,
+): SiteAdapter[] {
+  return queryCatalog(getCatalog(DAEMON_DIR).adapters, {
+    q: query,
+    domain,
+    recentCallHeat,
+  });
 }
 
 /** Exact-name lookup. */
@@ -197,7 +211,9 @@ export function prepareAdapterScript(
 export function matchTabOrigin(tabUrl: string, domain: string): boolean {
   try {
     const host = new URL(tabUrl).hostname;
-    return host === domain || host.endsWith("." + domain);
+    const normalizedDomain = domain.toLowerCase().replace(/^www\./, "");
+    const normalizedHost = host.toLowerCase().replace(/^www\./, "");
+    return normalizedHost === normalizedDomain || normalizedHost.endsWith("." + normalizedDomain);
   } catch {
     return false;
   }

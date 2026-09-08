@@ -83,6 +83,7 @@ export default function CommandLog({ commands, tabShort, recordWindow }) {
                 <span className={`cmdlog-status cmdlog-status--${cmd.status}`}>
                   {statusIcon(cmd.status)}
                 </span>
+                <span className="cmdlog-seq">#{cmd.seq}</span>
                 <span className="cmdlog-tool">{cmd.tool}</span>
                 {cmd.argsSummary && <span className="cmdlog-args">{cmd.argsSummary}</span>}
                 {recorded && <span className="cmdlog-rec-badge">● 录制</span>}

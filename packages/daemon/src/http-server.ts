@@ -21,7 +21,7 @@ import { CdpConnection } from "./cdp-connection.js";
 import type { CommandHistory } from "./command-history.js";
 import { CommandScheduler } from "./command-scheduler.js";
 import { SessionManager, type SessionScope } from "./session-state.js";
-import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
+import { filterAdaptersForScope, getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
 import { DAEMON_DIR } from "@ma-browser/shared";
 import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
@@ -241,7 +241,7 @@ export class HttpServer {
     } else if (req.method === "GET" && url.startsWith("/api/logs")) {
       this.handleLogs(url, res);
     } else if (req.method === "GET" && url.startsWith("/api/sites")) {
-      this.handleSites(url, res);
+      this.handleSites(url, req, res);
     } else if (req.method === "GET" && /^\/api\/agents\/[^/]+\/context/.test(url)) {
       this.handleAgentContext(url, res);
     } else if (req.method === "PATCH" && /^\/api\/agents\/[^/]+$/.test(url)) {
@@ -286,7 +286,7 @@ export class HttpServer {
       return;
     }
 
-    const entries: FeedEntry[] = mgr.recent(name, null, manifest.rss.maxEntries).map((e) => ({
+    const entries: FeedEntry[] = mgr.recent(name, null, null, manifest.rss.maxEntries, false).map((e) => ({
       tweetId: e.tweetId,
       author: e.author,
       text: e.text,
@@ -401,12 +401,18 @@ export class HttpServer {
         const dispatchCtx: DispatchContext = {
           bindingStore: this.bindingStore ?? undefined,
           scratchpadManager: this.scratchpadManager ?? undefined,
+          commandHistory: this.history ?? undefined,
         };
         const response = await Promise.race([
           dispatchRequest(this.cdp, request, session, dispatchCtx),
           timeout,
         ]);
-        finish?.(response.success !== false, response.data?.tab);
+        const responseTab = response.data?.tab ?? (
+          session.currentTargetId
+            ? this.cdp.tabManager.getTab(session.currentTargetId)?.shortId
+            : undefined
+        );
+        finish?.(response.success !== false, responseTab);
         // Write journal after successful dispatch
         if (session.agentId && this.journalManager) {
           const tab = typeof request.tabId === "string" ? request.tabId : undefined;
@@ -415,7 +421,10 @@ export class HttpServer {
         }
         this.sendJson(res, 200, response);
       } catch (err2) {
-        finish?.(false);
+        const sessionTab = session.currentTargetId
+          ? this.cdp.tabManager.getTab(session.currentTargetId)?.shortId
+          : undefined;
+        finish?.(false, sessionTab);
         throw err2;
       } finally {
         release();
@@ -507,13 +516,24 @@ export class HttpServer {
   // GET /api/sites?q=&domain=&invalidate=1
   // ---------------------------------------------------------------------------
 
-  private handleSites(url: string, res: ServerResponse): void {
+  private handleSites(url: string, req: IncomingMessage, res: ServerResponse): void {
     if (parseStringParam(url, "invalidate", "") === "1") invalidateCatalog();
     const q = parseStringParam(url, "q", "");
     const domain = parseStringParam(url, "domain", "");
     const { adapters, cacheAge } = getCatalog(DAEMON_DIR);
-    const results = queryCatalog(adapters, { q: q || undefined, domain: domain || undefined });
-    this.sendJson(res, 200, { adapters: results, total: adapters.length, cacheAge });
+    const sessionId = headerString(req, "x-bb-session") ?? "anonymous";
+    const rawScope = headerString(req, "x-bb-session-scope");
+    const requestedScope = rawScope === "read-only" || rawScope === "no-eval" || rawScope === "full"
+      ? rawScope
+      : undefined;
+    const session = this.sessions.getOrCreate(sessionId, undefined, requestedScope);
+    const visible = filterAdaptersForScope(adapters, session.scope === "read-only");
+    const results = queryCatalog(visible, {
+      q: q || undefined,
+      domain: domain || undefined,
+      recentCallHeat: this.history?.siteHeat(),
+    });
+    this.sendJson(res, 200, { adapters: results, total: visible.length, cacheAge });
   }
 
   // ---------------------------------------------------------------------------

@@ -178,6 +178,9 @@ function AdapterCard({ adapter: a }) {
   const [argValues, setArgValues] = useState({});
 
   const argNames = Object.keys(a.args ?? {});
+  const signature = `${a.name}(${argNames.map((name) =>
+    `${name}${a.args[name]?.required ? '' : '?'}`
+  ).join(', ')})`;
 
   const riskLabel = { low: '🟢 低', medium: '🟡 中', high: '🔴 高' }[a.risk] ?? '';
   const isHighRisk = a.risk === 'high';
@@ -194,9 +197,14 @@ function AdapterCard({ adapter: a }) {
     setResult(null);
     setRunError(null);
     try {
-      // Build positional args array in order
-      const args = argNames.map((k) => argValues[k] ?? '');
-      const resp = await daemon.send('site_run', { name: a.name, args });
+      // Send named values so omitted optional fields stay omitted and the
+      // daemon can enforce required arguments consistently with the catalog.
+      const namedArgs = Object.fromEntries(
+        argNames
+          .filter((name) => argValues[name] !== undefined && argValues[name] !== '')
+          .map((name) => [name, argValues[name]])
+      );
+      const resp = await daemon.send('site_run', { name: a.name, namedArgs });
       setResult(resp);
     } catch (err) {
       setRunError(err.message ?? String(err));
@@ -222,6 +230,7 @@ function AdapterCard({ adapter: a }) {
         {a.source === 'local' && <span className={`${styles.badge} ${styles.badgeLocal}`}>本地</span>}
       </div>
       <p className={styles.adapterDesc}>{a.description}</p>
+      <code className={styles.signature}>{signature}</code>
       {a.prerequisites && (
         <p className={styles.prereq}>前提:{a.prerequisites}</p>
       )}

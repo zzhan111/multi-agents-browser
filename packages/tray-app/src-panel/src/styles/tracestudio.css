@@ -238,6 +238,7 @@
 .cmdlog-status--ok    { color: var(--color-success); }
 .cmdlog-status--error { color: var(--color-danger); }
 .cmdlog-status--inflight { color: var(--color-warning); }
+.cmdlog-seq { color: var(--color-text-secondary); font-size: 10px; flex-shrink: 0; }
 .cmdlog-tool { font-family: monospace; color: var(--color-text); flex-shrink: 0; }
 .cmdlog-args {
   color: var(--color-text-secondary); overflow: hidden; text-overflow: ellipsis;

@@ -25,6 +25,8 @@ export interface CommandRecord {
   sessionId?: string;
   /** Short id of the tab the command resolved to (undefined if none). */
   tab?: string;
+  /** Adapter name for site_run records, used to derive catalog heat. */
+  siteName?: string;
 }
 
 const CAPACITY = 200;
@@ -38,6 +40,7 @@ export class CommandHistory {
    * Call `finish(ok)` when the command completes (or errors).
    */
   record(tool: string, args: unknown, sessionId?: string): (ok?: boolean, tab?: string) => void {
+    const siteName = tool === "site_run" ? siteNameFromArgs(args) : undefined;
     const rec: CommandRecord = {
       seq: this.nextSeq++,
       tool,
@@ -46,6 +49,7 @@ export class CommandHistory {
       durationMs: 0,
       status: "inflight",
       sessionId,
+      ...(siteName ? { siteName } : {}),
     };
     this.buf.push(rec);
     const start = rec.ts;
@@ -63,6 +67,21 @@ export class CommandHistory {
     const all = this.buf.toArray().filter((r) => r.seq > since);
     return all.slice(-limit).reverse();
   }
+
+  /**
+   * Return recency-weighted site_run heat from the bounded command ring.
+   * The newest record has the largest weight, so a tie in frequency still
+   * favors the adapter used most recently. The returned map is a snapshot.
+   */
+  siteHeat(): Map<string, number> {
+    const heat = new Map<string, number>();
+    const records = this.buf.toArray();
+    records.forEach((record, index) => {
+      if (!record.siteName) return;
+      heat.set(record.siteName, (heat.get(record.siteName) ?? 0) + index + 1);
+    });
+    return heat;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -77,8 +96,8 @@ function summarise(args: unknown): string {
   const obj = args as Record<string, unknown>;
   const parts: string[] = [];
 
-  // Prioritised keys: ref, selector, url, text, value, key
-  for (const k of ["ref", "selector", "url", "text", "value", "key"]) {
+  // Prioritised keys: adapter name, ref, selector, url, text, value, key
+  for (const k of ["name", "ref", "selector", "url", "text", "value", "key"]) {
     if (k in obj && obj[k] != null) {
       const v = String(obj[k]);
       parts.push(`${k}=${JSON.stringify(v.length > 30 ? v.slice(0, 30) + "…" : v)}`);
@@ -96,4 +115,10 @@ function summarise(args: unknown): string {
 
   const raw = parts.join(", ");
   return raw.length > 80 ? raw.slice(0, 79) + "…" : raw;
+}
+
+function siteNameFromArgs(args: unknown): string | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const name = (args as Record<string, unknown>).name;
+  return typeof name === "string" && name.length > 0 ? name : undefined;
 }
