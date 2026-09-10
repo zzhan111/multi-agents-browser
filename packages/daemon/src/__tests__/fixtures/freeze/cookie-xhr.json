@@ -1,0 +1,21 @@
+{
+  "requestId": "cookie-xhr-1",
+  "url": "https://www.example.com/api/search?q=hello&page=1&_t=1710000000",
+  "method": "GET",
+  "type": "XHR",
+  "timestamp": 1710000000000,
+  "status": 200,
+  "statusText": "OK",
+  "mimeType": "application/json; charset=utf-8",
+  "requestHeaders": {
+    "Cookie": "sessionid=SECRETCOOKIEVALUE123; csrftoken=CSRFSECRET789; theme=dark",
+    "Authorization": "Bearer SECRETBEARERTOKEN456",
+    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0"
+  },
+  "responseHeaders": {
+    "Content-Type": "application/json",
+    "Set-Cookie": "sessionid=SECRETCOOKIEVALUE123; Path=/; HttpOnly"
+  },
+  "responseBody": "{\"results\":[{\"id\":\"UNIQUE_RESPONSE_BODY_SHOULD_NOT_APPEAR\",\"title\":\"n\"}]}"
+}

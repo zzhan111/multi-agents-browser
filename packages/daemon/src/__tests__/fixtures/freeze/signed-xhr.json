@@ -1,0 +1,17 @@
+{
+  "requestId": "signed-1",
+  "url": "https://www.xiaohongshu.com/api/sns/web/v1/search/notes",
+  "method": "POST",
+  "type": "XHR",
+  "timestamp": 1710000002000,
+  "status": 200,
+  "mimeType": "application/json",
+  "requestHeaders": {
+    "cookie": "web_session=XHSSESSIONSECRET",
+    "x-s": "SIGNED_X_S_VALUE",
+    "x-t": "1710000002",
+    "content-type": "application/json"
+  },
+  "requestBody": "{\"keyword\":\"coffee\"}",
+  "responseBody": "{\"items\":[]}"
+}

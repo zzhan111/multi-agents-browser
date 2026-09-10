@@ -1,0 +1,17 @@
+{
+  "requestId": "csrf-gql-1",
+  "url": "https://twitter.com/i/api/graphql/SearchTimeline",
+  "method": "POST",
+  "type": "Fetch",
+  "timestamp": 1710000001000,
+  "status": 200,
+  "mimeType": "application/json",
+  "requestHeaders": {
+    "cookie": "ct0=CSRFSECRET789; auth_token=TWITTERAUTHTOKEN999",
+    "x-csrf-token": "CSRFSECRET789",
+    "authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTsSECRET",
+    "content-type": "application/json"
+  },
+  "requestBody": "{\"queryId\":\"abc\",\"variables\":{\"query\":\"local LLM\"}}",
+  "responseBody": "{\"data\":{\"search\":[]}}"
+}
