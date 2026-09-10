@@ -1,6 +1,6 @@
 {
   "name": "ma-browser",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "description": "Your browser is the API. CLI + MCP server for AI agents to control Chrome with your login state.",
   "type": "module",
   "bin": {

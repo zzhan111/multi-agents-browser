@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/zzhan111/multi-agents-browser/compare/v0.12.1...v0.13.0) (2026-09-10)
+
+### Features
+
+- **daemon/adapter-freeze (M0):** pure `NetworkRequestInfo` → draft adapter JS generator with F2 ranking + F4 strip checklist (no Cookie literals)
+- **daemon/site_freeze (M1):** `site_freeze` protocol + dispatch + CLI/MCP; private drafts only; `isEvalLike` gate
+- **daemon/adapter-cache (M2):** local TTL cache for readOnly `site_run` (atomic writes, `--fresh`, invalidate; no tokens in cache files)
+- **daemon/adapter-health (M3):** health states unknown/healthy/degraded/broken on `site_run`; visible in `site_info`/`site_list`/API; invalidate on broken
+- **mcp/dynamic-tools (M4 spike A):** optional `BB_MCP_DYNAMIC_TOOLS` (default off), ≤8 dynamic tools forwarding to `site_run`, reaper + `list_changed`; docs in `docs/spike-dynamic-tools-v0.13.md`
+
 ### Features
 
 - **web/ExportDialog**: 选择器模式可选 Auto / CSS / XPath，默认 Auto 保留 bb-browser ref 优先级；CSS 模式生成可脱离 bb-browser 运行的脚本，XPath 模式跨 DOM 变化更稳定
