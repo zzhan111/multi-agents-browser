@@ -48,6 +48,7 @@ export type ActionType =
   | "site_run"
   | "site_update"
   | "site_recommend"
+  | "site_freeze"
   | "vault_list"
   | "vault_register"
   | "vault_recent"
@@ -165,6 +166,12 @@ export interface Request {
   vaultBefore?: string;
   /** 仅返回有报告文件的条目（vault_recent 使用，可选） */
   hasReport?: boolean;
+  /** 网络请求 ID（site_freeze 使用，对应 NetworkRequestInfo.requestId） */
+  requestId?: string;
+  /** 覆盖已有私有 adapter（site_freeze 使用） */
+  overwrite?: boolean;
+  /** 跳过 site_run TTL 缓存并覆盖条目（site_run 使用） */
+  fresh?: boolean;
 }
 
 /** 元素引用信息 */
@@ -402,6 +409,18 @@ export interface ResponseData {
   vaultFavorite?: boolean;
   /** 收藏条目列表（vault_list_favorites 返回） */
   vaultFavorites?: Entry[];
+  /** site_freeze：冻结草稿或候选列表 */
+  freezeDraft?: FreezeDraftInfo;
+  /** site_run：是否命中本机 TTL 缓存 */
+  cacheHit?: boolean;
+  /** site_run：缓存条目年龄（秒） */
+  cacheAgeSec?: number;
+  /** site_run：缓存过期时间（ISO 8601） */
+  cacheExpiresAt?: string;
+  /** 非致命警告（例如结果过大未写入缓存） */
+  warnings?: string[];
+  /** site_info / site_run：adapter 健康（无记录则为 unknown） */
+  health?: AdapterHealthInfo;
   /** site_recommend：基于当前活跃 tab 的 adapter 推荐 */
   siteRecommendations?: Array<{
     /** tab 短 ID */
@@ -414,7 +433,43 @@ export interface ResponseData {
       description: string;
       domain: string;
       example?: string;
+      health?: AdapterHealthInfo;
     }>;
+  }>;
+}
+
+/** Adapter 健康状态（每 name，本地覆盖社区同名） */
+export type AdapterHealthStatus = "unknown" | "healthy" | "degraded" | "broken";
+
+/** site_info / site_list / GET /api/sites 附带的健康摘要 */
+export interface AdapterHealthInfo {
+  status: AdapterHealthStatus;
+  lastOkAt?: string;
+  lastFailAt?: string;
+  lastError?: string;
+  consecutiveFails: number;
+  lastHttpStatus?: number;
+  /** degraded/broken 时的人类可读解释 */
+  hint?: string;
+  /** degraded/broken 时的可执行修复命令 */
+  action?: string;
+}
+
+/** site_freeze 成功时的草稿或候选列表 */
+export interface FreezeDraftInfo {
+  /** 私有草稿绝对路径（恰好 1 条候选并已落盘时存在） */
+  path?: string;
+  /** 草稿 JS 预览 */
+  preview?: string;
+  warnings: string[];
+  incomplete?: boolean;
+  /** F2：窗口内多于 1 条候选时返回，调用方再带 requestId 重试 */
+  candidates?: Array<{
+    requestId: string;
+    url: string;
+    method: string;
+    status?: number;
+    mimeType?: string;
   }>;
 }
 
@@ -448,6 +503,10 @@ export interface Response {
   data?: ResponseData;
   /** 失败时的错误信息 */
   error?: string;
+  /** 人类可读解释（Agent 无法自动修复时原样转达） */
+  hint?: string;
+  /** 可执行的修复命令，可为空 */
+  action?: string;
 }
 
 /** Daemon 状态 */

@@ -9,6 +9,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import path from "node:path";
 import { z } from "zod";
+import {
+  isDynamicToolsEnabled,
+  installDynamicSiteTools,
+  parseIdleMs,
+  type AdapterMeta,
+  type SiteRunRequest,
+} from "./dynamic-tools.js";
 
 declare const __BB_BROWSER_VERSION__: string;
 
@@ -225,7 +232,10 @@ function errorResult(message: string) {
 }
 
 function responseError(resp: Response) {
-  return errorResult(resp.error || "Unknown error");
+  const parts = [resp.error || "Unknown error"];
+  if (resp.hint) parts.push(`Hint: ${resp.hint}`);
+  if (resp.action) parts.push(`Action: ${resp.action}`);
+  return errorResult(parts.join("\n"));
 }
 
 function textResult(value: unknown) {
@@ -390,6 +400,7 @@ Site adapters (pre-built commands for popular sites):
 - site_list/site_search/site_info: Discover available adapters and their signatures
 - site_recommend: Suggest adapters based on browsing history
 - site_run: Execute an adapter directly from MCP
+- site_freeze: Freeze a captured network request into a private adapter draft (eval-like)
 - site_update: Pull the community adapter repository
 - Available: reddit, twitter, github, hackernews, xiaohongshu, zhihu, bilibili, weibo, douban, youtube
 
@@ -714,7 +725,7 @@ server.tool(
 
 server.tool(
   "site_info",
-  "Get adapter metadata including args, example, and domain",
+  "Get adapter metadata including args, example, domain, and health",
   {
     name: z.string().describe("Adapter name, e.g. twitter/search"),
   },
@@ -775,9 +786,10 @@ server.tool(
     args: z.array(z.string()).optional().describe("Positional arguments in adapter-defined order"),
     namedArgs: z.record(z.string()).optional().describe("Named adapter arguments passed as --key value"),
     tab: z.string().optional().describe("Optional tab short ID to target"),
+    fresh: z.boolean().optional().describe("Bypass the local TTL cache and refresh the stored result"),
     openclaw: z.boolean().optional().describe("Prefer the OpenClaw browser instead of the extension flow"),
   },
-  async ({ name, args, namedArgs, tab, openclaw }) => {
+  async ({ name, args, namedArgs, tab, fresh, openclaw }) => {
     try {
       if (!openclaw) {
         // Keep ordinary adapter calls on the daemon path so the shared
@@ -788,6 +800,7 @@ server.tool(
           args,
           namedArgs,
           ...(tab !== undefined ? { tabId: tab } : {}),
+          ...(fresh ? { fresh: true } : {}),
         });
         if (!resp.success) return responseError(resp);
         return textResult(resp.data);
@@ -821,6 +834,38 @@ server.tool(
 );
 
 server.tool(
+  "site_freeze",
+  "Freeze a captured network request into a private site adapter draft under ~/.bb-browser/sites/. Eval-like: requires BB_SESSION_SCOPE=full. Never publishes to the community repo. If requestId is omitted and multiple API candidates exist, returns candidates[] for a second call.",
+  {
+    name: z.string().describe("Adapter name as platform/command, e.g. example/search"),
+    requestId: z.string().optional().describe("Network request ID to freeze; omit to list candidates in the since window"),
+    overwrite: z.boolean().optional().describe("Replace an existing private adapter of the same name"),
+    since: z.union([z.literal("last_action"), z.number()]).optional().describe("Candidate window when requestId is omitted (default last_action)"),
+    method: z.string().optional().describe("Filter candidates by HTTP method"),
+    status: z.string().optional().describe("Filter candidates by HTTP status"),
+    tab: z.string().optional().describe("Tab short ID that owns the network ring"),
+  },
+  async ({ name, requestId, overwrite, since, method, status, tab }) => {
+    try {
+      const resp = await runCommand({
+        action: "site_freeze",
+        name,
+        requestId,
+        overwrite,
+        since,
+        method,
+        status,
+        ...(tab !== undefined ? { tabId: tab } : {}),
+      });
+      if (!resp.success) return responseError(resp);
+      return textResult(resp.data);
+    } catch (error) {
+      return errorResult(error instanceof Error ? error.message : String(error));
+    }
+  }
+);
+
+server.tool(
   "site_update",
   "Pull or clone the community adapter repository",
   {},
@@ -833,6 +878,54 @@ server.tool(
     }
   }
 );
+
+// ---------------------------------------------------------------------------
+// 路 Y spike — dynamic site tools (BB_MCP_DYNAMIC_TOOLS=1, default OFF)
+// Activate ≤8 adapters as site_<platform>_<command>, forward to site_run
+// (same eval/scope gate). Idle reclaim ~5 min. See docs/spike-dynamic-tools-v0.13.md.
+// ---------------------------------------------------------------------------
+
+async function listSiteAdaptersForSpike(): Promise<AdapterMeta[]> {
+  const info = await getDaemonInfo();
+  if (info) {
+    const res = await fetch(`${daemonBaseUrl(info)}/api/sites`, {
+      headers: daemonHeaders(info),
+    });
+    if (res.ok) {
+      const data = await res.json() as { adapters?: AdapterMeta[] };
+      return data.adapters ?? [];
+    }
+    if (BB_SESSION_SCOPE === "read-only") {
+      throw new Error(`Daemon site catalog request failed: HTTP ${res.status}`);
+    }
+  }
+  if (BB_SESSION_SCOPE === "read-only") {
+    throw new Error("Daemon site catalog is unavailable for the read-only session");
+  }
+  const result = await runSiteCli(["list", "--json"]);
+  if (Array.isArray(result)) return result as AdapterMeta[];
+  if (result && typeof result === "object" && "adapters" in result) {
+    return (result as { adapters: AdapterMeta[] }).adapters ?? [];
+  }
+  return [];
+}
+
+if (isDynamicToolsEnabled()) {
+  installDynamicSiteTools(server, {
+    listAdapters: listSiteAdaptersForSpike,
+    idleMs: parseIdleMs(),
+    runSite: async (request: SiteRunRequest) => {
+      // Y4: the only execution path is the same daemon site_run action.
+      // Never runSiteCli here — that would be a scope-gate bypass.
+      return runCommand({
+        action: "site_run",
+        name: request.name,
+        namedArgs: request.namedArgs,
+        ...(request.tabId !== undefined ? { tabId: request.tabId } : {}),
+      });
+    },
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Vault read tools (read-only spine, see ma-browser-vault skill / DESIGN

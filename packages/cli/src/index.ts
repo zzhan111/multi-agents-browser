@@ -57,6 +57,7 @@ ma-browser - AI Agent 浏览器自动化工具
   site list                    列出所有 adapter
   site info <name>             查看 adapter 用法（参数、返回值、示例）
   site <name> [args]           运行 adapter
+  site freeze --name <n>       从网络请求冻成私有 adapter 草稿
   site update                  更新社区 adapter 库
   vault list                   列出已注册研究库
   vault register <yaml路径>     注册研究目录并建立索引
@@ -128,6 +129,7 @@ interface ParsedArgs {
     days?: number;
     jq?: string;
     openclaw?: boolean;
+    fresh?: boolean;
     port?: number;
     since?: string;
     limit?: number;
@@ -229,6 +231,12 @@ function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === "--status") {
       // --status 参数及其值，由子命令通过 process.argv 解析
       skipNext = true;
+    } else if (arg === "--name" || arg === "--request-id" || arg === "--requestId") {
+      skipNext = true;
+    } else if (arg === "--overwrite") {
+      // boolean flag for site freeze; consumed by the subcommand
+    } else if (arg === "--fresh") {
+      result.flags.fresh = true;
     } else if (arg.startsWith("-")) {
       // 未知选项，忽略
     } else if (result.command === null) {
@@ -683,6 +691,7 @@ async function main(): Promise<void> {
           days: parsed.flags.days,
           tabId: globalTabId,
           openclaw: parsed.flags.openclaw,
+          fresh: parsed.flags.fresh,
         });
         break;
       }
@@ -727,6 +736,8 @@ async function main(): Promise<void> {
    ma-browser network clear --tab <tabId>
    ma-browser refresh --tab <tabId>
    ma-browser network requests --filter "api" --with-body --json --tab <tabId>
+   Shortcut: ma-browser site freeze --name platform/command [--request-id <id>]
+   (writes a private draft under ~/.bb-browser/sites/; still use steps 2–5 for Tier 3 / community PRs)
 
 2. TEST if direct fetch works (Tier 1)
    ma-browser eval "fetch('/api/endpoint',{credentials:'include'}).then(r=>r.json())" --tab <tabId>

@@ -1,0 +1,74 @@
+[
+  {
+    "requestId": "doc-1",
+    "url": "https://www.example.com/search?q=hello",
+    "method": "GET",
+    "type": "Document",
+    "timestamp": 1,
+    "status": 200,
+    "mimeType": "text/html"
+  },
+  {
+    "requestId": "script-1",
+    "url": "https://www.example.com/static/app.js",
+    "method": "GET",
+    "type": "Script",
+    "timestamp": 2,
+    "status": 200,
+    "mimeType": "application/javascript"
+  },
+  {
+    "requestId": "css-1",
+    "url": "https://www.example.com/static/app.css",
+    "method": "GET",
+    "type": "Stylesheet",
+    "timestamp": 3,
+    "status": 200,
+    "mimeType": "text/css"
+  },
+  {
+    "requestId": "img-1",
+    "url": "https://www.example.com/logo.png",
+    "method": "GET",
+    "type": "Image",
+    "timestamp": 4,
+    "status": 200,
+    "mimeType": "image/png"
+  },
+  {
+    "requestId": "xhr-404",
+    "url": "https://www.example.com/api/missing",
+    "method": "GET",
+    "type": "XHR",
+    "timestamp": 5,
+    "status": 404,
+    "mimeType": "application/json"
+  },
+  {
+    "requestId": "xhr-search",
+    "url": "https://www.example.com/api/search?q=hello",
+    "method": "GET",
+    "type": "XHR",
+    "timestamp": 6,
+    "status": 200,
+    "mimeType": "application/json"
+  },
+  {
+    "requestId": "fetch-graphql",
+    "url": "https://www.example.com/graphql",
+    "method": "POST",
+    "type": "Fetch",
+    "timestamp": 7,
+    "status": 200,
+    "mimeType": "application/json"
+  },
+  {
+    "requestId": "xhr-hot",
+    "url": "https://www.example.com/api/hot",
+    "method": "GET",
+    "type": "XHR",
+    "timestamp": 8,
+    "status": 200,
+    "mimeType": "application/json"
+  }
+]

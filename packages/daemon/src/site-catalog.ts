@@ -6,6 +6,8 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import type { AdapterHealthStatus } from "@ma-browser/shared";
+import { healthSortRank } from "./adapter-health.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -18,8 +20,12 @@ export interface SiteAdapter {
   args: Record<string, { required?: boolean; description?: string }>;
   capabilities?: string[];
   readOnly?: boolean;
+  /** Per-adapter TTL override in seconds. 0 = never cache this adapter. */
+  cacheTtlSeconds?: number;
   example?: string;
   source: "local" | "community";
+  /** @meta.source — freeze drafts set this to "freeze-draft". */
+  origin?: string;
   filePath: string;
   // Extended fields for the panel Capabilities tab (legal-compliance + UX).
   /** Human-readable title (e.g. "查看用户推文动态"); falls back to `name`. */
@@ -40,6 +46,8 @@ export interface CatalogQueryOptions {
   domain?: string;
   /** Optional heat from the daemon's bounded command history ring. */
   recentCallHeat?: AdapterCallHeat;
+  /** Optional health by adapter name. Secondary sort key (H5): broken last. */
+  healthByName?: ReadonlyMap<string, AdapterHealthStatus>;
 }
 
 /** Apply the discovery policy shared by daemon commands and panel APIs. */
@@ -72,7 +80,22 @@ function parseMeta(filePath: string, source: "local" | "community"): SiteAdapter
 
   // Try JSON format first
   try {
-    const json = JSON.parse(inner) as Partial<SiteAdapter>;
+    const json = JSON.parse(inner) as {
+      name?: string;
+      description?: string;
+      domain?: string;
+      args?: SiteAdapter["args"];
+      capabilities?: string[];
+      readOnly?: boolean;
+      cacheTtlSeconds?: number;
+      example?: string;
+      source?: string;
+      origin?: string;
+      title?: string;
+      category?: string;
+      risk?: SiteAdapter["risk"];
+      prerequisites?: string;
+    };
     if (!json.name || !json.domain) return null;
     return {
       name: json.name,
@@ -81,8 +104,14 @@ function parseMeta(filePath: string, source: "local" | "community"): SiteAdapter
       args: json.args ?? {},
       capabilities: json.capabilities,
       readOnly: json.readOnly,
+      cacheTtlSeconds: typeof json.cacheTtlSeconds === "number" && Number.isFinite(json.cacheTtlSeconds)
+        ? json.cacheTtlSeconds
+        : undefined,
       example: json.example,
       source,
+      origin: json.source === "freeze-draft" || json.origin === "freeze-draft"
+        ? "freeze-draft"
+        : undefined,
       filePath,
       title: json.title,
       category: json.category,
@@ -109,6 +138,12 @@ function parseMeta(filePath: string, source: "local" | "community"): SiteAdapter
     domain,
     args: {},
     readOnly: tag("readOnly") === "true",
+    cacheTtlSeconds: (() => {
+      const raw = tag("cacheTtlSeconds");
+      if (raw === undefined) return undefined;
+      const n = Number.parseInt(raw, 10);
+      return Number.isFinite(n) ? n : undefined;
+    })(),
     example: tag("example"),
     source,
     filePath,
@@ -204,16 +239,20 @@ export function queryCatalog(
     );
   }
 
-  if (!options.recentCallHeat || options.recentCallHeat.size === 0) return results;
+  const hasHeat = options.recentCallHeat && options.recentCallHeat.size > 0;
+  const hasHealth = options.healthByName && options.healthByName.size > 0;
+  if (!hasHeat && !hasHealth) return results;
 
-  // Keep the catalog's deterministic name order for ties. This makes the
-  // result stable while still putting recently-used adapters first.
+  // Heat is the primary key (command-history). Health is secondary: a broken
+  // adapter must not rank above a healthy same-heat (typically same-domain)
+  // adapter. Ties keep the catalog's deterministic name order.
   return results
     .map((adapter, index) => ({
       adapter,
       index,
       heat: options.recentCallHeat?.get(adapter.name) ?? 0,
+      healthRank: healthSortRank(options.healthByName?.get(adapter.name)),
     }))
-    .sort((a, b) => b.heat - a.heat || a.index - b.index)
+    .sort((a, b) => b.heat - a.heat || a.healthRank - b.healthRank || a.index - b.index)
     .map(({ adapter }) => adapter);
 }

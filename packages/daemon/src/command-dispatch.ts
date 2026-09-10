@@ -5,11 +5,12 @@
  * CdpConnection + TabStateManager for per-tab state and seq tracking.
  */
 
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import type {
+  AdapterHealthInfo,
   Request,
   Response,
   ResponseData,
@@ -17,13 +18,25 @@ import type {
   SnapshotData,
   TraceStatus,
 } from "@ma-browser/shared";
+import { DAEMON_DIR } from "@ma-browser/shared";
 import { CdpConnection, type CdpTargetInfo } from "./cdp-connection.js";
 import type { TabState } from "./tab-state.js";
 import type { AgentSession } from "./session-state.js";
 import type { BindingStore } from "./binding-store.js";
 import type { ScratchpadManager } from "./scratchpad-manager.js";
 import type { CommandHistory } from "./command-history.js";
-import { filterAdaptersForScope } from "./site-catalog.js";
+import { filterAdaptersForScope, invalidateCatalog } from "./site-catalog.js";
+import { planFreeze, resolvePrivateAdapterFile } from "./adapter-freeze.js";
+import {
+  getAdapterCache,
+  isAdapterCacheable,
+  type AdapterCache,
+} from "./adapter-cache.js";
+import {
+  applySiteRunHealth,
+  getAdapterHealth,
+  type AdapterHealthStore,
+} from "./adapter-health.js";
 import {
   listAdapters,
   searchAdapters,
@@ -39,6 +52,8 @@ export interface DispatchContext {
   bindingStore?: BindingStore;
   scratchpadManager?: ScratchpadManager;
   commandHistory?: CommandHistory;
+  adapterCache?: AdapterCache;
+  adapterHealth?: AdapterHealthStore;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,14 +112,26 @@ function ok(id: string, data?: ExtResponseData): Response {
   return { id, success: true, data: data as ResponseData };
 }
 
-function fail(id: string, error: unknown, data?: ExtResponseData): Response {
+function fail(
+  id: string,
+  error: unknown,
+  data?: ExtResponseData,
+  extra?: { hint?: string; action?: string },
+): Response {
   return {
     id,
     success: false,
     error: buildRequestError(error).message,
+    ...(extra?.hint ? { hint: extra.hint } : {}),
+    ...(extra?.action ? { action: extra.action } : {}),
     ...(data ? { data: data as ResponseData } : {}),
   };
 }
+
+const EVAL_LIKE_PRIVILEGE = {
+  hint: "site_freeze generates JS that will run in a real tab (eval-like). Use a full-control session.",
+  action: "Set BB_SESSION_SCOPE=full and reconnect this client",
+};
 
 // ---------------------------------------------------------------------------
 // buildDomTree script loading
@@ -565,6 +592,13 @@ function visibleSiteAdapters(session: AgentSession | undefined) {
   return filterAdaptersForScope(listAdapters(), session?.scope === "read-only");
 }
 
+function attachHealth<T extends { name: string; domain?: string; origin?: string }>(
+  adapter: T,
+  health: AdapterHealthStore,
+): T & { health: AdapterHealthInfo } {
+  return { ...adapter, health: health.view(adapter) };
+}
+
 function resolveRecommendationTarget(
   targets: CdpTargetInfo[],
   cdp: CdpConnection,
@@ -584,11 +618,13 @@ function resolveRecommendationTarget(
 }
 
 /** Returns true if the request involves running JavaScript via Runtime.evaluate. */
-function isEvalLike(request: Request): boolean {
+export function isEvalLike(request: Pick<Request, "action" | "traceCommand">): boolean {
   return (
     request.action === "eval" ||
     // site_run executes adapter JS via eval, so it requires eval permission.
     request.action === "site_run" ||
+    // site_freeze generates JS that site_run will eval in a real tab.
+    request.action === "site_freeze" ||
     (request.action === "trace" && request.traceCommand === "start")
   );
 }
@@ -711,15 +747,27 @@ async function handleVaultRequest(request: Request, cdp: CdpConnection): Promise
   }
 }
 
+function mergeSiteRunData(
+  parsed: unknown,
+  extra: Record<string, unknown>,
+): ExtResponseData {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return { ...(parsed as Record<string, unknown>), ...extra };
+  }
+  return { result: parsed, ...extra };
+}
+
 /**
  * Execute a site adapter: resolve the adapter + its target tab, run the adapter
  * JS via eval, and normalise the result. The adapter runs in the page context
  * of a tab on the adapter's domain so its fetch() calls carry real cookies.
+ * Successful readOnly results are served from the local TTL cache when possible.
  */
 async function handleSiteRun(
   cdp: CdpConnection,
   request: Request,
   session?: AgentSession,
+  ctx?: DispatchContext,
 ): Promise<Response> {
   if (!request.name) return fail(request.id, "Missing 'name' parameter for site_run");
 
@@ -734,6 +782,27 @@ async function handleSiteRun(
 
   const prep = prepareAdapterScript(adapter, request.args ?? [], request.namedArgs ?? {});
   if ("error" in prep) return fail(request.id, prep.error);
+
+  const cache = ctx?.adapterCache ?? getAdapterCache();
+  const health = ctx?.adapterHealth ?? getAdapterHealth();
+  const fresh = request.fresh === true;
+  const hit = cache.peek(adapter, prep.argMap, fresh);
+  if (hit) {
+    // INV-1: still emit tab + seq. Do not Runtime.evaluate or create tabs.
+    // Cache hits are not live runs — do not rewrite health (H1).
+    const seq = cdp.tabManager.nextSeq();
+    const tab = hit.entry.tab ?? "cache";
+    return ok(
+      request.id,
+      mergeSiteRunData(hit.entry.result, {
+        tab,
+        seq,
+        cacheHit: true,
+        cacheAgeSec: hit.cacheAgeSec,
+        cacheExpiresAt: hit.cacheExpiresAt,
+      }),
+    );
+  }
 
   // Resolve target tab: explicit tabId > domain match > new domain tab > active.
   let targetId: string;
@@ -784,32 +853,230 @@ async function handleSiteRun(
     try {
       raw = await cdp.evaluate<unknown>(targetId, prep.script, true);
     } catch (e) {
-      return fail(request.id, `Adapter execution failed: ${buildRequestError(e).message}`, attribution);
+      const applied = applySiteRunHealth({
+        health,
+        cache,
+        adapter,
+        outcome: {
+          type: "error",
+          error: `Adapter execution failed: ${buildRequestError(e).message}`,
+          structural: true,
+        },
+      });
+      return fail(request.id, applied.view.lastError ?? "Adapter execution failed", {
+        ...attribution,
+        health: applied.view,
+      }, {
+        ...(applied.view.hint ? { hint: applied.view.hint } : {}),
+        ...(applied.view.action ? { action: applied.view.action } : {}),
+      });
     }
 
     let parsed: unknown = raw;
     if (typeof raw === "string") {
-      try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        const applied = applySiteRunHealth({
+          health,
+          cache,
+          adapter,
+          outcome: { type: "error", error: "Adapter returned non-JSON", structural: true },
+        });
+        return fail(request.id, applied.view.lastError ?? "Adapter returned non-JSON", {
+          ...attribution,
+          health: applied.view,
+        }, {
+          ...(applied.view.hint ? { hint: applied.view.hint } : {}),
+          ...(applied.view.action ? { action: applied.view.action } : {}),
+        });
+      }
     }
 
     // Adapters signal failure by returning an { error } object.
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "error" in parsed) {
       const eo = parsed as { error?: unknown; hint?: unknown };
       const base = String(eo.error ?? "adapter error");
-      const hint = eo.hint ? ` (${String(eo.hint)})` : "";
-      const login = adapter.domain
-        ? ` — make sure you are logged in to ${adapter.domain} in Chrome`
-        : "";
-      return fail(request.id, `${base}${hint}${login}`, attribution);
+      const applied = applySiteRunHealth({
+        health,
+        cache,
+        adapter,
+        outcome: {
+          type: "error",
+          error: base,
+          hint: eo.hint ? String(eo.hint) : undefined,
+        },
+      });
+      return fail(request.id, base, {
+        ...attribution,
+        health: applied.view,
+      }, {
+        ...(applied.view.hint ? { hint: applied.view.hint } : {}),
+        ...(applied.view.action ? { action: applied.view.action } : {}),
+      });
     }
+
+    applySiteRunHealth({
+      health,
+      cache,
+      adapter,
+      outcome: { type: "success" },
+    });
 
     // Preserve the adapter's object-shaped result while attaching the daemon
     // metadata required by CommandLog. Primitive/array results are wrapped so
     // tab and seq remain available without inventing object keys in the data.
-    const data = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? { ...(parsed as Record<string, unknown>), ...attribution }
-      : { result: parsed, ...attribution };
-    return ok(request.id, data);
+    const cacheFields: Record<string, unknown> = {};
+    if (isAdapterCacheable(adapter, cache.defaultTtlSecs)) {
+      const stored = cache.store(adapter, prep.argMap, parsed, {
+        tab: tab?.shortId,
+      });
+      cacheFields.cacheHit = false;
+      cacheFields.cacheAgeSec = 0;
+      if (stored.expiresAt) cacheFields.cacheExpiresAt = stored.expiresAt;
+      if (stored.warning) cacheFields.warnings = [stored.warning];
+    }
+    return ok(request.id, mergeSiteRunData(parsed, { ...attribution, ...cacheFields }));
+  });
+}
+
+function hostnameOf(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Freeze a captured network request into a private adapter draft.
+ * INV-7: never create a blank page to succeed; fail if no page tab exists.
+ * INV-3: explicit tabId must resolve or error (no silent fallback).
+ */
+async function handleSiteFreeze(
+  cdp: CdpConnection,
+  request: Request,
+  session?: AgentSession,
+): Promise<Response> {
+  if (!request.name) {
+    return fail(request.id, "Missing 'name' parameter for site_freeze", undefined, {
+      hint: "Name must be platform/command, e.g. example/search.",
+      action: "ma-browser site freeze --name platform/command",
+    });
+  }
+
+  const pages = (await cdp.getTargets()).filter((t) => t.type === "page");
+  if (pages.length === 0) {
+    return fail(request.id, "No page tab to freeze from", undefined, {
+      hint: "Open a logged-in site, capture the request with network, then freeze. site_freeze will not create a blank tab.",
+      action: "ma-browser open <url>",
+    });
+  }
+
+  let target: CdpTargetInfo | undefined;
+  if (request.tabId !== undefined) {
+    const ref = String(request.tabId);
+    const resolvedTargetId = cdp.tabManager.resolveShortId(ref);
+    target =
+      (resolvedTargetId ? pages.find((t) => t.id === resolvedTargetId) : undefined) ??
+      pages.find((t) => t.id === ref);
+    if (!target) {
+      return fail(request.id, `Tab not found: ${ref}`);
+    }
+  } else {
+    target =
+      (session?.currentTargetId
+        ? pages.find((t) => t.id === session.currentTargetId)
+        : undefined) ?? pages[0];
+  }
+  if (!target) {
+    return fail(request.id, "No page tab to freeze from", undefined, {
+      hint: "Open a logged-in site first. site_freeze will not create a blank tab.",
+      action: "ma-browser open <url>",
+    });
+  }
+
+  await cdp.attachAndEnable(target.id);
+  const tab = cdp.tabManager.getTab(target.id);
+  if (!tab) return fail(request.id, "Internal error: tab state not found");
+
+  if (
+    tab.leaseMode === "exclusive" &&
+    tab.leaseOwner &&
+    tab.leaseOwner !== session?.id
+  ) {
+    return fail(request.id, `Tab ${tab.shortId} is exclusively held by another session`);
+  }
+
+  const seq = tab.recordAction();
+  const attribution = { tab: tab.shortId, seq };
+
+  const requests = request.requestId
+    ? tab.getNetworkRequests().items
+    : tab.getNetworkRequests({
+        since: request.since ?? "last_action",
+        method: request.method,
+        status: request.status,
+        limit: request.limit,
+      }).items;
+
+  const navs = tab.getTraceEvents().items.filter((e) => e.type === "navigation");
+  const lastNav = navs[navs.length - 1];
+  const domain = hostnameOf(lastNav?.url) ?? hostnameOf(target.url);
+
+  const dest = resolvePrivateAdapterFile(DAEMON_DIR, request.name);
+  const alreadyExists = "path" in dest && existsSync(dest.path);
+
+  const planned = planFreeze({
+    name: request.name,
+    requests,
+    requestId: request.requestId,
+    overwrite: request.overwrite,
+    alreadyExists,
+    bbHome: DAEMON_DIR,
+    domain,
+    tab: tab.shortId,
+    seq,
+  });
+
+  if (planned.kind === "error") {
+    return fail(request.id, planned.error, attribution, {
+      hint: planned.hint,
+      action: planned.action,
+    });
+  }
+
+  if (planned.kind === "candidates") {
+    return ok(request.id, {
+      ...attribution,
+      freezeDraft: {
+        warnings: ["Multiple API candidates; pass requestId to freeze one."],
+        incomplete: true,
+        candidates: planned.candidates.map((c) => ({
+          requestId: c.requestId,
+          url: c.url,
+          method: c.method,
+          status: c.status,
+          mimeType: c.mimeType,
+        })),
+      },
+    });
+  }
+
+  mkdirSync(path.dirname(planned.dest), { recursive: true });
+  writeFileSync(planned.dest, planned.draft, { encoding: "utf8" });
+  invalidateCatalog();
+
+  return ok(request.id, {
+    ...attribution,
+    path: planned.dest,
+    freezeDraft: {
+      path: planned.dest,
+      preview: planned.preview,
+      warnings: planned.warnings,
+      incomplete: planned.incomplete,
+    },
   });
 }
 
@@ -824,11 +1091,24 @@ export async function dispatchRequest(
   // Scope enforcement — fast-fail before any CDP work.
   if (session?.scope === "read-only") {
     if (!isReadOnlyScopeAllowed(request.action)) {
+      if (request.action === "site_freeze") {
+        return fail(
+          request.id,
+          `Action 'site_freeze' is not allowed in read-only scope`,
+          undefined,
+          EVAL_LIKE_PRIVILEGE,
+        );
+      }
       return fail(request.id, `Action '${request.action}' is not allowed in read-only scope`);
     }
   } else if (session?.scope === "no-eval") {
     if (isEvalLike(request)) {
-      return fail(request.id, `Action '${request.action}' requires eval permission (session scope: no-eval)`);
+      return fail(
+        request.id,
+        `Action '${request.action}' requires eval permission (session scope: no-eval)`,
+        undefined,
+        request.action === "site_freeze" ? EVAL_LIKE_PRIVILEGE : undefined,
+      );
     }
   }
 
@@ -882,14 +1162,20 @@ export async function dispatchRequest(
   // resolves/creates its own domain-matched tab, so all are handled before
   // ensurePageTarget() (which would throw when no page exists yet).
   if (request.action === "site_list") {
-    return ok(request.id, visibleSiteAdapters(session) as unknown as ExtResponseData);
+    const health = ctx?.adapterHealth ?? getAdapterHealth();
+    return ok(
+      request.id,
+      visibleSiteAdapters(session).map((adapter) => attachHealth(adapter, health)) as unknown as ExtResponseData,
+    );
   }
   if (request.action === "site_search") {
+    const health = ctx?.adapterHealth ?? getAdapterHealth();
     const adapters = visibleSiteAdapters(session);
     return ok(
       request.id,
       searchAdapters(request.query, request.domain, ctx?.commandHistory?.siteHeat())
-        .filter((adapter) => adapters.some((visible) => visible.name === adapter.name)) as unknown as ExtResponseData,
+        .filter((adapter) => adapters.some((visible) => visible.name === adapter.name))
+        .map((adapter) => attachHealth(adapter, health)) as unknown as ExtResponseData,
     );
   }
   if (request.action === "site_info") {
@@ -898,7 +1184,8 @@ export async function dispatchRequest(
     if (!adapter || (session?.scope === "read-only" && adapter.readOnly === false)) {
       return fail(request.id, `Site adapter '${request.name}' not found`);
     }
-    return ok(request.id, adapter as unknown as ExtResponseData);
+    const health = ctx?.adapterHealth ?? getAdapterHealth();
+    return ok(request.id, attachHealth(adapter, health) as unknown as ExtResponseData);
   }
   if (request.action === "site_recommend") {
     // Recommend adapters for this session's active tab. The session cursor is
@@ -911,8 +1198,14 @@ export async function dispatchRequest(
     const target = resolveRecommendationTarget(targets, cdp, session, request.tabId);
     const tab = target ? cdp.tabManager.getTab(target.id) : undefined;
     const adapters = visibleSiteAdapters(session);
+    const health = ctx?.adapterHealth ?? getAdapterHealth();
     const matched = target
-      ? searchAdapters(undefined, undefined, ctx?.commandHistory?.siteHeat())
+      ? searchAdapters(
+        undefined,
+        undefined,
+        ctx?.commandHistory?.siteHeat(),
+        health.statusMap(),
+      )
         .filter((adapter) => matchTabOrigin(target.url, adapter.domain))
         .filter((adapter) => adapters.some((visible) => visible.name === adapter.name))
         .map((adapter) => ({
@@ -920,6 +1213,7 @@ export async function dispatchRequest(
           description: adapter.description,
           domain: adapter.domain,
           ...(adapter.example ? { example: adapter.example } : {}),
+          health: health.view(adapter),
         }))
       : [];
     return ok(request.id, {
@@ -936,11 +1230,15 @@ export async function dispatchRequest(
     });
   }
   if (request.action === "site_run") {
-    return handleSiteRun(cdp, request, session);
+    return handleSiteRun(cdp, request, session, ctx);
+  }
+  if (request.action === "site_freeze") {
+    return handleSiteFreeze(cdp, request, session);
   }
   if (request.action === "site_update") {
     const result = await updateAdapters();
     if ("error" in result) return fail(request.id, `${result.error} — manual fix: ${result.action}`);
+    (ctx?.adapterCache ?? getAdapterCache()).invalidateCommunity();
     return ok(request.id, result as unknown as ExtResponseData);
   }
 

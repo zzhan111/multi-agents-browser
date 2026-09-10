@@ -218,6 +218,11 @@ function AdapterCard({ adapter: a }) {
       {/* ── Card header ── */}
       <div className={styles.cardHead} onClick={() => setExpanded((v) => !v)}>
         <span className={styles.chevron}>{expanded ? '▾' : '▸'}</span>
+        <span
+          className={`${styles.healthDot} ${styles[`health_${a.health?.status ?? 'unknown'}`]}`}
+          title={a.health?.status ?? 'unknown'}
+          aria-label={a.health?.status ?? 'unknown'}
+        />
         <div className={styles.titles}>
           <span className={styles.adapterTitle}>{a.title || a.name}</span>
           <span className={styles.adapterName}>{a.name}</span>
@@ -227,7 +232,8 @@ function AdapterCard({ adapter: a }) {
         {a.readOnly
           ? <span className={`${styles.badge} ${styles.badgeRO}`}>只读</span>
           : <span className={`${styles.badge} ${styles.badgeRW}`}>写入</span>}
-        {a.source === 'local' && <span className={`${styles.badge} ${styles.badgeLocal}`}>本地</span>}
+        {a.origin === 'freeze-draft' && <span className={`${styles.badge} ${styles.badgeDraft}`}>草稿</span>}
+        {a.source === 'local' && a.origin !== 'freeze-draft' && <span className={`${styles.badge} ${styles.badgeLocal}`}>本地</span>}
       </div>
       <p className={styles.adapterDesc}>{a.description}</p>
       <code className={styles.signature}>{signature}</code>
@@ -268,6 +274,13 @@ function AdapterCard({ adapter: a }) {
             <div className={styles.exampleRow}>
               <span className={styles.sectionLabel}>示例</span>
               <code className={styles.exampleCode}>{a.example}</code>
+            </div>
+          )}
+
+          {(a.health?.status === 'degraded' || a.health?.status === 'broken') && (
+            <div className={styles.healthMeta}>
+              {a.health.lastError && <code className={styles.healthError}>{a.health.lastError}</code>}
+              {a.health.action && <code className={styles.healthAction}>{a.health.action}</code>}
             </div>
           )}
 

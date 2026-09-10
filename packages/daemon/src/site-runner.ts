@@ -12,6 +12,7 @@ import { readFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { DAEMON_DIR } from "@ma-browser/shared";
+import type { AdapterHealthStatus } from "@ma-browser/shared";
 import {
   getCatalog,
   queryCatalog,
@@ -126,11 +127,13 @@ export function searchAdapters(
   query?: string,
   domain?: string,
   recentCallHeat?: AdapterCallHeat,
+  healthByName?: ReadonlyMap<string, AdapterHealthStatus>,
 ): SiteAdapter[] {
   return queryCatalog(getCatalog(DAEMON_DIR).adapters, {
     q: query,
     domain,
     recentCallHeat,
+    healthByName,
   });
 }
 
@@ -147,7 +150,7 @@ export function fuzzyAdapterNames(name: string): string[] {
     .map((a) => a.name);
 }
 
-export type PrepareResult = { script: string } | { error: string };
+export type PrepareResult = { script: string; argMap: Record<string, string> } | { error: string };
 
 /**
  * Resolve adapter arguments and build the IIFE script that runs the adapter.
@@ -204,7 +207,7 @@ export function prepareAdapterScript(
 
   // Strip the /* @meta ... */ block; the remainder is the adapter function.
   const jsBody = jsContent.replace(/\/\*\s*@meta[\s\S]*?\*\//, "").trim();
-  return { script: `(${jsBody})(${JSON.stringify(argMap)})` };
+  return { script: `(${jsBody})(${JSON.stringify(argMap)})`, argMap };
 }
 
 /** Does a tab's origin belong to the adapter's domain (or a subdomain)? */

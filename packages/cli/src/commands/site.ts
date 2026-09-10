@@ -13,7 +13,7 @@
  *   ~/.bb-browser/bb-sites/    社区 adapter（ma-browser site update 拉取）
  */
 
-import { generateId, type Request, type Response, type TabInfo } from "@ma-browser/shared";
+import { generateId, type AdapterHealthInfo, type Request, type Response } from "@ma-browser/shared";
 import { handleJqResponse, sendCommand } from "../client.js";
 import { getHistoryDomains } from "../history-sqlite.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
@@ -61,6 +61,7 @@ export interface SiteOptions {
   days?: number;
   jq?: string;
   openclaw?: boolean;
+  fresh?: boolean;
 }
 
 /** Adapter 参数定义 */
@@ -226,18 +227,6 @@ function getAllSites(): SiteMeta[] {
   return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/**
- * 精确匹配 tab 的 origin
- */
-function matchTabOrigin(tabUrl: string, domain: string): boolean {
-  try {
-    const tabOrigin = new URL(tabUrl).hostname;
-    return tabOrigin === domain || tabOrigin.endsWith("." + domain);
-  } catch {
-    return false;
-  }
-}
-
 // ── 子命令 ──────────────────────────────────────────────────────
 
 function siteList(options: SiteOptions): void {
@@ -255,9 +244,11 @@ function siteList(options: SiteOptions): void {
   }
 
   if (options.json) {
+    const healthMap = loadAdapterHealthMap();
     console.log(JSON.stringify(sites.map(s => ({
       name: s.name, description: s.description, domain: s.domain,
       args: s.args, source: s.source,
+      health: healthOf(s.name, s.domain, healthMap),
     })), null, 2));
     return;
   }
@@ -405,6 +396,53 @@ function findSiteByName(name: string): SiteMeta | undefined {
   return getAllSites().find((site) => site.name === name);
 }
 
+function loadAdapterHealthMap(): Record<string, AdapterHealthInfo> {
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(BB_DIR, "state", "adapter-health.json"), "utf-8"),
+    ) as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return raw as Record<string, AdapterHealthInfo>;
+  } catch {
+    return {};
+  }
+}
+
+function healthOf(
+  name: string,
+  domain: string | undefined,
+  map: Record<string, AdapterHealthInfo>,
+): AdapterHealthInfo {
+  const rec = map[name];
+  if (!rec || typeof rec.status !== "string") {
+    return { status: "unknown", consecutiveFails: 0 };
+  }
+  const status = rec.status;
+  const hintAction =
+    status === "degraded"
+      ? {
+          hint: domain
+            ? `需要先登录 ${domain}，请先在 Chrome 中打开该站点并登录`
+            : "需要先在 Chrome 中打开并登录对应站点",
+          action: domain ? `ma-browser open https://${domain}` : "ma-browser guide",
+        }
+      : status === "broken"
+        ? {
+            hint: "adapter 连续失败或返回结构异常，建议重新冻结或运行 ma-browser guide",
+            action: `ma-browser site freeze --name ${name}`,
+          }
+        : {};
+  return {
+    status,
+    consecutiveFails: typeof rec.consecutiveFails === "number" ? rec.consecutiveFails : 0,
+    ...(typeof rec.lastOkAt === "string" ? { lastOkAt: rec.lastOkAt } : {}),
+    ...(typeof rec.lastFailAt === "string" ? { lastFailAt: rec.lastFailAt } : {}),
+    ...(typeof rec.lastError === "string" ? { lastError: rec.lastError } : {}),
+    ...(typeof rec.lastHttpStatus === "number" ? { lastHttpStatus: rec.lastHttpStatus } : {}),
+    ...hintAction,
+  };
+}
+
 function siteInfo(name: string, options: SiteOptions): void {
   const site = findSiteByName(name);
 
@@ -417,6 +455,7 @@ function siteInfo(name: string, options: SiteOptions): void {
     process.exit(1);
   }
 
+  const health = healthOf(site.name, site.domain, loadAdapterHealthMap());
   const meta = {
     name: site.name,
     description: site.description,
@@ -424,6 +463,7 @@ function siteInfo(name: string, options: SiteOptions): void {
     args: site.args,
     example: site.example,
     readOnly: site.readOnly,
+    health,
   };
 
   if (options.json) {
@@ -452,6 +492,9 @@ function siteInfo(name: string, options: SiteOptions): void {
   console.log();
   console.log(`域名：${site.domain || "（未声明）"}`);
   console.log(`只读：${site.readOnly ? "是" : "否"}`);
+  console.log(`健康：${health.status}`);
+  if (health.lastError) console.log(`上次错误：${health.lastError}`);
+  if (health.action) console.log(`  Action: ${health.action}`);
 }
 
 async function siteRecommend(options: SiteOptions): Promise<void> {
@@ -620,15 +663,9 @@ async function siteRun(
     }
   }
 
-  // 读取并解析 JS
   const jsContent = readFileSync(site.filePath, "utf-8");
-
-  // 移除 /* @meta ... */ 块，保留函数体
   const jsBody = jsContent.replace(/\/\*\s*@meta[\s\S]*?\*\//, "").trim();
-
-  // 构造执行脚本
   const argsJson = JSON.stringify(argMap);
-  const script = `(${jsBody})(${argsJson})`;
 
   if (options.openclaw) {
     const { ocGetTabs, ocFindTabByDomain, ocOpenTab, ocEvaluate } = await import("../openclaw-bridge.js");
@@ -693,106 +730,150 @@ async function siteRun(
 
   await ensureDaemonRunning();
 
-  // 确定目标 tab
-  let targetTabId: string | number | undefined = options.tabId;
+  const runReq: Request = {
+    id: generateId(),
+    action: "site_run",
+    name,
+    args: [],
+    namedArgs: argMap,
+    tabId: options.tabId,
+    ...(options.fresh ? { fresh: true } : {}),
+  };
+  const runResp: Response = await sendCommand(runReq);
 
-  // 如果用户没指定 --tab，自动查找匹配域名的 tab
-  if (!targetTabId && site.domain) {
-    const listReq: Request = { id: generateId(), action: "tab_list" };
-    const listResp: Response = await sendCommand(listReq);
-
-    if (listResp.success && listResp.data?.tabs) {
-      const matchingTab = listResp.data.tabs.find((tab: TabInfo) =>
-        matchTabOrigin(tab.url, site.domain)
-      );
-      if (matchingTab) {
-        targetTabId = matchingTab.tabId;
-      }
-    }
-
-    if (!targetTabId) {
-      const newResp = await sendCommand({
-        id: generateId(),
-        action: "tab_new",
-        url: `https://${site.domain}`,
-      });
-      targetTabId = newResp.data?.tabId;
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-    }
-  }
-
-  // 执行
-  const evalReq: Request = { id: generateId(), action: "eval", script, tabId: targetTabId };
-  const evalResp: Response = await sendCommand(evalReq);
-
-  if (!evalResp.success) {
-    const hint = site.domain
+  if (!runResp.success) {
+    const hint = runResp.hint ?? (site.domain
       ? `Open https://${site.domain} in your browser, make sure you are logged in, then retry.`
-      : undefined;
+      : undefined);
     if (options.json) {
-      console.log(JSON.stringify({ id: evalReq.id, success: false, error: evalResp.error || "eval failed", hint }));
+      console.log(JSON.stringify({
+        id: runReq.id,
+        success: false,
+        error: runResp.error || "site_run failed",
+        hint,
+        ...(runResp.action ? { action: runResp.action } : {}),
+      }));
     } else {
-      console.error(`[error] site ${name}: ${evalResp.error || "eval failed"}`);
+      console.error(`[error] site ${name}: ${runResp.error || "site_run failed"}`);
       if (hint) console.error(`  Hint: ${hint}`);
+      if (runResp.action) console.error(`  Action: ${runResp.action}`);
     }
     process.exit(1);
   }
 
-  const result = evalResp.data?.result;
-  if (result === undefined || result === null) {
+  const parsed = runResp.data;
+  if (parsed === undefined || parsed === null) {
     if (options.json) {
-      console.log(JSON.stringify({ id: evalReq.id, success: true, data: null }));
+      console.log(JSON.stringify({ id: runReq.id, success: true, data: null }));
     } else {
       console.log("(no output)");
     }
     return;
   }
 
-  // 解析输出
-  let parsed: unknown;
-  try {
-    parsed = typeof result === "string" ? JSON.parse(result) : result;
-  } catch {
-    parsed = result;
-  }
-
-  // 检查 adapter 返回的 error
-  if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
-    const errObj = parsed as { error: string; hint?: string };
-
-    // 检测是否为登录问题（检查 error 和 hint 文本）
-    const checkText = `${errObj.error} ${errObj.hint || ""}`;
-    const isAuthError = /401|403|unauthorized|forbidden|not.?logged|login.?required|sign.?in|auth/i.test(checkText);
-    const loginHint = isAuthError && site.domain
-      ? `Please log in to https://${site.domain} in your browser first, then retry.`
-      : undefined;
-    const hint = loginHint || errObj.hint;
-    const reportHint = `If this is an adapter bug, report via: gh issue create --repo zzhan111/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] <description>"`;
-
-    if (options.json) {
-      console.log(JSON.stringify({ id: evalReq.id, success: false, error: errObj.error, hint, reportHint }));
-    } else {
-      console.error(`[error] site ${name}: ${errObj.error}`);
-      if (hint) console.error(`  Hint: ${hint}`);
-      console.error(`  Report: gh issue create --repo zzhan111/bb-sites --title "[${name}] ..."`);
-      console.error(`     or: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] ..."`);
-    }
-    process.exit(1);
-  }
-
   if (options.jq) {
     const { applyJq } = await import("../jq.js");
-    // Tolerate ".data." prefix — Agent may copy from --json envelope structure
     const expr = options.jq.replace(/^\.data\./, '.');
     const results = applyJq(parsed, expr);
     for (const r of results) {
       console.log(typeof r === "string" ? r : JSON.stringify(r));
     }
   } else if (options.json) {
-    console.log(JSON.stringify({ id: evalReq.id, success: true, data: parsed }));
+    console.log(JSON.stringify({ id: runReq.id, success: true, data: parsed }));
   } else {
     console.log(JSON.stringify(parsed, null, 2));
+    if (parsed.cacheHit) {
+      console.log();
+      console.log(`💡 缓存命中（${parsed.cacheAgeSec ?? 0}s 前），加 --fresh 强制回源`);
+    }
   }
+}
+
+function flagValue(argv: string[], names: string[]): string | undefined {
+  for (const name of names) {
+    const idx = argv.indexOf(name);
+    if (idx >= 0 && argv[idx + 1] && !argv[idx + 1].startsWith("-")) {
+      return argv[idx + 1];
+    }
+  }
+  return undefined;
+}
+
+async function siteFreeze(args: string[], options: SiteOptions): Promise<void> {
+  const name = flagValue(process.argv, ["--name"]) ?? args.find((a) => a.includes("/"));
+  const requestId = flagValue(process.argv, ["--request-id", "--requestId"]);
+  const overwrite = process.argv.includes("--overwrite");
+  const sinceRaw = flagValue(process.argv, ["--since"]);
+  const method = flagValue(process.argv, ["--method"]);
+  const status = flagValue(process.argv, ["--status"]);
+
+  if (!name) {
+    if (options.json) {
+      exitJsonError("Missing adapter name", {
+        hint: "Name must be platform/command.",
+        action: "ma-browser site freeze --name example/search [--request-id <id>]",
+      });
+    }
+    console.error("[error] site freeze: --name platform/command is required.");
+    console.error("  Usage: ma-browser site freeze --name example/search [--request-id <id>] [--overwrite]");
+    process.exit(1);
+  }
+
+  let since: number | "last_action" | undefined;
+  if (sinceRaw) {
+    const num = parseInt(sinceRaw, 10);
+    since = (!isNaN(num) && String(num) === sinceRaw) ? num : (sinceRaw as "last_action");
+  }
+
+  const req: Request = {
+    id: generateId(),
+    action: "site_freeze",
+    name,
+    requestId,
+    overwrite: overwrite || undefined,
+    since,
+    method,
+    status,
+    tabId: options.tabId,
+  };
+  const resp: Response = await sendCommand(req);
+
+  if (options.json) {
+    console.log(JSON.stringify(resp, null, 2));
+    if (!resp.success) process.exit(1);
+    return;
+  }
+
+  if (!resp.success) {
+    console.error(`[error] site freeze: ${resp.error}`);
+    if (resp.hint) console.error(`  Hint: ${resp.hint}`);
+    if (resp.action) console.error(`  Action: ${resp.action}`);
+    process.exit(1);
+  }
+
+  const draft = resp.data?.freezeDraft;
+  const candidates = draft?.candidates;
+  if (candidates && candidates.length > 0 && !draft?.path) {
+    console.log(`找到 ${candidates.length} 个 API 候选，请带 --request-id 再冻一次：`);
+    console.log();
+    for (const c of candidates) {
+      console.log(`  ${c.requestId}  ${c.method} ${c.status ?? ""}  ${c.url}`);
+    }
+    console.log();
+    console.log(`💡 运行 ma-browser site freeze --name ${name} --request-id <id>`);
+    return;
+  }
+
+  const dest = draft?.path ?? resp.data?.path;
+  console.log(`已写入私有草稿：${dest}`);
+  if (draft?.warnings && draft.warnings.length > 0) {
+    for (const w of draft.warnings) console.log(`  警告: ${w}`);
+  }
+  if (draft?.incomplete) {
+    console.log("  状态: 草稿未完成（incomplete），请人工核对后再跑。");
+  }
+  console.log();
+  console.log(`💡 运行 ma-browser site ${name} 验证草稿。贡献社区仍走 ma-browser guide 第 5 步。`);
 }
 
 // ── 入口 ────────────────────────────────────────────────────────
@@ -811,8 +892,9 @@ export async function siteCommand(
   ma-browser site info <name>               查看 adapter 元信息
   ma-browser site recommend                 基于历史记录推荐 adapter
   ma-browser site search <query>            搜索 adapter
-  ma-browser site <name> [args...]          运行 adapter（简写）
-  ma-browser site run <name> [args...]      运行 adapter
+  ma-browser site <name> [args...] [--fresh]  运行 adapter（简写）
+  ma-browser site run <name> [args...] [--fresh]  运行 adapter
+  ma-browser site freeze --name <n>         从网络请求冻成私有 adapter 草稿
   ma-browser site update                    更新社区 adapter 库 (git clone/pull)
 
 目录:
@@ -854,6 +936,9 @@ export async function siteCommand(
       await siteRecommend(options);
       break;
     case "update":  await siteUpdate(options); break;
+    case "freeze":
+      await siteFreeze(args.slice(1), options);
+      break;
     case "run":
       if (!args[1]) {
         console.error("[error] site run: <name> is required.");
@@ -868,7 +953,7 @@ export async function siteCommand(
         await siteRun(subCommand, args.slice(1), options);
       } else {
         console.error(`[error] site: unknown subcommand "${subCommand}".`);
-        console.error("  Available: list, info, recommend, search, run, update");
+        console.error("  Available: list, info, recommend, search, run, freeze, update");
         console.error("  Try: ma-browser site --help");
         process.exit(1);
       }
