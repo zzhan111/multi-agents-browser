@@ -9,6 +9,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import path from "node:path";
 import { z } from "zod";
+import {
+  isDynamicToolsEnabled,
+  installDynamicSiteTools,
+  parseIdleMs,
+  type AdapterMeta,
+  type SiteRunRequest,
+} from "./dynamic-tools.js";
 
 declare const __BB_BROWSER_VERSION__: string;
 
@@ -871,6 +878,54 @@ server.tool(
     }
   }
 );
+
+// ---------------------------------------------------------------------------
+// 路 Y spike — dynamic site tools (BB_MCP_DYNAMIC_TOOLS=1, default OFF)
+// Activate ≤8 adapters as site_<platform>_<command>, forward to site_run
+// (same eval/scope gate). Idle reclaim ~5 min. See docs/spike-dynamic-tools-v0.13.md.
+// ---------------------------------------------------------------------------
+
+async function listSiteAdaptersForSpike(): Promise<AdapterMeta[]> {
+  const info = await getDaemonInfo();
+  if (info) {
+    const res = await fetch(`${daemonBaseUrl(info)}/api/sites`, {
+      headers: daemonHeaders(info),
+    });
+    if (res.ok) {
+      const data = await res.json() as { adapters?: AdapterMeta[] };
+      return data.adapters ?? [];
+    }
+    if (BB_SESSION_SCOPE === "read-only") {
+      throw new Error(`Daemon site catalog request failed: HTTP ${res.status}`);
+    }
+  }
+  if (BB_SESSION_SCOPE === "read-only") {
+    throw new Error("Daemon site catalog is unavailable for the read-only session");
+  }
+  const result = await runSiteCli(["list", "--json"]);
+  if (Array.isArray(result)) return result as AdapterMeta[];
+  if (result && typeof result === "object" && "adapters" in result) {
+    return (result as { adapters: AdapterMeta[] }).adapters ?? [];
+  }
+  return [];
+}
+
+if (isDynamicToolsEnabled()) {
+  installDynamicSiteTools(server, {
+    listAdapters: listSiteAdaptersForSpike,
+    idleMs: parseIdleMs(),
+    runSite: async (request: SiteRunRequest) => {
+      // Y4: the only execution path is the same daemon site_run action.
+      // Never runSiteCli here — that would be a scope-gate bypass.
+      return runCommand({
+        action: "site_run",
+        name: request.name,
+        namedArgs: request.namedArgs,
+        ...(request.tabId !== undefined ? { tabId: request.tabId } : {}),
+      });
+    },
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Vault read tools (read-only spine, see ma-browser-vault skill / DESIGN
