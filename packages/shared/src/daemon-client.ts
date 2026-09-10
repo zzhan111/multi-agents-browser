@@ -29,6 +29,8 @@ export interface DaemonInfo {
   bindHost?: string;
   port: number;
   token: string;
+  /** Absent in older daemon.json files; treat missing as false (local-only). */
+  remoteAccess?: boolean;
 }
 
 const CLIENT_SESSION_ID = process.env.BB_SESSION_ID?.trim() || randomUUID();

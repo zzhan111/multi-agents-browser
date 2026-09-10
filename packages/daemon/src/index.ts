@@ -9,7 +9,6 @@
  *   2. CDP connection established asynchronously
  */
 
-import { parseArgs } from "node:util";
 import { chmodSync, writeFileSync, renameSync, readFileSync, unlinkSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -35,6 +34,12 @@ import { getVaultManager } from "./vault/manager.js";
 import { ScratchpadManager } from "./scratchpad-manager.js";
 import { AdapterCache, adapterCacheDir } from "./adapter-cache.js";
 import { AdapterHealthStore } from "./adapter-health.js";
+import {
+  DEFAULT_CDP_PORT,
+  buildDaemonFileInfo,
+  parseListenArgs,
+  type DaemonFileInfo,
+} from "./listen-config.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -42,7 +47,6 @@ import { AdapterHealthStore } from "./adapter-health.js";
 
 const DAEMON_DIR = process.env.BB_BROWSER_HOME || path.join(os.homedir(), ".bb-browser");
 const DAEMON_JSON = path.join(DAEMON_DIR, "daemon.json");
-const DEFAULT_CDP_PORT = 19825;
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -50,45 +54,16 @@ const DEFAULT_CDP_PORT = 19825;
 
 interface DaemonOptions {
   host: string;
+  advertiseHost?: string;
   port: number;
   cdpHost: string;
   cdpPort: number;
   token: string;
+  remoteAccess: boolean;
 }
 
 function parseOptions(): DaemonOptions {
-  const { values } = parseArgs({
-    allowPositionals: true,
-    options: {
-      host: {
-        type: "string",
-        short: "H",
-        default: DAEMON_HOST,
-      },
-      port: {
-        type: "string",
-        short: "p",
-        default: String(DAEMON_PORT),
-      },
-      "cdp-host": {
-        type: "string",
-        default: "127.0.0.1",
-      },
-      "cdp-port": {
-        type: "string",
-        default: String(DEFAULT_CDP_PORT),
-      },
-      token: {
-        type: "string",
-        default: "",
-      },
-      help: {
-        type: "boolean",
-        short: "h",
-        default: false,
-      },
-    },
-  });
+  const values = parseListenArgs(process.argv.slice(2), process.env);
 
   if (values.help) {
     console.error(`
@@ -98,12 +73,17 @@ Usage:
   ma-browser-daemon [options]
 
 Options:
-  -H, --host <host>          HTTP server host (default: ${DAEMON_HOST})
-  -p, --port <port>          HTTP server port (default: ${DAEMON_PORT})
-      --cdp-host <host>      Chrome CDP host (default: 127.0.0.1)
-      --cdp-port <port>      Chrome CDP port (default: ${DEFAULT_CDP_PORT})
-      --token <token>        Bearer auth token (auto-generated if empty)
-  -h, --help                 Show this help message
+  -H, --host <host>              HTTP listen address (default: ${DAEMON_HOST}; env: BB_DAEMON_HOST)
+                                 127.0.0.1 (default), a Tailscale IP, or 0.0.0.0 (advanced)
+      --advertise-host <host>    Client connect address written to daemon.json
+                                 (env: BB_DAEMON_ADVERTISE_HOST). Used when remote access is on.
+      --remote-access            Allow remote clients; do not rewrite advertise host to 127.0.0.1
+                                 (env: BB_REMOTE_ACCESS=1; flag wins over env)
+  -p, --port <port>              HTTP server port (default: ${DAEMON_PORT})
+      --cdp-host <host>          Chrome CDP host (default: 127.0.0.1)
+      --cdp-port <port>          Chrome CDP port (default: ${DEFAULT_CDP_PORT})
+      --token <token>            Bearer auth token (auto-generated if empty)
+  -h, --help                     Show this help message
 
 Endpoints:
   POST /command      Send command and get result (via CDP)
@@ -114,17 +94,19 @@ Endpoints:
   }
 
   // Auto-generate token if not provided
-  let token = values.token ?? "";
+  let token = values.token;
   if (!token) {
     token = randomBytes(16).toString("hex");
   }
 
   return {
-    host: values.host ?? DAEMON_HOST,
-    port: parseInt(values.port ?? String(DAEMON_PORT), 10),
-    cdpHost: values["cdp-host"] ?? "127.0.0.1",
-    cdpPort: parseInt(values["cdp-port"] ?? String(DEFAULT_CDP_PORT), 10),
+    host: values.host,
+    advertiseHost: values.advertiseHost,
+    port: values.port,
+    cdpHost: values.cdpHost,
+    cdpPort: values.cdpPort,
     token,
+    remoteAccess: values.remoteAccess,
   };
 }
 
@@ -132,25 +114,7 @@ Endpoints:
 // daemon.json management
 // ---------------------------------------------------------------------------
 
-interface DaemonInfo {
-  pid: number;
-  host: string;
-  bindHost: string;
-  port: number;
-  token: string;
-}
-
-/**
- * daemon.json advertises a *connectable* host. When the server binds a
- * wildcard address (0.0.0.0 / ::) we can't tell clients to dial there, so we
- * advertise loopback instead: same-host clients reach it directly, and the WSL
- * client rewrites loopback → Windows host IP on its own (see daemon-client.ts).
- */
-function advertisedHost(bindHost: string): string {
-  return bindHost === "0.0.0.0" || bindHost === "::" ? "127.0.0.1" : bindHost;
-}
-
-function writeDaemonJson(info: DaemonInfo): void {
+function writeDaemonJson(info: DaemonFileInfo): void {
   try {
     mkdirSync(DAEMON_DIR, { recursive: true });
     // Write a temp file in the same dir, then atomically rename it over
@@ -188,7 +152,7 @@ function writeDaemonJson(info: DaemonInfo): void {
 function safeRemoveStaleDaemonJson(): void {
   let pid: number | undefined;
   try {
-    const raw = JSON.parse(readFileSync(DAEMON_JSON, "utf8")) as Partial<DaemonInfo>;
+    const raw = JSON.parse(readFileSync(DAEMON_JSON, "utf8")) as Partial<DaemonFileInfo>;
     if (typeof raw.pid === "number") pid = raw.pid;
   } catch {
     // Missing or unparseable file — nothing to remove (and nothing to corrupt).
@@ -330,6 +294,7 @@ async function main(): Promise<void> {
     host: options.host,
     port: options.port,
     token: options.token,
+    remoteAccess: options.remoteAccess,
     cdp,
     history,
     agentRegistry,
@@ -346,13 +311,14 @@ async function main(): Promise<void> {
   process.on("SIGTERM", shutdown);
 
   await httpServer.start();
-  writeDaemonJson({
+  writeDaemonJson(buildDaemonFileInfo({
     pid: process.pid,
-    host: advertisedHost(options.host),
     bindHost: options.host,
     port: options.port,
     token: options.token,
-  });
+    remoteAccess: options.remoteAccess,
+    advertiseHost: options.advertiseHost,
+  }));
 
   // Emit a machine-readable READY line on stdout so the tray supervisor
   // (packages/tray-app/src-tauri/src/daemon_spawner.rs) can pick up the
@@ -373,6 +339,11 @@ async function main(): Promise<void> {
   console.error(
     `[Daemon] HTTP server listening on http://${options.host}:${options.port}`,
   );
+  if (options.remoteAccess) {
+    console.error(
+      `[Daemon] remote access enabled; listening on http://${options.host}:${options.port}; clients must use token`,
+    );
+  }
   console.error("[Daemon] Auth token written to daemon.json (not logged)");
 
   // ----- Phase 2: connect to CDP in the background, retrying until ready -----
