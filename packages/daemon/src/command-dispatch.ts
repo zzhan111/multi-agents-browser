@@ -27,6 +27,11 @@ import type { CommandHistory } from "./command-history.js";
 import { filterAdaptersForScope, invalidateCatalog } from "./site-catalog.js";
 import { planFreeze, resolvePrivateAdapterFile } from "./adapter-freeze.js";
 import {
+  getAdapterCache,
+  isAdapterCacheable,
+  type AdapterCache,
+} from "./adapter-cache.js";
+import {
   listAdapters,
   searchAdapters,
   findAdapter,
@@ -41,6 +46,7 @@ export interface DispatchContext {
   bindingStore?: BindingStore;
   scratchpadManager?: ScratchpadManager;
   commandHistory?: CommandHistory;
+  adapterCache?: AdapterCache;
 }
 
 // ---------------------------------------------------------------------------
@@ -727,15 +733,27 @@ async function handleVaultRequest(request: Request, cdp: CdpConnection): Promise
   }
 }
 
+function mergeSiteRunData(
+  parsed: unknown,
+  extra: Record<string, unknown>,
+): ExtResponseData {
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return { ...(parsed as Record<string, unknown>), ...extra };
+  }
+  return { result: parsed, ...extra };
+}
+
 /**
  * Execute a site adapter: resolve the adapter + its target tab, run the adapter
  * JS via eval, and normalise the result. The adapter runs in the page context
  * of a tab on the adapter's domain so its fetch() calls carry real cookies.
+ * Successful readOnly results are served from the local TTL cache when possible.
  */
 async function handleSiteRun(
   cdp: CdpConnection,
   request: Request,
   session?: AgentSession,
+  ctx?: DispatchContext,
 ): Promise<Response> {
   if (!request.name) return fail(request.id, "Missing 'name' parameter for site_run");
 
@@ -750,6 +768,25 @@ async function handleSiteRun(
 
   const prep = prepareAdapterScript(adapter, request.args ?? [], request.namedArgs ?? {});
   if ("error" in prep) return fail(request.id, prep.error);
+
+  const cache = ctx?.adapterCache ?? getAdapterCache();
+  const fresh = request.fresh === true;
+  const hit = cache.peek(adapter, prep.argMap, fresh);
+  if (hit) {
+    // INV-1: still emit tab + seq. Do not Runtime.evaluate or create tabs.
+    const seq = cdp.tabManager.nextSeq();
+    const tab = hit.entry.tab ?? "cache";
+    return ok(
+      request.id,
+      mergeSiteRunData(hit.entry.result, {
+        tab,
+        seq,
+        cacheHit: true,
+        cacheAgeSec: hit.cacheAgeSec,
+        cacheExpiresAt: hit.cacheExpiresAt,
+      }),
+    );
+  }
 
   // Resolve target tab: explicit tabId > domain match > new domain tab > active.
   let targetId: string;
@@ -822,10 +859,17 @@ async function handleSiteRun(
     // Preserve the adapter's object-shaped result while attaching the daemon
     // metadata required by CommandLog. Primitive/array results are wrapped so
     // tab and seq remain available without inventing object keys in the data.
-    const data = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? { ...(parsed as Record<string, unknown>), ...attribution }
-      : { result: parsed, ...attribution };
-    return ok(request.id, data);
+    const cacheFields: Record<string, unknown> = {};
+    if (isAdapterCacheable(adapter, cache.defaultTtlSecs)) {
+      const stored = cache.store(adapter, prep.argMap, parsed, {
+        tab: tab?.shortId,
+      });
+      cacheFields.cacheHit = false;
+      cacheFields.cacheAgeSec = 0;
+      if (stored.expiresAt) cacheFields.cacheExpiresAt = stored.expiresAt;
+      if (stored.warning) cacheFields.warnings = [stored.warning];
+    }
+    return ok(request.id, mergeSiteRunData(parsed, { ...attribution, ...cacheFields }));
   });
 }
 
@@ -1105,7 +1149,7 @@ export async function dispatchRequest(
     });
   }
   if (request.action === "site_run") {
-    return handleSiteRun(cdp, request, session);
+    return handleSiteRun(cdp, request, session, ctx);
   }
   if (request.action === "site_freeze") {
     return handleSiteFreeze(cdp, request, session);
@@ -1113,6 +1157,7 @@ export async function dispatchRequest(
   if (request.action === "site_update") {
     const result = await updateAdapters();
     if ("error" in result) return fail(request.id, `${result.error} — manual fix: ${result.action}`);
+    (ctx?.adapterCache ?? getAdapterCache()).invalidateCommunity();
     return ok(request.id, result as unknown as ExtResponseData);
   }
 

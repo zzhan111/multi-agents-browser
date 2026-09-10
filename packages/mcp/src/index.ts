@@ -779,9 +779,10 @@ server.tool(
     args: z.array(z.string()).optional().describe("Positional arguments in adapter-defined order"),
     namedArgs: z.record(z.string()).optional().describe("Named adapter arguments passed as --key value"),
     tab: z.string().optional().describe("Optional tab short ID to target"),
+    fresh: z.boolean().optional().describe("Bypass the local TTL cache and refresh the stored result"),
     openclaw: z.boolean().optional().describe("Prefer the OpenClaw browser instead of the extension flow"),
   },
-  async ({ name, args, namedArgs, tab, openclaw }) => {
+  async ({ name, args, namedArgs, tab, fresh, openclaw }) => {
     try {
       if (!openclaw) {
         // Keep ordinary adapter calls on the daemon path so the shared
@@ -792,6 +793,7 @@ server.tool(
           args,
           namedArgs,
           ...(tab !== undefined ? { tabId: tab } : {}),
+          ...(fresh ? { fresh: true } : {}),
         });
         if (!resp.success) return responseError(resp);
         return textResult(resp.data);

@@ -170,6 +170,8 @@ export interface Request {
   requestId?: string;
   /** 覆盖已有私有 adapter（site_freeze 使用） */
   overwrite?: boolean;
+  /** 跳过 site_run TTL 缓存并覆盖条目（site_run 使用） */
+  fresh?: boolean;
 }
 
 /** 元素引用信息 */
@@ -409,6 +411,14 @@ export interface ResponseData {
   vaultFavorites?: Entry[];
   /** site_freeze：冻结草稿或候选列表 */
   freezeDraft?: FreezeDraftInfo;
+  /** site_run：是否命中本机 TTL 缓存 */
+  cacheHit?: boolean;
+  /** site_run：缓存条目年龄（秒） */
+  cacheAgeSec?: number;
+  /** site_run：缓存过期时间（ISO 8601） */
+  cacheExpiresAt?: string;
+  /** 非致命警告（例如结果过大未写入缓存） */
+  warnings?: string[];
   /** site_recommend：基于当前活跃 tab 的 adapter 推荐 */
   siteRecommendations?: Array<{
     /** tab 短 ID */

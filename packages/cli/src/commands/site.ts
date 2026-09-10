@@ -13,7 +13,7 @@
  *   ~/.bb-browser/bb-sites/    社区 adapter（ma-browser site update 拉取）
  */
 
-import { generateId, type Request, type Response, type TabInfo } from "@ma-browser/shared";
+import { generateId, type Request, type Response } from "@ma-browser/shared";
 import { handleJqResponse, sendCommand } from "../client.js";
 import { getHistoryDomains } from "../history-sqlite.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
@@ -61,6 +61,7 @@ export interface SiteOptions {
   days?: number;
   jq?: string;
   openclaw?: boolean;
+  fresh?: boolean;
 }
 
 /** Adapter 参数定义 */
@@ -224,18 +225,6 @@ function getAllSites(): SiteMeta[] {
   for (const s of local) byName.set(s.name, s);
 
   return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
-}
-
-/**
- * 精确匹配 tab 的 origin
- */
-function matchTabOrigin(tabUrl: string, domain: string): boolean {
-  try {
-    const tabOrigin = new URL(tabUrl).hostname;
-    return tabOrigin === domain || tabOrigin.endsWith("." + domain);
-  } catch {
-    return false;
-  }
 }
 
 // ── 子命令 ──────────────────────────────────────────────────────
@@ -620,15 +609,9 @@ async function siteRun(
     }
   }
 
-  // 读取并解析 JS
   const jsContent = readFileSync(site.filePath, "utf-8");
-
-  // 移除 /* @meta ... */ 块，保留函数体
   const jsBody = jsContent.replace(/\/\*\s*@meta[\s\S]*?\*\//, "").trim();
-
-  // 构造执行脚本
   const argsJson = JSON.stringify(argMap);
-  const script = `(${jsBody})(${argsJson})`;
 
   if (options.openclaw) {
     const { ocGetTabs, ocFindTabByDomain, ocOpenTab, ocEvaluate } = await import("../openclaw-bridge.js");
@@ -693,105 +676,62 @@ async function siteRun(
 
   await ensureDaemonRunning();
 
-  // 确定目标 tab
-  let targetTabId: string | number | undefined = options.tabId;
+  const runReq: Request = {
+    id: generateId(),
+    action: "site_run",
+    name,
+    args: [],
+    namedArgs: argMap,
+    tabId: options.tabId,
+    ...(options.fresh ? { fresh: true } : {}),
+  };
+  const runResp: Response = await sendCommand(runReq);
 
-  // 如果用户没指定 --tab，自动查找匹配域名的 tab
-  if (!targetTabId && site.domain) {
-    const listReq: Request = { id: generateId(), action: "tab_list" };
-    const listResp: Response = await sendCommand(listReq);
-
-    if (listResp.success && listResp.data?.tabs) {
-      const matchingTab = listResp.data.tabs.find((tab: TabInfo) =>
-        matchTabOrigin(tab.url, site.domain)
-      );
-      if (matchingTab) {
-        targetTabId = matchingTab.tabId;
-      }
-    }
-
-    if (!targetTabId) {
-      const newResp = await sendCommand({
-        id: generateId(),
-        action: "tab_new",
-        url: `https://${site.domain}`,
-      });
-      targetTabId = newResp.data?.tabId;
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-    }
-  }
-
-  // 执行
-  const evalReq: Request = { id: generateId(), action: "eval", script, tabId: targetTabId };
-  const evalResp: Response = await sendCommand(evalReq);
-
-  if (!evalResp.success) {
-    const hint = site.domain
+  if (!runResp.success) {
+    const hint = runResp.hint ?? (site.domain
       ? `Open https://${site.domain} in your browser, make sure you are logged in, then retry.`
-      : undefined;
+      : undefined);
     if (options.json) {
-      console.log(JSON.stringify({ id: evalReq.id, success: false, error: evalResp.error || "eval failed", hint }));
+      console.log(JSON.stringify({
+        id: runReq.id,
+        success: false,
+        error: runResp.error || "site_run failed",
+        hint,
+        ...(runResp.action ? { action: runResp.action } : {}),
+      }));
     } else {
-      console.error(`[error] site ${name}: ${evalResp.error || "eval failed"}`);
+      console.error(`[error] site ${name}: ${runResp.error || "site_run failed"}`);
       if (hint) console.error(`  Hint: ${hint}`);
+      if (runResp.action) console.error(`  Action: ${runResp.action}`);
     }
     process.exit(1);
   }
 
-  const result = evalResp.data?.result;
-  if (result === undefined || result === null) {
+  const parsed = runResp.data;
+  if (parsed === undefined || parsed === null) {
     if (options.json) {
-      console.log(JSON.stringify({ id: evalReq.id, success: true, data: null }));
+      console.log(JSON.stringify({ id: runReq.id, success: true, data: null }));
     } else {
       console.log("(no output)");
     }
     return;
   }
 
-  // 解析输出
-  let parsed: unknown;
-  try {
-    parsed = typeof result === "string" ? JSON.parse(result) : result;
-  } catch {
-    parsed = result;
-  }
-
-  // 检查 adapter 返回的 error
-  if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
-    const errObj = parsed as { error: string; hint?: string };
-
-    // 检测是否为登录问题（检查 error 和 hint 文本）
-    const checkText = `${errObj.error} ${errObj.hint || ""}`;
-    const isAuthError = /401|403|unauthorized|forbidden|not.?logged|login.?required|sign.?in|auth/i.test(checkText);
-    const loginHint = isAuthError && site.domain
-      ? `Please log in to https://${site.domain} in your browser first, then retry.`
-      : undefined;
-    const hint = loginHint || errObj.hint;
-    const reportHint = `If this is an adapter bug, report via: gh issue create --repo zzhan111/bb-sites --title "[${name}] <description>" OR: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] <description>"`;
-
-    if (options.json) {
-      console.log(JSON.stringify({ id: evalReq.id, success: false, error: errObj.error, hint, reportHint }));
-    } else {
-      console.error(`[error] site ${name}: ${errObj.error}`);
-      if (hint) console.error(`  Hint: ${hint}`);
-      console.error(`  Report: gh issue create --repo zzhan111/bb-sites --title "[${name}] ..."`);
-      console.error(`     or: ma-browser site github/issue-create zzhan111/bb-sites --title "[${name}] ..."`);
-    }
-    process.exit(1);
-  }
-
   if (options.jq) {
     const { applyJq } = await import("../jq.js");
-    // Tolerate ".data." prefix — Agent may copy from --json envelope structure
     const expr = options.jq.replace(/^\.data\./, '.');
     const results = applyJq(parsed, expr);
     for (const r of results) {
       console.log(typeof r === "string" ? r : JSON.stringify(r));
     }
   } else if (options.json) {
-    console.log(JSON.stringify({ id: evalReq.id, success: true, data: parsed }));
+    console.log(JSON.stringify({ id: runReq.id, success: true, data: parsed }));
   } else {
     console.log(JSON.stringify(parsed, null, 2));
+    if (parsed.cacheHit) {
+      console.log();
+      console.log(`💡 缓存命中（${parsed.cacheAgeSec ?? 0}s 前），加 --fresh 强制回源`);
+    }
   }
 }
 
@@ -898,8 +838,8 @@ export async function siteCommand(
   ma-browser site info <name>               查看 adapter 元信息
   ma-browser site recommend                 基于历史记录推荐 adapter
   ma-browser site search <query>            搜索 adapter
-  ma-browser site <name> [args...]          运行 adapter（简写）
-  ma-browser site run <name> [args...]      运行 adapter
+  ma-browser site <name> [args...] [--fresh]  运行 adapter（简写）
+  ma-browser site run <name> [args...] [--fresh]  运行 adapter
   ma-browser site freeze --name <n>         从网络请求冻成私有 adapter 草稿
   ma-browser site update                    更新社区 adapter 库 (git clone/pull)
 

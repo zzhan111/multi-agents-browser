@@ -129,6 +129,7 @@ interface ParsedArgs {
     days?: number;
     jq?: string;
     openclaw?: boolean;
+    fresh?: boolean;
     port?: number;
     since?: string;
     limit?: number;
@@ -234,6 +235,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       skipNext = true;
     } else if (arg === "--overwrite") {
       // boolean flag for site freeze; consumed by the subcommand
+    } else if (arg === "--fresh") {
+      result.flags.fresh = true;
     } else if (arg.startsWith("-")) {
       // 未知选项，忽略
     } else if (result.command === null) {
@@ -688,6 +691,7 @@ async function main(): Promise<void> {
           days: parsed.flags.days,
           tabId: globalTabId,
           openclaw: parsed.flags.openclaw,
+          fresh: parsed.flags.fresh,
         });
         break;
       }

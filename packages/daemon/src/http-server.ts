@@ -27,6 +27,7 @@ import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
 import type { JournalManager } from "./agent-journal.js";
 import type { ScratchpadManager } from "./scratchpad-manager.js";
+import type { AdapterCache } from "./adapter-cache.js";
 import { dispatchRequest, isReadOnlyAction, type DispatchContext } from "./command-dispatch.js";
 import { getVaultManager } from "./vault/manager.js";
 import { buildAtomFeed, type FeedEntry } from "./vault/rss.js";
@@ -99,6 +100,7 @@ export interface HttpServerOptions {
   bindingStore?: BindingStore;
   journalManager?: JournalManager;
   scratchpadManager?: ScratchpadManager;
+  adapterCache?: AdapterCache;
   onShutdown?: () => void;
   runtimeStatus?: DaemonRuntimeStatus;
 }
@@ -114,6 +116,7 @@ export class HttpServer {
   private readonly bindingStore: BindingStore | null;
   private readonly journalManager: JournalManager | null;
   private readonly scratchpadManager: ScratchpadManager | null;
+  private readonly adapterCache: AdapterCache | null;
   private readonly onShutdown?: () => void;
   private readonly runtimeStatus: DaemonRuntimeStatus;
   private readonly sessions = new SessionManager();
@@ -130,6 +133,7 @@ export class HttpServer {
     this.bindingStore = options.bindingStore ?? null;
     this.journalManager = options.journalManager ?? null;
     this.scratchpadManager = options.scratchpadManager ?? null;
+    this.adapterCache = options.adapterCache ?? null;
     this.onShutdown = options.onShutdown;
     this.runtimeStatus = options.runtimeStatus ?? { needsBrowserConsent: false };
     this.scheduler = new CommandScheduler({
@@ -402,6 +406,7 @@ export class HttpServer {
           bindingStore: this.bindingStore ?? undefined,
           scratchpadManager: this.scratchpadManager ?? undefined,
           commandHistory: this.history ?? undefined,
+          adapterCache: this.adapterCache ?? undefined,
         };
         const response = await Promise.race([
           dispatchRequest(this.cdp, request, session, dispatchCtx),

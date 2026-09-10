@@ -18,6 +18,8 @@ export interface SiteAdapter {
   args: Record<string, { required?: boolean; description?: string }>;
   capabilities?: string[];
   readOnly?: boolean;
+  /** Per-adapter TTL override in seconds. 0 = never cache this adapter. */
+  cacheTtlSeconds?: number;
   example?: string;
   source: "local" | "community";
   /** @meta.source — freeze drafts set this to "freeze-draft". */
@@ -81,6 +83,7 @@ function parseMeta(filePath: string, source: "local" | "community"): SiteAdapter
       args?: SiteAdapter["args"];
       capabilities?: string[];
       readOnly?: boolean;
+      cacheTtlSeconds?: number;
       example?: string;
       source?: string;
       origin?: string;
@@ -97,6 +100,9 @@ function parseMeta(filePath: string, source: "local" | "community"): SiteAdapter
       args: json.args ?? {},
       capabilities: json.capabilities,
       readOnly: json.readOnly,
+      cacheTtlSeconds: typeof json.cacheTtlSeconds === "number" && Number.isFinite(json.cacheTtlSeconds)
+        ? json.cacheTtlSeconds
+        : undefined,
       example: json.example,
       source,
       origin: json.source === "freeze-draft" || json.origin === "freeze-draft"
@@ -128,6 +134,12 @@ function parseMeta(filePath: string, source: "local" | "community"): SiteAdapter
     domain,
     args: {},
     readOnly: tag("readOnly") === "true",
+    cacheTtlSeconds: (() => {
+      const raw = tag("cacheTtlSeconds");
+      if (raw === undefined) return undefined;
+      const n = Number.parseInt(raw, 10);
+      return Number.isFinite(n) ? n : undefined;
+    })(),
     example: tag("example"),
     source,
     filePath,

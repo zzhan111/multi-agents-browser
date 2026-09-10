@@ -460,6 +460,7 @@ export const COMMANDS: CommandDef[] = [
       name: z.string().describe("Adapter name (e.g. reddit/thread, twitter/user)"),
       args: z.string().optional().describe("Arguments to pass to the adapter (space-separated or --flag value)"),
       tab: z.string().optional().describe("Tab short ID (auto-detected from adapter domain if omitted)"),
+      fresh: z.boolean().optional().describe("Bypass the local TTL cache and refresh the stored result"),
     }),
   },
   {
