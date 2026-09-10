@@ -72,14 +72,22 @@ function stopFakeCdp(server: Server): Promise<void> {
   });
 }
 
-function spawnDaemon(port: number, cdpPort: number): ChildProcess {
+function daemonTestEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.BB_REMOTE_ACCESS;
+  delete env.BB_DAEMON_HOST;
+  delete env.BB_DAEMON_ADVERTISE_HOST;
+  return env;
+}
+
+function spawnDaemon(port: number, cdpPort: number, extraArgs: string[] = []): ChildProcess {
   // Use the compiled dist so no tsx/shell-script issues on Windows.
   // The pre-commit hook runs `pnpm build` before `pnpm test`, so dist is fresh.
   const distEntry = path.resolve(__dirname, "../../dist/index.js");
   return spawn(
     process.execPath,
-    [distEntry, "--port", String(port), "--cdp-port", String(cdpPort)],
-    { stdio: "pipe", env: { ...process.env } },
+    [distEntry, "--port", String(port), "--cdp-port", String(cdpPort), ...extraArgs],
+    { stdio: "pipe", env: daemonTestEnv() },
   );
 }
 
@@ -168,12 +176,41 @@ describe("daemon lifecycle (no Chrome needed)", () => {
     const info = await waitForDaemonJson();
 
     assert.equal(typeof info.pid, "number");
-    assert.equal(typeof info.host, "string");
+    assert.equal(info.host, "127.0.0.1");
     assert.equal(info.bindHost, "127.0.0.1");
     assert.equal(info.port, daemonPort);
     assert.equal(typeof info.token, "string");
     assert.ok((info.token as string).length > 0);
     assert.ok(info.pid as number > 0, "daemon PID should be positive");
+    assert.equal(info.remoteAccess, false);
+  });
+
+  it("writes advertised Tailscale host and remoteAccess:true in remote mode", async () => {
+    const { daemonPort, cdpPort } = nextPorts();
+    await cleanupDaemonJson();
+    fakeCdp = await startFakeCdp(cdpPort);
+    daemon = spawnDaemon(daemonPort, cdpPort, [
+      "--host", "127.0.0.1",
+      "--advertise-host", "100.74.28.0",
+      "--remote-access",
+    ]);
+    let stderr = "";
+    daemon.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    const info = await waitForDaemonJson();
+
+    assert.equal(info.host, "100.74.28.0");
+    assert.equal(info.bindHost, "127.0.0.1");
+    assert.equal(info.port, daemonPort);
+    assert.equal(info.remoteAccess, true);
+    assert.equal(typeof info.token, "string");
+    assert.ok((info.token as string).length > 0);
+    const logDeadline = Date.now() + 2000;
+    while (Date.now() < logDeadline && !/remote access enabled/.test(stderr)) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.match(stderr, /remote access enabled; listening on /);
+    assert.match(stderr, /clients must use token/);
   });
 
   it("GET /ping is unauthenticated and never returns a token", async () => {

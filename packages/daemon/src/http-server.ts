@@ -44,8 +44,13 @@ function envInt(name: string, fallback: number): number {
 /** Maximum accepted request body. Keep command and panel writes bounded. */
 export const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-/** Return the exact configured CORS origin, or null when CORS is disabled. */
-export function allowCorsOrigin(req: IncomingMessage): string | null {
+/**
+ * Return the exact configured CORS origin, or null when CORS is disabled.
+ * Remote access refuses browser CORS even if BB_CORS_ORIGINS is set — remote
+ * agents use MCP/CLI, not a browser origin. Local tray does not rely on CORS.
+ */
+export function allowCorsOrigin(req: IncomingMessage, remoteAccess = false): string | null {
+  if (remoteAccess) return null;
   const origin = req.headers.origin;
   if (typeof origin !== "string" || !origin) return null;
   const allowed = (process.env.BB_CORS_ORIGINS ?? "")
@@ -95,6 +100,8 @@ export interface HttpServerOptions {
   host?: string;
   port?: number;
   token?: string;
+  /** When true, CORS allow-list is ignored (remote agents do not use browser CORS). */
+  remoteAccess?: boolean;
   cdp: CdpConnection;
   history?: CommandHistory;
   agentRegistry?: AgentRegistry;
@@ -112,6 +119,7 @@ export class HttpServer {
   private readonly host: string;
   private readonly port: number;
   private readonly token: string | null;
+  private readonly remoteAccess: boolean;
   private readonly cdp: CdpConnection;
   private readonly history: CommandHistory | null;
   private readonly agentRegistry: AgentRegistry | null;
@@ -130,6 +138,7 @@ export class HttpServer {
     this.host = options.host ?? "127.0.0.1";
     this.port = options.port ?? DAEMON_PORT;
     this.token = options.token ?? null;
+    this.remoteAccess = options.remoteAccess === true;
     this.cdp = options.cdp;
     this.history = options.history ?? null;
     this.agentRegistry = options.agentRegistry ?? null;
@@ -197,7 +206,7 @@ export class HttpServer {
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
     // CORS: default off. Optional allow-list via BB_CORS_ORIGINS (comma-separated).
     // OPTIONS must not bypass auth when CORS is disabled.
-    const corsOrigin = allowCorsOrigin(req);
+    const corsOrigin = allowCorsOrigin(req, this.remoteAccess);
     if (corsOrigin) {
       res.setHeader("Access-Control-Allow-Origin", corsOrigin);
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
