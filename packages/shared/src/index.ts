@@ -5,6 +5,8 @@
 
 export {
   type ActionType,
+  type AdapterHealthInfo,
+  type AdapterHealthStatus,
   type ConsoleMessageInfo,
   type DaemonStatus,
   type JSErrorInfo,

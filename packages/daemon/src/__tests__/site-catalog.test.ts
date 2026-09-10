@@ -32,6 +32,23 @@ describe("site catalog discovery", () => {
     assert.deepEqual(results.map((item) => item.name), ["beta", "gamma", "alpha"]);
   });
 
+  it("H5: broken does not rank above healthy at equal heat", () => {
+    const adapters = [adapter("alpha"), adapter("beta"), adapter("gamma")];
+    const results = queryCatalog(adapters, {
+      recentCallHeat: new Map([
+        ["alpha", 1],
+        ["beta", 1],
+        ["gamma", 1],
+      ]),
+      healthByName: new Map([
+        ["alpha", "broken"],
+        ["beta", "healthy"],
+        ["gamma", "degraded"],
+      ]),
+    });
+    assert.deepEqual(results.map((item) => item.name), ["beta", "gamma", "alpha"]);
+  });
+
   it("hides only explicit write adapters from read-only discovery", () => {
     const adapters = [adapter("read", true), adapter("write", false), adapter("unknown")];
 

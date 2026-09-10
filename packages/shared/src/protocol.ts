@@ -419,6 +419,8 @@ export interface ResponseData {
   cacheExpiresAt?: string;
   /** 非致命警告（例如结果过大未写入缓存） */
   warnings?: string[];
+  /** site_info / site_run：adapter 健康（无记录则为 unknown） */
+  health?: AdapterHealthInfo;
   /** site_recommend：基于当前活跃 tab 的 adapter 推荐 */
   siteRecommendations?: Array<{
     /** tab 短 ID */
@@ -431,8 +433,26 @@ export interface ResponseData {
       description: string;
       domain: string;
       example?: string;
+      health?: AdapterHealthInfo;
     }>;
   }>;
+}
+
+/** Adapter 健康状态（每 name，本地覆盖社区同名） */
+export type AdapterHealthStatus = "unknown" | "healthy" | "degraded" | "broken";
+
+/** site_info / site_list / GET /api/sites 附带的健康摘要 */
+export interface AdapterHealthInfo {
+  status: AdapterHealthStatus;
+  lastOkAt?: string;
+  lastFailAt?: string;
+  lastError?: string;
+  consecutiveFails: number;
+  lastHttpStatus?: number;
+  /** degraded/broken 时的人类可读解释 */
+  hint?: string;
+  /** degraded/broken 时的可执行修复命令 */
+  action?: string;
 }
 
 /** site_freeze 成功时的草稿或候选列表 */

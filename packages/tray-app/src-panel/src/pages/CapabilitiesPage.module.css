@@ -88,6 +88,31 @@
   width: 10px;
 }
 
+.healthDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+.health_unknown { background: var(--text-muted); }
+.health_healthy { background: var(--status-green); }
+.health_degraded { background: var(--status-yellow); }
+.health_broken { background: var(--status-red); }
+
+.healthMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.healthError,
+.healthAction {
+  font-family: "Cascadia Code", monospace;
+  font-size: 10px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
 .adapterName {
   font-family: "Cascadia Code", monospace;
   font-size: 12px;

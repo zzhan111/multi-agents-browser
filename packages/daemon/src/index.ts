@@ -34,6 +34,7 @@ import { JournalManager } from "./agent-journal.js";
 import { getVaultManager } from "./vault/manager.js";
 import { ScratchpadManager } from "./scratchpad-manager.js";
 import { AdapterCache, adapterCacheDir } from "./adapter-cache.js";
+import { AdapterHealthStore } from "./adapter-health.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -293,6 +294,7 @@ async function main(): Promise<void> {
   const journalManager = new JournalManager(stateStore);
   const scratchpadManager = new ScratchpadManager();
   const adapterCache = new AdapterCache({ dir: adapterCacheDir(DAEMON_DIR) });
+  const adapterHealth = new AdapterHealthStore({ store: stateStore });
   // Evict TTL-expired scratchpad entries every minute; flush journals every 2s.
   const scratchpadGcTimer = setInterval(() => scratchpadManager.gc(), 60_000);
   const journalFlushTimer = setInterval(() => journalManager.flushAll(), 2_000);
@@ -335,6 +337,7 @@ async function main(): Promise<void> {
     journalManager,
     scratchpadManager,
     adapterCache,
+    adapterHealth,
     onShutdown: shutdown,
     runtimeStatus,
   });

@@ -218,6 +218,11 @@ function AdapterCard({ adapter: a }) {
       {/* ── Card header ── */}
       <div className={styles.cardHead} onClick={() => setExpanded((v) => !v)}>
         <span className={styles.chevron}>{expanded ? '▾' : '▸'}</span>
+        <span
+          className={`${styles.healthDot} ${styles[`health_${a.health?.status ?? 'unknown'}`]}`}
+          title={a.health?.status ?? 'unknown'}
+          aria-label={a.health?.status ?? 'unknown'}
+        />
         <div className={styles.titles}>
           <span className={styles.adapterTitle}>{a.title || a.name}</span>
           <span className={styles.adapterName}>{a.name}</span>
@@ -269,6 +274,13 @@ function AdapterCard({ adapter: a }) {
             <div className={styles.exampleRow}>
               <span className={styles.sectionLabel}>示例</span>
               <code className={styles.exampleCode}>{a.example}</code>
+            </div>
+          )}
+
+          {(a.health?.status === 'degraded' || a.health?.status === 'broken') && (
+            <div className={styles.healthMeta}>
+              {a.health.lastError && <code className={styles.healthError}>{a.health.lastError}</code>}
+              {a.health.action && <code className={styles.healthAction}>{a.health.action}</code>}
             </div>
           )}
 

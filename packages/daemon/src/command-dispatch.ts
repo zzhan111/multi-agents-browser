@@ -10,6 +10,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import type {
+  AdapterHealthInfo,
   Request,
   Response,
   ResponseData,
@@ -32,6 +33,11 @@ import {
   type AdapterCache,
 } from "./adapter-cache.js";
 import {
+  applySiteRunHealth,
+  getAdapterHealth,
+  type AdapterHealthStore,
+} from "./adapter-health.js";
+import {
   listAdapters,
   searchAdapters,
   findAdapter,
@@ -47,6 +53,7 @@ export interface DispatchContext {
   scratchpadManager?: ScratchpadManager;
   commandHistory?: CommandHistory;
   adapterCache?: AdapterCache;
+  adapterHealth?: AdapterHealthStore;
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +592,13 @@ function visibleSiteAdapters(session: AgentSession | undefined) {
   return filterAdaptersForScope(listAdapters(), session?.scope === "read-only");
 }
 
+function attachHealth<T extends { name: string; domain?: string; origin?: string }>(
+  adapter: T,
+  health: AdapterHealthStore,
+): T & { health: AdapterHealthInfo } {
+  return { ...adapter, health: health.view(adapter) };
+}
+
 function resolveRecommendationTarget(
   targets: CdpTargetInfo[],
   cdp: CdpConnection,
@@ -770,10 +784,12 @@ async function handleSiteRun(
   if ("error" in prep) return fail(request.id, prep.error);
 
   const cache = ctx?.adapterCache ?? getAdapterCache();
+  const health = ctx?.adapterHealth ?? getAdapterHealth();
   const fresh = request.fresh === true;
   const hit = cache.peek(adapter, prep.argMap, fresh);
   if (hit) {
     // INV-1: still emit tab + seq. Do not Runtime.evaluate or create tabs.
+    // Cache hits are not live runs — do not rewrite health (H1).
     const seq = cdp.tabManager.nextSeq();
     const tab = hit.entry.tab ?? "cache";
     return ok(
@@ -837,24 +853,75 @@ async function handleSiteRun(
     try {
       raw = await cdp.evaluate<unknown>(targetId, prep.script, true);
     } catch (e) {
-      return fail(request.id, `Adapter execution failed: ${buildRequestError(e).message}`, attribution);
+      const applied = applySiteRunHealth({
+        health,
+        cache,
+        adapter,
+        outcome: {
+          type: "error",
+          error: `Adapter execution failed: ${buildRequestError(e).message}`,
+          structural: true,
+        },
+      });
+      return fail(request.id, applied.view.lastError ?? "Adapter execution failed", {
+        ...attribution,
+        health: applied.view,
+      }, {
+        ...(applied.view.hint ? { hint: applied.view.hint } : {}),
+        ...(applied.view.action ? { action: applied.view.action } : {}),
+      });
     }
 
     let parsed: unknown = raw;
     if (typeof raw === "string") {
-      try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        const applied = applySiteRunHealth({
+          health,
+          cache,
+          adapter,
+          outcome: { type: "error", error: "Adapter returned non-JSON", structural: true },
+        });
+        return fail(request.id, applied.view.lastError ?? "Adapter returned non-JSON", {
+          ...attribution,
+          health: applied.view,
+        }, {
+          ...(applied.view.hint ? { hint: applied.view.hint } : {}),
+          ...(applied.view.action ? { action: applied.view.action } : {}),
+        });
+      }
     }
 
     // Adapters signal failure by returning an { error } object.
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "error" in parsed) {
       const eo = parsed as { error?: unknown; hint?: unknown };
       const base = String(eo.error ?? "adapter error");
-      const hint = eo.hint ? ` (${String(eo.hint)})` : "";
-      const login = adapter.domain
-        ? ` — make sure you are logged in to ${adapter.domain} in Chrome`
-        : "";
-      return fail(request.id, `${base}${hint}${login}`, attribution);
+      const applied = applySiteRunHealth({
+        health,
+        cache,
+        adapter,
+        outcome: {
+          type: "error",
+          error: base,
+          hint: eo.hint ? String(eo.hint) : undefined,
+        },
+      });
+      return fail(request.id, base, {
+        ...attribution,
+        health: applied.view,
+      }, {
+        ...(applied.view.hint ? { hint: applied.view.hint } : {}),
+        ...(applied.view.action ? { action: applied.view.action } : {}),
+      });
     }
+
+    applySiteRunHealth({
+      health,
+      cache,
+      adapter,
+      outcome: { type: "success" },
+    });
 
     // Preserve the adapter's object-shaped result while attaching the daemon
     // metadata required by CommandLog. Primitive/array results are wrapped so
@@ -1095,14 +1162,20 @@ export async function dispatchRequest(
   // resolves/creates its own domain-matched tab, so all are handled before
   // ensurePageTarget() (which would throw when no page exists yet).
   if (request.action === "site_list") {
-    return ok(request.id, visibleSiteAdapters(session) as unknown as ExtResponseData);
+    const health = ctx?.adapterHealth ?? getAdapterHealth();
+    return ok(
+      request.id,
+      visibleSiteAdapters(session).map((adapter) => attachHealth(adapter, health)) as unknown as ExtResponseData,
+    );
   }
   if (request.action === "site_search") {
+    const health = ctx?.adapterHealth ?? getAdapterHealth();
     const adapters = visibleSiteAdapters(session);
     return ok(
       request.id,
       searchAdapters(request.query, request.domain, ctx?.commandHistory?.siteHeat())
-        .filter((adapter) => adapters.some((visible) => visible.name === adapter.name)) as unknown as ExtResponseData,
+        .filter((adapter) => adapters.some((visible) => visible.name === adapter.name))
+        .map((adapter) => attachHealth(adapter, health)) as unknown as ExtResponseData,
     );
   }
   if (request.action === "site_info") {
@@ -1111,7 +1184,8 @@ export async function dispatchRequest(
     if (!adapter || (session?.scope === "read-only" && adapter.readOnly === false)) {
       return fail(request.id, `Site adapter '${request.name}' not found`);
     }
-    return ok(request.id, adapter as unknown as ExtResponseData);
+    const health = ctx?.adapterHealth ?? getAdapterHealth();
+    return ok(request.id, attachHealth(adapter, health) as unknown as ExtResponseData);
   }
   if (request.action === "site_recommend") {
     // Recommend adapters for this session's active tab. The session cursor is
@@ -1124,8 +1198,14 @@ export async function dispatchRequest(
     const target = resolveRecommendationTarget(targets, cdp, session, request.tabId);
     const tab = target ? cdp.tabManager.getTab(target.id) : undefined;
     const adapters = visibleSiteAdapters(session);
+    const health = ctx?.adapterHealth ?? getAdapterHealth();
     const matched = target
-      ? searchAdapters(undefined, undefined, ctx?.commandHistory?.siteHeat())
+      ? searchAdapters(
+        undefined,
+        undefined,
+        ctx?.commandHistory?.siteHeat(),
+        health.statusMap(),
+      )
         .filter((adapter) => matchTabOrigin(target.url, adapter.domain))
         .filter((adapter) => adapters.some((visible) => visible.name === adapter.name))
         .map((adapter) => ({
@@ -1133,6 +1213,7 @@ export async function dispatchRequest(
           description: adapter.description,
           domain: adapter.domain,
           ...(adapter.example ? { example: adapter.example } : {}),
+          health: health.view(adapter),
         }))
       : [];
     return ok(request.id, {

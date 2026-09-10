@@ -6,6 +6,8 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import type { AdapterHealthStatus } from "@ma-browser/shared";
+import { healthSortRank } from "./adapter-health.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,6 +46,8 @@ export interface CatalogQueryOptions {
   domain?: string;
   /** Optional heat from the daemon's bounded command history ring. */
   recentCallHeat?: AdapterCallHeat;
+  /** Optional health by adapter name. Secondary sort key (H5): broken last. */
+  healthByName?: ReadonlyMap<string, AdapterHealthStatus>;
 }
 
 /** Apply the discovery policy shared by daemon commands and panel APIs. */
@@ -235,16 +239,20 @@ export function queryCatalog(
     );
   }
 
-  if (!options.recentCallHeat || options.recentCallHeat.size === 0) return results;
+  const hasHeat = options.recentCallHeat && options.recentCallHeat.size > 0;
+  const hasHealth = options.healthByName && options.healthByName.size > 0;
+  if (!hasHeat && !hasHealth) return results;
 
-  // Keep the catalog's deterministic name order for ties. This makes the
-  // result stable while still putting recently-used adapters first.
+  // Heat is the primary key (command-history). Health is secondary: a broken
+  // adapter must not rank above a healthy same-heat (typically same-domain)
+  // adapter. Ties keep the catalog's deterministic name order.
   return results
     .map((adapter, index) => ({
       adapter,
       index,
       heat: options.recentCallHeat?.get(adapter.name) ?? 0,
+      healthRank: healthSortRank(options.healthByName?.get(adapter.name)),
     }))
-    .sort((a, b) => b.heat - a.heat || a.index - b.index)
+    .sort((a, b) => b.heat - a.heat || a.healthRank - b.healthRank || a.index - b.index)
     .map(({ adapter }) => adapter);
 }

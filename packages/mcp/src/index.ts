@@ -718,7 +718,7 @@ server.tool(
 
 server.tool(
   "site_info",
-  "Get adapter metadata including args, example, and domain",
+  "Get adapter metadata including args, example, domain, and health",
   {
     name: z.string().describe("Adapter name, e.g. twitter/search"),
   },

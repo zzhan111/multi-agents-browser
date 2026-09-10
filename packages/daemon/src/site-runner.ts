@@ -12,6 +12,7 @@ import { readFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { DAEMON_DIR } from "@ma-browser/shared";
+import type { AdapterHealthStatus } from "@ma-browser/shared";
 import {
   getCatalog,
   queryCatalog,
@@ -126,11 +127,13 @@ export function searchAdapters(
   query?: string,
   domain?: string,
   recentCallHeat?: AdapterCallHeat,
+  healthByName?: ReadonlyMap<string, AdapterHealthStatus>,
 ): SiteAdapter[] {
   return queryCatalog(getCatalog(DAEMON_DIR).adapters, {
     q: query,
     domain,
     recentCallHeat,
+    healthByName,
   });
 }
 

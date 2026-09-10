@@ -13,7 +13,7 @@
  *   ~/.bb-browser/bb-sites/    社区 adapter（ma-browser site update 拉取）
  */
 
-import { generateId, type Request, type Response } from "@ma-browser/shared";
+import { generateId, type AdapterHealthInfo, type Request, type Response } from "@ma-browser/shared";
 import { handleJqResponse, sendCommand } from "../client.js";
 import { getHistoryDomains } from "../history-sqlite.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
@@ -244,9 +244,11 @@ function siteList(options: SiteOptions): void {
   }
 
   if (options.json) {
+    const healthMap = loadAdapterHealthMap();
     console.log(JSON.stringify(sites.map(s => ({
       name: s.name, description: s.description, domain: s.domain,
       args: s.args, source: s.source,
+      health: healthOf(s.name, s.domain, healthMap),
     })), null, 2));
     return;
   }
@@ -394,6 +396,53 @@ function findSiteByName(name: string): SiteMeta | undefined {
   return getAllSites().find((site) => site.name === name);
 }
 
+function loadAdapterHealthMap(): Record<string, AdapterHealthInfo> {
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(BB_DIR, "state", "adapter-health.json"), "utf-8"),
+    ) as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return raw as Record<string, AdapterHealthInfo>;
+  } catch {
+    return {};
+  }
+}
+
+function healthOf(
+  name: string,
+  domain: string | undefined,
+  map: Record<string, AdapterHealthInfo>,
+): AdapterHealthInfo {
+  const rec = map[name];
+  if (!rec || typeof rec.status !== "string") {
+    return { status: "unknown", consecutiveFails: 0 };
+  }
+  const status = rec.status;
+  const hintAction =
+    status === "degraded"
+      ? {
+          hint: domain
+            ? `需要先登录 ${domain}，请先在 Chrome 中打开该站点并登录`
+            : "需要先在 Chrome 中打开并登录对应站点",
+          action: domain ? `ma-browser open https://${domain}` : "ma-browser guide",
+        }
+      : status === "broken"
+        ? {
+            hint: "adapter 连续失败或返回结构异常，建议重新冻结或运行 ma-browser guide",
+            action: `ma-browser site freeze --name ${name}`,
+          }
+        : {};
+  return {
+    status,
+    consecutiveFails: typeof rec.consecutiveFails === "number" ? rec.consecutiveFails : 0,
+    ...(typeof rec.lastOkAt === "string" ? { lastOkAt: rec.lastOkAt } : {}),
+    ...(typeof rec.lastFailAt === "string" ? { lastFailAt: rec.lastFailAt } : {}),
+    ...(typeof rec.lastError === "string" ? { lastError: rec.lastError } : {}),
+    ...(typeof rec.lastHttpStatus === "number" ? { lastHttpStatus: rec.lastHttpStatus } : {}),
+    ...hintAction,
+  };
+}
+
 function siteInfo(name: string, options: SiteOptions): void {
   const site = findSiteByName(name);
 
@@ -406,6 +455,7 @@ function siteInfo(name: string, options: SiteOptions): void {
     process.exit(1);
   }
 
+  const health = healthOf(site.name, site.domain, loadAdapterHealthMap());
   const meta = {
     name: site.name,
     description: site.description,
@@ -413,6 +463,7 @@ function siteInfo(name: string, options: SiteOptions): void {
     args: site.args,
     example: site.example,
     readOnly: site.readOnly,
+    health,
   };
 
   if (options.json) {
@@ -441,6 +492,9 @@ function siteInfo(name: string, options: SiteOptions): void {
   console.log();
   console.log(`域名：${site.domain || "（未声明）"}`);
   console.log(`只读：${site.readOnly ? "是" : "否"}`);
+  console.log(`健康：${health.status}`);
+  if (health.lastError) console.log(`上次错误：${health.lastError}`);
+  if (health.action) console.log(`  Action: ${health.action}`);
 }
 
 async function siteRecommend(options: SiteOptions): Promise<void> {
