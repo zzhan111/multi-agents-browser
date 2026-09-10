@@ -20,6 +20,8 @@ export interface SiteAdapter {
   readOnly?: boolean;
   example?: string;
   source: "local" | "community";
+  /** @meta.source — freeze drafts set this to "freeze-draft". */
+  origin?: string;
   filePath: string;
   // Extended fields for the panel Capabilities tab (legal-compliance + UX).
   /** Human-readable title (e.g. "查看用户推文动态"); falls back to `name`. */
@@ -72,7 +74,21 @@ function parseMeta(filePath: string, source: "local" | "community"): SiteAdapter
 
   // Try JSON format first
   try {
-    const json = JSON.parse(inner) as Partial<SiteAdapter>;
+    const json = JSON.parse(inner) as {
+      name?: string;
+      description?: string;
+      domain?: string;
+      args?: SiteAdapter["args"];
+      capabilities?: string[];
+      readOnly?: boolean;
+      example?: string;
+      source?: string;
+      origin?: string;
+      title?: string;
+      category?: string;
+      risk?: SiteAdapter["risk"];
+      prerequisites?: string;
+    };
     if (!json.name || !json.domain) return null;
     return {
       name: json.name,
@@ -83,6 +99,9 @@ function parseMeta(filePath: string, source: "local" | "community"): SiteAdapter
       readOnly: json.readOnly,
       example: json.example,
       source,
+      origin: json.source === "freeze-draft" || json.origin === "freeze-draft"
+        ? "freeze-draft"
+        : undefined,
       filePath,
       title: json.title,
       category: json.category,

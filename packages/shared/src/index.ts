@@ -8,6 +8,7 @@ export {
   type ConsoleMessageInfo,
   type DaemonStatus,
   type JSErrorInfo,
+  type FreezeDraftInfo,
   type NetworkRequestInfo,
   type RefInfo,
   type Request,

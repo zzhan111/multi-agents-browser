@@ -227,7 +227,8 @@ function AdapterCard({ adapter: a }) {
         {a.readOnly
           ? <span className={`${styles.badge} ${styles.badgeRO}`}>只读</span>
           : <span className={`${styles.badge} ${styles.badgeRW}`}>写入</span>}
-        {a.source === 'local' && <span className={`${styles.badge} ${styles.badgeLocal}`}>本地</span>}
+        {a.origin === 'freeze-draft' && <span className={`${styles.badge} ${styles.badgeDraft}`}>草稿</span>}
+        {a.source === 'local' && a.origin !== 'freeze-draft' && <span className={`${styles.badge} ${styles.badgeLocal}`}>本地</span>}
       </div>
       <p className={styles.adapterDesc}>{a.description}</p>
       <code className={styles.signature}>{signature}</code>

@@ -469,6 +469,21 @@ export const COMMANDS: CommandDef[] = [
     category: "site",
     args: z.object({}),
   },
+  {
+    name: "site_freeze",
+    action: "site_freeze",
+    description: "Freeze a captured network request into a private site adapter draft (eval-like; writes ~/.bb-browser/sites/)",
+    category: "site",
+    args: z.object({
+      name: z.string().describe("Adapter name as platform/command (e.g. example/search)"),
+      requestId: z.string().optional().describe("Network request ID to freeze; omit to list/rank candidates in the since window"),
+      overwrite: z.boolean().optional().describe("Replace an existing private adapter of the same name"),
+      since: z.union([z.literal("last_action"), z.number()]).optional().describe("Candidate window when requestId is omitted (default last_action)"),
+      method: z.string().optional().describe("Filter candidates by HTTP method"),
+      status: z.string().optional().describe("Filter candidates by status (2xx / 200 / 4xx)"),
+      tab: z.string().optional().describe("Tab short ID that owns the network ring"),
+    }),
+  },
 ];
 
 // ---------------------------------------------------------------------------

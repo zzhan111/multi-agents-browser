@@ -5,7 +5,7 @@
  * CdpConnection + TabStateManager for per-tab state and seq tracking.
  */
 
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -17,13 +17,15 @@ import type {
   SnapshotData,
   TraceStatus,
 } from "@ma-browser/shared";
+import { DAEMON_DIR } from "@ma-browser/shared";
 import { CdpConnection, type CdpTargetInfo } from "./cdp-connection.js";
 import type { TabState } from "./tab-state.js";
 import type { AgentSession } from "./session-state.js";
 import type { BindingStore } from "./binding-store.js";
 import type { ScratchpadManager } from "./scratchpad-manager.js";
 import type { CommandHistory } from "./command-history.js";
-import { filterAdaptersForScope } from "./site-catalog.js";
+import { filterAdaptersForScope, invalidateCatalog } from "./site-catalog.js";
+import { planFreeze, resolvePrivateAdapterFile } from "./adapter-freeze.js";
 import {
   listAdapters,
   searchAdapters,
@@ -97,14 +99,26 @@ function ok(id: string, data?: ExtResponseData): Response {
   return { id, success: true, data: data as ResponseData };
 }
 
-function fail(id: string, error: unknown, data?: ExtResponseData): Response {
+function fail(
+  id: string,
+  error: unknown,
+  data?: ExtResponseData,
+  extra?: { hint?: string; action?: string },
+): Response {
   return {
     id,
     success: false,
     error: buildRequestError(error).message,
+    ...(extra?.hint ? { hint: extra.hint } : {}),
+    ...(extra?.action ? { action: extra.action } : {}),
     ...(data ? { data: data as ResponseData } : {}),
   };
 }
+
+const EVAL_LIKE_PRIVILEGE = {
+  hint: "site_freeze generates JS that will run in a real tab (eval-like). Use a full-control session.",
+  action: "Set BB_SESSION_SCOPE=full and reconnect this client",
+};
 
 // ---------------------------------------------------------------------------
 // buildDomTree script loading
@@ -584,11 +598,13 @@ function resolveRecommendationTarget(
 }
 
 /** Returns true if the request involves running JavaScript via Runtime.evaluate. */
-function isEvalLike(request: Request): boolean {
+export function isEvalLike(request: Pick<Request, "action" | "traceCommand">): boolean {
   return (
     request.action === "eval" ||
     // site_run executes adapter JS via eval, so it requires eval permission.
     request.action === "site_run" ||
+    // site_freeze generates JS that site_run will eval in a real tab.
+    request.action === "site_freeze" ||
     (request.action === "trace" && request.traceCommand === "start")
   );
 }
@@ -813,6 +829,146 @@ async function handleSiteRun(
   });
 }
 
+function hostnameOf(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Freeze a captured network request into a private adapter draft.
+ * INV-7: never create a blank page to succeed; fail if no page tab exists.
+ * INV-3: explicit tabId must resolve or error (no silent fallback).
+ */
+async function handleSiteFreeze(
+  cdp: CdpConnection,
+  request: Request,
+  session?: AgentSession,
+): Promise<Response> {
+  if (!request.name) {
+    return fail(request.id, "Missing 'name' parameter for site_freeze", undefined, {
+      hint: "Name must be platform/command, e.g. example/search.",
+      action: "ma-browser site freeze --name platform/command",
+    });
+  }
+
+  const pages = (await cdp.getTargets()).filter((t) => t.type === "page");
+  if (pages.length === 0) {
+    return fail(request.id, "No page tab to freeze from", undefined, {
+      hint: "Open a logged-in site, capture the request with network, then freeze. site_freeze will not create a blank tab.",
+      action: "ma-browser open <url>",
+    });
+  }
+
+  let target: CdpTargetInfo | undefined;
+  if (request.tabId !== undefined) {
+    const ref = String(request.tabId);
+    const resolvedTargetId = cdp.tabManager.resolveShortId(ref);
+    target =
+      (resolvedTargetId ? pages.find((t) => t.id === resolvedTargetId) : undefined) ??
+      pages.find((t) => t.id === ref);
+    if (!target) {
+      return fail(request.id, `Tab not found: ${ref}`);
+    }
+  } else {
+    target =
+      (session?.currentTargetId
+        ? pages.find((t) => t.id === session.currentTargetId)
+        : undefined) ?? pages[0];
+  }
+  if (!target) {
+    return fail(request.id, "No page tab to freeze from", undefined, {
+      hint: "Open a logged-in site first. site_freeze will not create a blank tab.",
+      action: "ma-browser open <url>",
+    });
+  }
+
+  await cdp.attachAndEnable(target.id);
+  const tab = cdp.tabManager.getTab(target.id);
+  if (!tab) return fail(request.id, "Internal error: tab state not found");
+
+  if (
+    tab.leaseMode === "exclusive" &&
+    tab.leaseOwner &&
+    tab.leaseOwner !== session?.id
+  ) {
+    return fail(request.id, `Tab ${tab.shortId} is exclusively held by another session`);
+  }
+
+  const seq = tab.recordAction();
+  const attribution = { tab: tab.shortId, seq };
+
+  const requests = request.requestId
+    ? tab.getNetworkRequests().items
+    : tab.getNetworkRequests({
+        since: request.since ?? "last_action",
+        method: request.method,
+        status: request.status,
+        limit: request.limit,
+      }).items;
+
+  const navs = tab.getTraceEvents().items.filter((e) => e.type === "navigation");
+  const lastNav = navs[navs.length - 1];
+  const domain = hostnameOf(lastNav?.url) ?? hostnameOf(target.url);
+
+  const dest = resolvePrivateAdapterFile(DAEMON_DIR, request.name);
+  const alreadyExists = "path" in dest && existsSync(dest.path);
+
+  const planned = planFreeze({
+    name: request.name,
+    requests,
+    requestId: request.requestId,
+    overwrite: request.overwrite,
+    alreadyExists,
+    bbHome: DAEMON_DIR,
+    domain,
+    tab: tab.shortId,
+    seq,
+  });
+
+  if (planned.kind === "error") {
+    return fail(request.id, planned.error, attribution, {
+      hint: planned.hint,
+      action: planned.action,
+    });
+  }
+
+  if (planned.kind === "candidates") {
+    return ok(request.id, {
+      ...attribution,
+      freezeDraft: {
+        warnings: ["Multiple API candidates; pass requestId to freeze one."],
+        incomplete: true,
+        candidates: planned.candidates.map((c) => ({
+          requestId: c.requestId,
+          url: c.url,
+          method: c.method,
+          status: c.status,
+          mimeType: c.mimeType,
+        })),
+      },
+    });
+  }
+
+  mkdirSync(path.dirname(planned.dest), { recursive: true });
+  writeFileSync(planned.dest, planned.draft, { encoding: "utf8" });
+  invalidateCatalog();
+
+  return ok(request.id, {
+    ...attribution,
+    path: planned.dest,
+    freezeDraft: {
+      path: planned.dest,
+      preview: planned.preview,
+      warnings: planned.warnings,
+      incomplete: planned.incomplete,
+    },
+  });
+}
+
 export async function dispatchRequest(
   cdp: CdpConnection,
   request: Request,
@@ -824,11 +980,24 @@ export async function dispatchRequest(
   // Scope enforcement — fast-fail before any CDP work.
   if (session?.scope === "read-only") {
     if (!isReadOnlyScopeAllowed(request.action)) {
+      if (request.action === "site_freeze") {
+        return fail(
+          request.id,
+          `Action 'site_freeze' is not allowed in read-only scope`,
+          undefined,
+          EVAL_LIKE_PRIVILEGE,
+        );
+      }
       return fail(request.id, `Action '${request.action}' is not allowed in read-only scope`);
     }
   } else if (session?.scope === "no-eval") {
     if (isEvalLike(request)) {
-      return fail(request.id, `Action '${request.action}' requires eval permission (session scope: no-eval)`);
+      return fail(
+        request.id,
+        `Action '${request.action}' requires eval permission (session scope: no-eval)`,
+        undefined,
+        request.action === "site_freeze" ? EVAL_LIKE_PRIVILEGE : undefined,
+      );
     }
   }
 
@@ -937,6 +1106,9 @@ export async function dispatchRequest(
   }
   if (request.action === "site_run") {
     return handleSiteRun(cdp, request, session);
+  }
+  if (request.action === "site_freeze") {
+    return handleSiteFreeze(cdp, request, session);
   }
   if (request.action === "site_update") {
     const result = await updateAdapters();

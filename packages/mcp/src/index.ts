@@ -225,7 +225,10 @@ function errorResult(message: string) {
 }
 
 function responseError(resp: Response) {
-  return errorResult(resp.error || "Unknown error");
+  const parts = [resp.error || "Unknown error"];
+  if (resp.hint) parts.push(`Hint: ${resp.hint}`);
+  if (resp.action) parts.push(`Action: ${resp.action}`);
+  return errorResult(parts.join("\n"));
 }
 
 function textResult(value: unknown) {
@@ -390,6 +393,7 @@ Site adapters (pre-built commands for popular sites):
 - site_list/site_search/site_info: Discover available adapters and their signatures
 - site_recommend: Suggest adapters based on browsing history
 - site_run: Execute an adapter directly from MCP
+- site_freeze: Freeze a captured network request into a private adapter draft (eval-like)
 - site_update: Pull the community adapter repository
 - Available: reddit, twitter, github, hackernews, xiaohongshu, zhihu, bilibili, weibo, douban, youtube
 
@@ -814,6 +818,38 @@ server.tool(
       const result = await runSiteCli(cliArgs);
       const unwrapped = result && typeof result === "object" && "data" in result ? result.data : result;
       return textResult(unwrapped);
+    } catch (error) {
+      return errorResult(error instanceof Error ? error.message : String(error));
+    }
+  }
+);
+
+server.tool(
+  "site_freeze",
+  "Freeze a captured network request into a private site adapter draft under ~/.bb-browser/sites/. Eval-like: requires BB_SESSION_SCOPE=full. Never publishes to the community repo. If requestId is omitted and multiple API candidates exist, returns candidates[] for a second call.",
+  {
+    name: z.string().describe("Adapter name as platform/command, e.g. example/search"),
+    requestId: z.string().optional().describe("Network request ID to freeze; omit to list candidates in the since window"),
+    overwrite: z.boolean().optional().describe("Replace an existing private adapter of the same name"),
+    since: z.union([z.literal("last_action"), z.number()]).optional().describe("Candidate window when requestId is omitted (default last_action)"),
+    method: z.string().optional().describe("Filter candidates by HTTP method"),
+    status: z.string().optional().describe("Filter candidates by HTTP status"),
+    tab: z.string().optional().describe("Tab short ID that owns the network ring"),
+  },
+  async ({ name, requestId, overwrite, since, method, status, tab }) => {
+    try {
+      const resp = await runCommand({
+        action: "site_freeze",
+        name,
+        requestId,
+        overwrite,
+        since,
+        method,
+        status,
+        ...(tab !== undefined ? { tabId: tab } : {}),
+      });
+      if (!resp.success) return responseError(resp);
+      return textResult(resp.data);
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }

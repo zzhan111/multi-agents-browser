@@ -114,6 +114,10 @@
   background: rgba(63,185,80,0.15);
   color: #3fb950;
 }
+.badgeDraft {
+  background: rgba(210,153,34,0.18);
+  color: #d29922;
+}
 
 .adapterDesc {
   font-size: 11px;
