@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "turbo run build && pnpm build:release",
-    "build:release": "tsup",
+    "build:release": "tsup && node dist/daemon.js --help",
     "dev": "turbo run dev",
     "test": "turbo run test",
     "lint": "turbo run lint",
@@ -60,7 +60,9 @@
     "@pinixai/hub-client": "^0.2.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
-    "ws": "^8.18.0"
+    "better-sqlite3": "^13.0.3",
+    "ws": "^8.18.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.23.0",

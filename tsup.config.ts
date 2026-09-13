@@ -25,7 +25,11 @@ export default defineConfig({
   define: {
     __BB_BROWSER_VERSION__: JSON.stringify(packageJson.version),
   },
-  // 全部 bundle 进去（npx 可用），只保留 ws（CommonJS 动态 require）
-  noExternal: [/^(?!ws$).*/],
-  external: ["ws"],
+  // Bundle everything for npx except CJS/native deps that esbuild cannot
+  // rewrite into ESM. yaml@2.x does `require("process")` in composer.js;
+  // better-sqlite3 does `require("fs")` — inlining either throws
+  // `Dynamic require of "..." is not supported` (issue #15).
+  // Same set as packages/daemon/tsup.config.ts (minus chokidar, which is ESM).
+  noExternal: [/^(?!ws$|yaml$|better-sqlite3$).*/],
+  external: ["ws", "yaml", "better-sqlite3"],
 });
