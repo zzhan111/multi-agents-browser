@@ -55,6 +55,12 @@ ExportDialog 新增"智能等待"开关（默认开启）：
 
 （暂无。）
 
+## 精简与性能（2026-10，分支 slim/core）
+
+- 已移除：`packages/web`、`packages/tray-app`、Pinix provider、OpenClaw 后端、CLI 静默 `git pull`。下文 Tray/控制面板记录仅作历史。
+- 适配器解析/参数/更新只在 `packages/shared/src/site-adapters.ts`；CLI/MCP 的 site run 都走 daemon `site_run`。
+- 验收：`node scripts/e2e.mjs`（隔离 Chromium+daemon 跑核心契约）；性能：`node scripts/bench.mjs [daemon.js]`。
+
 ---
 
 ## 线 C — 状态持久面 (State Persistence Plane) 实施记录（2026-06-03）

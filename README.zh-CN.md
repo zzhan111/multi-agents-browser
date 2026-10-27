@@ -59,17 +59,6 @@ ma-browser site recommend     # 看看哪些和你的浏览习惯匹配
 ma-browser site zhihu/hot     # 开搞
 ```
 
-### OpenClaw（无需安装扩展）
-
-如果你使用 [OpenClaw](https://openclaw.ai)，ma-browser 可以直接通过 OpenClaw 内置浏览器运行，不需要额外安装 Chrome 扩展或 daemon：
-
-```bash
-ma-browser site reddit/hot --openclaw
-ma-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePercent}'
-```
-
-ClawHub Skill: [ma-browser-openclaw](https://clawhub.ai/yan5xu/ma-browser)
-
 ### MCP 接入（Claude Code / Cursor）
 
 ```json

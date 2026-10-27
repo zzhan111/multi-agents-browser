@@ -80,12 +80,12 @@ ma-browser snapshot -i
 ma-browser click @5
 ma-browser close                        # 完成后关闭
 
-# 多 tab 场景
-ma-browser open https://site-a.com     # tabId: 123
-ma-browser open https://site-b.com     # tabId: 456
+# 多 tab 场景：用 --json 返回的短 ID（如 a1f3）定位，不要用 index
+ma-browser open https://site-a.com --json   # data.tab: a1f3
+ma-browser open https://site-b.com --json   # data.tab: 9c2e
 # ... 操作 ...
-ma-browser tab close                    # 关闭当前 tab
-ma-browser tab close                    # 关闭剩余 tab
+ma-browser tab close --id a1f3
+ma-browser tab close --id 9c2e
 
 # 指定 tab 操作
 ma-browser open https://example.com --tab current  # 在当前 tab 打开（不新建）
@@ -159,6 +159,8 @@ ma-browser tab select --id 123  # 切换到指定 tabId 的 tab
 ma-browser tab close            # 关闭当前 tab
 ma-browser tab close 3          # 关闭第 3 个 tab（按 index）
 ma-browser tab close --id 123   # 关闭指定 tabId 的 tab
+ma-browser tab claim --id 123 --intent "核对订单"  # 独占 tab（其他 agent 操作会被拒绝）
+ma-browser tab release --id 123                  # 释放独占
 ```
 
 ### 截图
@@ -241,6 +243,27 @@ snapshot 返回的 `@ref` 是元素的临时标识：
 - ref 格式：`@1`, `@2`, `@3`...
 
 详细说明：参见 [references/snapshot-refs.md](references/snapshot-refs.md)
+
+## 多 Agent 共用浏览器
+
+多个 agent 共用同一个 daemon 和 Chrome（同一份登录态）。每个 agent 设置自己的会话 ID，
+daemon 就会分别记住各自的"当前 tab"、权限和独占，互不干扰：
+
+```bash
+export BB_SESSION_ID=agent-research      # 每个 agent 一个固定值；不设则共用 default 会话
+export BB_SESSION_LABEL=research         # 可选：显示名，同名 label 跨重启映射到同一 agentId
+export BB_SESSION_SCOPE=no-eval          # 可选：read-only / no-eval，只能收紧不能放宽
+
+ma-browser open https://example.com --json          # 记下 data.tab
+ma-browser tab claim --id <tab> --intent "填表"      # 长任务先独占，防止别的 agent 误操作
+# ... snapshot / click / fill ...
+ma-browser tab release --id <tab>
+ma-browser tab close --id <tab>
+```
+
+- 独占的 tab 被其他会话操作时返回 `exclusively held by another session`，换一个 tab 即可，不要重试抢占。
+- 会话闲置 24 小时（`BB_SESSION_IDLE_HOURS`）后自动失效，并释放它的独占。
+- 不同会话仍共享 Cookie：账号隔离需要另一个 profile/daemon。
 
 ## 并发操作
 

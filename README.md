@@ -59,17 +59,6 @@ ma-browser site recommend     # see which adapters match your browsing habits
 ma-browser site zhihu/hot     # go
 ```
 
-### OpenClaw (no extension needed)
-
-If you use [OpenClaw](https://openclaw.ai), ma-browser runs directly through OpenClaw's built-in browser — no Chrome extension or daemon required:
-
-```bash
-ma-browser site reddit/hot --openclaw
-ma-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePercent}'
-```
-
-Skill on ClawHub: [ma-browser-openclaw](https://clawhub.ai/yan5xu/ma-browser)
-
 ### MCP (Claude Code / Cursor)
 
 ```json
