@@ -7,6 +7,48 @@
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/zzhan111/multi-agents-browser/compare/v0.13.0...v0.14.0) (2026-10-27)
+
+Slim core line, rebuilt from v0.12.0. The v0.13.0 features (site_freeze,
+adapter cache/health, dynamic MCP tools, vault, remote access) are not
+included; they remain in the v0.13.0 tag.
+
+### Removed
+
+- web control panel, Windows tray app, Pinix Hub provider, OpenClaw backend
+- background `git pull` after every `site` command and the npm version check
+
+### Features
+
+- **cli:** `tab claim [--id] [--shared] [--intent]` / `tab release` for exclusive tabs
+- **cli:** `snapshot --highlight` draws the numbered ref boxes on request (MCP: `highlight: true`)
+- **daemon:** idle sessions expire after `BB_SESSION_IDLE_HOURS` (default 24) and release their leases
+- **scripts:** `e2e.mjs` (core agent contract in an isolated browser) and `bench.mjs`
+
+### Performance
+
+- **snapshot:** no overlay by default; a 400-row page went from 15.6s to 2.0s, same output
+- **click:** focus emulation on attach; background-tab clicks went from ~10s to <1s
+- **daemon:** cap Chrome's per-tab network body buffer (10MB/tab, 5MB/response): -155MB Chromium PSS with six API-heavy tabs
+- **daemon:** stop enabling the unused Accessibility domain on every tab
+
+### Bug Fixes
+
+- **cli:** send `BB_SESSION_ID`/`BB_SESSION_LABEL`/`BB_SESSION_SCOPE`, so CLI agents get their own current tab
+- **click:** one click fires the handler once (was mouse click plus `element.click()`)
+- **tabs:** hex short IDs are no longer parseInt-ed, and unknown IDs error instead of falling back to a list index
+- **site:** one adapter catalog/runner shared by CLI, MCP and daemon; `site run` goes through the daemon's sessions and leases
+
+## [0.13.0](https://github.com/zzhan111/multi-agents-browser/compare/v0.12.1...v0.13.0) (2026-09-10)
+
+### Features
+
+- **daemon/adapter-freeze (M0):** pure `NetworkRequestInfo` → draft adapter JS generator with F2 ranking + F4 strip checklist (no Cookie literals)
+- **daemon/site_freeze (M1):** `site_freeze` protocol + dispatch + CLI/MCP; private drafts only; `isEvalLike` gate
+- **daemon/adapter-cache (M2):** local TTL cache for readOnly `site_run` (atomic writes, `--fresh`, invalidate; no tokens in cache files)
+- **daemon/adapter-health (M3):** health states unknown/healthy/degraded/broken on `site_run`; visible in `site_info`/`site_list`/API; invalidate on broken
+- **mcp/dynamic-tools (M4 spike A):** optional `BB_MCP_DYNAMIC_TOOLS` (default off), ≤8 dynamic tools forwarding to `site_run`, reaper + `list_changed`; docs in `docs/spike-dynamic-tools-v0.13.md`
+
 ### Features
 
 - **web/ExportDialog**: 选择器模式可选 Auto / CSS / XPath，默认 Auto 保留 bb-browser ref 优先级；CSS 模式生成可脱离 bb-browser 运行的脚本，XPath 模式跨 DOM 变化更稳定
