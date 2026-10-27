@@ -47,3 +47,28 @@ test("parseNameserver tolerates leading whitespace and returns null when absent"
   assert.equal(parseNameserver("  nameserver 10.0.0.1\n"), "10.0.0.1");
   assert.equal(parseNameserver("search localdomain\n"), null);
 });
+
+test("httpJson sends the caller's session identity from the environment", async () => {
+  const { createServer } = await import("node:http");
+  const { httpJson } = await import("../daemon-client.js");
+  let seen: Record<string, string | string[] | undefined> = {};
+  const server = createServer((req, res) => { seen = req.headers; res.end("{}"); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, { BB_SESSION_ID: "agent-7", BB_SESSION_LABEL: "researcher", BB_SESSION_SCOPE: "no-eval" });
+    await httpJson("POST", "/command", { host: "127.0.0.1", port, token: "t" }, { id: "1" });
+    assert.equal(seen["x-bb-session"], "agent-7");
+    assert.equal(seen["x-bb-session-label"], "researcher");
+    assert.equal(seen["x-bb-session-scope"], "no-eval");
+    delete process.env.BB_SESSION_ID;
+    delete process.env.BB_SESSION_LABEL;
+    delete process.env.BB_SESSION_SCOPE;
+    await httpJson("GET", "/status", { host: "127.0.0.1", port, token: "t" });
+    assert.equal(seen["x-bb-session"], undefined);
+  } finally {
+    process.env = saved;
+    server.close();
+  }
+});

@@ -43,6 +43,7 @@ export {
   readDaemonJson,
   isProcessAlive,
   httpJson,
+  sessionHeaders,
   isWsl,
   parseDefaultGatewayHex,
   parseNameserver,

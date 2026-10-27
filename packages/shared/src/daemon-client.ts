@@ -1,7 +1,7 @@
 /**
  * Shared daemon HTTP client utilities.
  *
- * Used by CLI (daemon-manager), MCP server, and Edge Clip provider
+ * Used by the CLI (daemon-manager) and the MCP server
  * to communicate with the ma-browser daemon process.
  */
 
@@ -145,6 +145,15 @@ export function isProcessAlive(pid: number): boolean {
 // HTTP client
 // ---------------------------------------------------------------------------
 
+/** Caller identity headers from BB_SESSION_ID / BB_SESSION_LABEL / BB_SESSION_SCOPE. */
+export function sessionHeaders(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  return {
+    ...(env.BB_SESSION_ID ? { "X-BB-Session": env.BB_SESSION_ID } : {}),
+    ...(env.BB_SESSION_LABEL ? { "X-BB-Session-Label": env.BB_SESSION_LABEL } : {}),
+    ...(env.BB_SESSION_SCOPE ? { "X-BB-Session-Scope": env.BB_SESSION_SCOPE } : {}),
+  };
+}
+
 export function httpJson<T>(
   method: "GET" | "POST",
   urlPath: string,
@@ -162,6 +171,7 @@ export function httpJson<T>(
         method,
         headers: {
           Authorization: `Bearer ${info.token}`,
+          ...sessionHeaders(),
           ...(payload
             ? {
                 "Content-Type": "application/json",
