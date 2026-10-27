@@ -10,8 +10,7 @@ window.buildDomTree = (
 ) => {
   const { showHighlightElements, focusHighlightIndex, viewportExpansion, startHighlightIndex, startId, debugMode } =
     args;
-  // Make sure to do highlight elements always, but we can hide the highlights if needed
-  const doHighlightElements = true;
+  const doHighlightElements = showHighlightElements;
 
   let highlightIndex = startHighlightIndex; // Reset highlight index
 
@@ -1210,8 +1209,8 @@ window.buildDomTree = (
           } else {
             highlightElement(node, nodeData.highlightIndex, parentIframe);
           }
-          return true; // Successfully highlighted
         }
+        return true;
       } else {
         // console.log(`Skipping highlight for ${nodeData.tagName} (outside viewport)`);
       }
