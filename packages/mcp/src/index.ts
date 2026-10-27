@@ -638,7 +638,7 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
-// Site tools — route through CLI instead of daemon
+// Site tools — run in the daemon; only recommend needs the CLI (browser history)
 // ---------------------------------------------------------------------------
 
 server.tool(
@@ -701,12 +701,9 @@ server.tool(
     name: z.string().describe("Adapter name, e.g. twitter/search"),
   },
   async ({ name }) => {
-    try {
-      const result = await runSiteCli(["info", name, "--json"]);
-      return textResult(result);
-    } catch (error) {
-      return errorResult(error instanceof Error ? error.message : String(error));
-    }
+    const resp = await runCommand({ action: "site_info", name });
+    if (!resp.success) return responseError(resp);
+    return textResult(resp.data);
   }
 );
 
@@ -738,34 +735,11 @@ server.tool(
     args: z.array(z.string()).optional().describe("Positional arguments in adapter-defined order"),
     namedArgs: z.record(z.string()).optional().describe("Named adapter arguments passed as --key value"),
     tab: z.string().optional().describe("Optional tab short ID to target"),
-    openclaw: z.boolean().optional().describe("Prefer the OpenClaw browser instead of the extension flow"),
   },
-  async ({ name, args, namedArgs, tab, openclaw }) => {
-    try {
-      const cliArgs = ["run", name];
-
-      for (const arg of args || []) {
-        cliArgs.push(arg);
-      }
-
-      for (const [key, value] of Object.entries(namedArgs || {})) {
-        cliArgs.push(`--${key}`, value);
-      }
-
-      if (tab !== undefined) {
-        cliArgs.push("--tab", String(tab));
-      }
-      if (openclaw) {
-        cliArgs.push("--openclaw");
-      }
-      cliArgs.push("--json");
-
-      const result = await runSiteCli(cliArgs);
-      const unwrapped = result && typeof result === "object" && "data" in result ? result.data : result;
-      return textResult(unwrapped);
-    } catch (error) {
-      return errorResult(error instanceof Error ? error.message : String(error));
-    }
+  async ({ name, args, namedArgs, tab }) => {
+    const resp = await runCommand({ action: "site_run", name, args: args ?? [], namedArgs: namedArgs ?? {}, tabId: tab });
+    if (!resp.success) return responseError(resp);
+    return textResult(resp.data ?? null);
   }
 );
 
@@ -774,12 +748,9 @@ server.tool(
   "Pull or clone the community adapter repository",
   {},
   async () => {
-    try {
-      const result = await runSiteCli(["update", "--json"]);
-      return textResult(result);
-    } catch (error) {
-      return errorResult(error instanceof Error ? error.message : String(error));
-    }
+    const resp = await runCommand({ action: "site_update" });
+    if (!resp.success) return responseError(resp);
+    return textResult(resp.data);
   }
 );
 

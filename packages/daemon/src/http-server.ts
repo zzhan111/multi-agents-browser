@@ -21,7 +21,6 @@ import type { CommandHistory } from "./command-history.js";
 import { CommandScheduler } from "./command-scheduler.js";
 import { SessionManager, type SessionScope } from "./session-state.js";
 import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
-import { DAEMON_DIR } from "@ma-browser/shared";
 import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
 import type { JournalManager } from "./agent-journal.js";
@@ -388,7 +387,7 @@ export class HttpServer {
     if (parseStringParam(url, "invalidate", "") === "1") invalidateCatalog();
     const q = parseStringParam(url, "q", "");
     const domain = parseStringParam(url, "domain", "");
-    const { adapters, cacheAge } = getCatalog(DAEMON_DIR);
+    const { adapters, cacheAge } = getCatalog();
     const results = queryCatalog(adapters, { q: q || undefined, domain: domain || undefined });
     this.sendJson(res, 200, { adapters: results, total: adapters.length, cacheAge });
   }

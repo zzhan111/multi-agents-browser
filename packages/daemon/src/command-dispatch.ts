@@ -27,10 +27,9 @@ import {
   searchAdapters,
   findAdapter,
   fuzzyAdapterNames,
-  prepareAdapterScript,
-  matchTabOrigin,
   updateAdapters,
 } from "./site-runner.js";
+import { buildAdapterScript, matchTabOrigin } from "@ma-browser/shared";
 
 export interface DispatchContext {
   bindingStore?: BindingStore;
@@ -596,7 +595,7 @@ async function handleSiteRun(
     return fail(request.id, `Site adapter '${request.name}' not found.${hint}`);
   }
 
-  const prep = prepareAdapterScript(adapter, request.args ?? [], request.namedArgs ?? {});
+  const prep = buildAdapterScript(adapter, request.args ?? [], request.namedArgs ?? {});
   if ("error" in prep) return fail(request.id, prep.error);
 
   // Resolve target tab: explicit tabId > domain match > new domain tab > active.

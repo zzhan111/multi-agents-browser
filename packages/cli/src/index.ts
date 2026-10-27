@@ -96,7 +96,6 @@ ma-browser - AI Agent 浏览器自动化工具
 选项：
   --json               以 JSON 格式输出
   --port <n>           指定 Chrome CDP 端口
-  --openclaw           优先复用 OpenClaw 浏览器实例
   --jq <expr>          对 JSON 输出应用 jq 过滤（直接作用于数据，跳过 id/success 信封）
   -i, --interactive    只输出可交互元素（snapshot 命令）
   -c, --compact        移除空结构节点（snapshot 命令）
@@ -122,7 +121,6 @@ interface ParsedArgs {
     tab?: string;
     days?: number;
     jq?: string;
-    openclaw?: boolean;
     port?: number;
     since?: string;
   };
@@ -161,8 +159,6 @@ function parseArgs(argv: string[]): ParsedArgs {
         result.flags.jq = args[nextIdx];
         result.flags.json = true;
       }
-    } else if (arg === "--openclaw") {
-      result.flags.openclaw = true;
     } else if (arg === "--port") {
       skipNext = true;
       const nextIdx = args.indexOf(arg) + 1;
@@ -663,7 +659,6 @@ async function main(): Promise<void> {
           jq: parsed.flags.jq,
           days: parsed.flags.days,
           tabId: globalTabId,
-          openclaw: parsed.flags.openclaw,
         });
         break;
       }

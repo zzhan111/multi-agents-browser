@@ -57,3 +57,18 @@ export {
   launchManagedBrowser,
   probeCdp,
 } from "./browser-launcher.js";
+
+export {
+  type AdapterSource,
+  type SiteAdapter,
+  type UpdateResult,
+  COMMUNITY_REPO,
+  COMMUNITY_SITES_DIR,
+  LOCAL_SITES_DIR,
+  buildAdapterScript,
+  loadAdapters,
+  matchTabOrigin,
+  parseSiteMeta,
+  scanSites,
+  updateCommunityAdapters,
+} from "./site-adapters.js";
