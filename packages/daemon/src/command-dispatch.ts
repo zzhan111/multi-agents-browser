@@ -356,14 +356,14 @@ async function getInteractablePoint(
   cdp: CdpConnection,
   targetId: string,
   backendNodeId: number,
-): Promise<{ x: number; y: number }> {
+): Promise<{ x: number; y: number; covered: boolean }> {
   const resolved = await cdp.sessionCommand<{ object: { objectId: string } }>(
     targetId,
     "DOM.resolveNode",
     { backendNodeId },
   );
   const call = await cdp.sessionCommand<{
-    result: { value?: { x?: number; y?: number } };
+    result: { value?: { x?: number; y?: number; covered?: boolean } };
     exceptionDetails?: { text?: string };
   }>(targetId, "Runtime.callFunctionOn", {
     objectId: resolved.object.objectId,
@@ -376,10 +376,10 @@ async function getInteractablePoint(
       if (!rect || rect.width <= 0 || rect.height <= 0) {
         throw new Error('Element is not visible');
       }
-      return {
-        x: rect.left + rect.width / 2,
-        y: rect.top + rect.height / 2,
-      };
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      return { x, y, covered: !(hit && (hit === this || this.contains(hit))) };
     }`,
     returnByValue: true,
   });
@@ -398,7 +398,7 @@ async function getInteractablePoint(
   ) {
     throw new Error("Failed to resolve element point");
   }
-  return point as { x: number; y: number };
+  return { x: point.x, y: point.y, covered: point.covered === true };
 }
 
 async function mouseClick(cdp: CdpConnection, targetId: string, x: number, y: number): Promise<void> {
@@ -883,27 +883,24 @@ export async function dispatchRequest(
       const seq = tab.recordAction();
       const backendNodeId = await parseRef(cdp, target.id, tab, request.ref);
       const point = await getInteractablePoint(cdp, target.id, backendNodeId);
-      await cdp.sessionCommand(target.id, "Input.dispatchMouseEvent", {
-        type: "mouseMoved", x: point.x, y: point.y, button: "none",
-      });
-      if (request.action === "click") {
+      if (request.action === "hover") {
+        await cdp.sessionCommand(target.id, "Input.dispatchMouseEvent", {
+          type: "mouseMoved", x: point.x, y: point.y, button: "none",
+        });
+      } else if (point.covered) {
+        // Something sits on top of the element; a real mouse click would land
+        // on the overlay, so click the element itself (exactly once).
+        const resolved = await cdp.sessionCommand<{ object: { objectId: string } }>(
+          target.id,
+          "DOM.resolveNode",
+          { backendNodeId },
+        );
+        await cdp.sessionCommand(target.id, "Runtime.callFunctionOn", {
+          objectId: resolved.object.objectId,
+          functionDeclaration: "function() { this.click(); }",
+        });
+      } else {
         await mouseClick(cdp, target.id, point.x, point.y);
-        // Also trigger element.click() for React synthetic event compatibility
-        try {
-          const resolved = await cdp.sessionCommand<{ object: { objectId: string } }>(
-            target.id,
-            "DOM.resolveNode",
-            { backendNodeId },
-          );
-          if (resolved?.object?.objectId) {
-            await cdp.sessionCommand(target.id, "Runtime.callFunctionOn", {
-              objectId: resolved.object.objectId,
-              functionDeclaration: "function() { this.click(); }",
-            });
-          }
-        } catch {
-          // Non-critical — click via CDP events already fired
-        }
       }
       const ref = tab.refs[request.ref];
       return ok(request.id, { tab: shortId, seq, role: ref?.role, name: ref?.name });
@@ -1063,23 +1060,7 @@ export async function dispatchRequest(
       let selected: CdpTargetInfo | undefined;
 
       if (request.tabId !== undefined) {
-        const tabIdStr = String(request.tabId);
-        // Try short ID
-        const resolvedId = cdp.tabManager.resolveShortId(tabIdStr);
-        if (resolvedId) {
-          selected = targets.find((t) => t.id === resolvedId);
-        }
-        // Try full target ID
-        if (!selected) {
-          selected = targets.find((t) => t.id === tabIdStr);
-        }
-        // Try numeric index
-        if (!selected) {
-          const num = Number(tabIdStr);
-          if (!Number.isNaN(num)) {
-            selected = targets[num];
-          }
-        }
+        selected = cdp.findPageTarget(targets, String(request.tabId));
       } else {
         selected = targets[request.index ?? 0];
       }
@@ -1101,20 +1082,7 @@ export async function dispatchRequest(
       let selected: CdpTargetInfo | undefined;
 
       if (request.tabId !== undefined) {
-        const tabIdStr = String(request.tabId);
-        const resolvedId = cdp.tabManager.resolveShortId(tabIdStr);
-        if (resolvedId) {
-          selected = targets.find((t) => t.id === resolvedId);
-        }
-        if (!selected) {
-          selected = targets.find((t) => t.id === tabIdStr);
-        }
-        if (!selected) {
-          const num = Number(tabIdStr);
-          if (!Number.isNaN(num)) {
-            selected = targets[num];
-          }
-        }
+        selected = cdp.findPageTarget(targets, String(request.tabId));
       } else {
         selected = targets[request.index ?? 0];
       }

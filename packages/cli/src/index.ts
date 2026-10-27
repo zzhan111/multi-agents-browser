@@ -80,6 +80,7 @@ ma-browser - AI Agent 浏览器自动化工具
 
 标签页：
   tab [list|new|close|<n>]     管理标签页
+  tab claim|release [--id]     独占/释放标签页（多 agent 互不干扰）
   status                       查看受管浏览器状态
 
 导航：
@@ -196,6 +197,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       skipNext = true;
     } else if (arg === "--tab") {
       // --tab 参数及其值，无论出现在命令前后都跳过
+      skipNext = true;
+    } else if (arg === "--intent") {
+      // tab claim --intent <text>，由子命令通过 process.argv 解析
       skipNext = true;
     } else if (arg === "--since") {
       // --since 参数及其值，无论出现在命令前后都跳过

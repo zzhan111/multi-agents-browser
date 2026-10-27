@@ -586,7 +586,9 @@ export class CdpConnection {
     await this.sessionCommand(targetId, "Runtime.enable").catch(() => {});
     await this.sessionCommand(targetId, "Network.enable").catch(() => {});
     await this.sessionCommand(targetId, "DOM.enable").catch(() => {});
-    await this.sessionCommand(targetId, "Accessibility.enable").catch(() => {});
+    // Agent tabs are opened in the background; without focus emulation the
+    // first synthetic mouse event on a hidden tab blocks for ~5s.
+    await this.sessionCommand(targetId, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
 
     return result.sessionId;
   }
@@ -611,6 +613,18 @@ export class CdpConnection {
   }
 
   /**
+   * Resolve a tab reference: short ID, full target ID, or (1-3 digits only) a
+   * list index. Short IDs are at least 4 hex chars, so an unknown or stale
+   * short ID never falls back to "whatever tab sits at that index".
+   */
+  findPageTarget(targets: CdpTargetInfo[], ref: string): CdpTargetInfo | undefined {
+    const resolved = this.tabManager.resolveShortId(ref);
+    return (resolved ? targets.find((t) => t.id === resolved) : undefined)
+      ?? targets.find((t) => t.id === ref)
+      ?? (/^\d{1,3}$/.test(ref) ? targets[Number(ref)] : undefined);
+  }
+
+  /**
    * Ensure we have a valid page target and return it. Supports resolution by:
    *   - short ID string
    *   - full target ID string
@@ -628,22 +642,7 @@ export class CdpConnection {
     let target: CdpTargetInfo | undefined;
 
     if (typeof tabRef === "string") {
-      // Try short ID first
-      const resolvedTargetId = this.tabManager.resolveShortId(tabRef);
-      if (resolvedTargetId) {
-        target = targets.find((t) => t.id === resolvedTargetId);
-      }
-      // Then try full target ID
-      if (!target) {
-        target = targets.find((t) => t.id === tabRef);
-      }
-      // Then try as numeric index
-      if (!target) {
-        const num = Number(tabRef);
-        if (!Number.isNaN(num)) {
-          target = targets[num];
-        }
-      }
+      target = this.findPageTarget(targets, tabRef);
     } else if (typeof tabRef === "number") {
       target = targets[tabRef];
     } else if (session?.currentTargetId) {

@@ -7,6 +7,8 @@
  *   ma-browser tab close [n]          关闭标签页（按 index）
  *   ma-browser tab select --id <id>   切换到指定 tabId 的标签页
  *   ma-browser tab close --id <id>    关闭指定 tabId 的标签页
+ *   ma-browser tab claim [--id <id>] [--shared] [--intent <text>]  占用标签页（默认独占）
+ *   ma-browser tab release [--id <id>]                             释放占用
  */
 
 import { generateId, type Request, type Response, type TabInfo } from "@ma-browser/shared";
@@ -25,21 +27,18 @@ export interface TabOptions {
  * @returns 解析后的子命令和参数
  */
 function parseTabSubcommand(args: string[], rawArgv?: string[]): {
-  action: "tab_list" | "tab_new" | "tab_select" | "tab_close";
+  action: "tab_list" | "tab_new" | "tab_select" | "tab_close" | "tab_claim" | "tab_release";
   url?: string;
   index?: number;
-  tabId?: string | number;
+  tabId?: string;
+  leaseMode?: "shared" | "exclusive";
+  intent?: string;
 } {
-  // 提取 --id 参数
-  let tabId: number | undefined;
+  // --id takes a tab short ID (hex) verbatim; never parseInt it.
+  let tabId: string | undefined;
   if (rawArgv) {
     const idIdx = rawArgv.indexOf("--id");
-    if (idIdx >= 0 && rawArgv[idIdx + 1]) {
-      tabId = parseInt(rawArgv[idIdx + 1], 10);
-      if (isNaN(tabId)) {
-        throw new Error(`无效的 tabId: ${rawArgv[idIdx + 1]}`);
-      }
-    }
+    if (idIdx >= 0 && rawArgv[idIdx + 1]) tabId = rawArgv[idIdx + 1];
   }
 
   if (args.length === 0) {
@@ -82,6 +81,22 @@ function parseTabSubcommand(args: string[], rawArgv?: string[]): {
     return { action: "tab_close" };
   }
 
+  // tab claim [--id <tabId>] [--shared] [--intent <text>]
+  if (first === "claim") {
+    const intentIdx = rawArgv?.indexOf("--intent") ?? -1;
+    return {
+      action: "tab_claim",
+      tabId,
+      leaseMode: rawArgv?.includes("--shared") ? "shared" : "exclusive",
+      intent: intentIdx >= 0 ? rawArgv?.[intentIdx + 1] : undefined,
+    };
+  }
+
+  // tab release [--id <tabId>]
+  if (first === "release") {
+    return { action: "tab_release", tabId };
+  }
+
   // tab <n> - 切换到第 n 个标签页
   const index = parseInt(first, 10);
   if (!isNaN(index) && index >= 0) {
@@ -119,9 +134,8 @@ export async function tabCommand(
 
   // If globalTabId is set and no explicit --id was provided, use globalTabId for close/select
   if (options.globalTabId && parsed.tabId === undefined && parsed.index === undefined) {
-    if (parsed.action === "tab_close" || parsed.action === "tab_select") {
-      const numId = parseInt(options.globalTabId, 10);
-      parsed.tabId = isNaN(numId) ? options.globalTabId : numId;
+    if (parsed.action === "tab_close" || parsed.action === "tab_select" || parsed.action === "tab_claim" || parsed.action === "tab_release") {
+      parsed.tabId = options.globalTabId;
     }
   }
 
@@ -132,6 +146,8 @@ export async function tabCommand(
     url: parsed.url,
     index: parsed.index,
     tabId: parsed.tabId,
+    leaseMode: parsed.leaseMode,
+    intent: parsed.intent,
   };
 
   // 发送请求
@@ -164,6 +180,14 @@ export async function tabCommand(
         case "tab_close": {
           const closedTitle = response.data?.title ?? "(无标题)";
           console.log(`已关闭标签页: ${closedTitle}`);
+          break;
+        }
+        case "tab_claim": {
+          console.log(`已占用标签页 ${response.data?.tab}（${response.data?.lease}）`);
+          break;
+        }
+        case "tab_release": {
+          console.log(`已释放标签页 ${response.data?.tab}`);
           break;
         }
       }
