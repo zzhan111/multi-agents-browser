@@ -146,6 +146,12 @@ try {
     assert.equal(missing.success, false);
   });
 
+  await check("network: captured requests keep their response bodies", async () => {
+    const net = await cli("agent-a", ["network", "requests", "whoami", "--with-body", "--tab", tabA]);
+    const hit = net.data.networkRequests.find((r) => r.url.endsWith("/whoami"));
+    assert.match(hit.responseBody, /sid=agent-ok/);
+  });
+
   await check("persistence: cookies survive a daemon restart and a browser restart", async () => {
     await stopped(daemon);
     await startDaemon();

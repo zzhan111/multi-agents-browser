@@ -584,7 +584,9 @@ export class CdpConnection {
     // Enable domains
     await this.sessionCommand(targetId, "Page.enable").catch(() => {});
     await this.sessionCommand(targetId, "Runtime.enable").catch(() => {});
-    await this.sessionCommand(targetId, "Network.enable").catch(() => {});
+    // Bound the response bodies Chrome keeps for `network --with-body`;
+    // unbounded, six API-heavy tabs held ~155MB more renderer memory.
+    await this.sessionCommand(targetId, "Network.enable", { maxTotalBufferSize: 10_000_000, maxResourceBufferSize: 5_000_000 }).catch(() => {});
     await this.sessionCommand(targetId, "DOM.enable").catch(() => {});
     // Agent tabs are opened in the background; without focus emulation the
     // first synthetic mouse event on a hidden tab blocks for ~5s.
