@@ -69,6 +69,8 @@ export interface Request {
   compact?: boolean;
   /** 限制树深度（snapshot 命令使用） */
   maxDepth?: number;
+  /** 在页面上画出可见的 ref 编号框（snapshot 命令使用，供人对照反馈；默认关闭） */
+  highlight?: boolean;
   /** JavaScript 代码（eval 命令使用） */
   script?: string;
   /** 选项值（select 命令使用） */

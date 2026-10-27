@@ -62,7 +62,7 @@ ma-browser - AI Agent 浏览器自动化工具
 
 浏览器操作：
   open <url> [--tab]           打开 URL
-  snapshot [-i] [-c] [-d <n>]  获取页面快照
+  snapshot [-i] [-c] [-d <n>]  获取页面快照（--highlight 画出编号框）
   click <ref>                  点击元素
   hover <ref>                  悬停元素
   fill <ref> <text>            填充输入框（清空后填入）
@@ -99,6 +99,7 @@ ma-browser - AI Agent 浏览器自动化工具
   --port <n>           指定 Chrome CDP 端口
   --jq <expr>          对 JSON 输出应用 jq 过滤（直接作用于数据，跳过 id/success 信封）
   -i, --interactive    只输出可交互元素（snapshot 命令）
+  --highlight          在页面上画出 ref 编号框，供人对照反馈（snapshot 命令）
   -c, --compact        移除空结构节点（snapshot 命令）
   -d, --depth <n>      限制树深度（snapshot 命令）
   -s, --selector <sel> 限定 CSS 选择器范围（snapshot 命令）
@@ -117,6 +118,7 @@ interface ParsedArgs {
     version: boolean;
     interactive: boolean;
     compact: boolean;
+    highlight?: boolean;
     depth?: number;
     selector?: string;
     tab?: string;
@@ -170,6 +172,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       result.flags.help = true;
     } else if (arg === "--version" || arg === "-v") {
       result.flags.version = true;
+    } else if (arg === "--highlight") {
+      result.flags.highlight = true;
     } else if (arg === "--interactive" || arg === "-i") {
       result.flags.interactive = true;
     } else if (arg === "--compact" || arg === "-c") {
@@ -289,6 +293,7 @@ async function main(): Promise<void> {
           compact: parsed.flags.compact,
           maxDepth: parsed.flags.depth,
           selector: parsed.flags.selector,
+          highlight: parsed.flags.highlight,
           tabId: globalTabId,
         });
         break;

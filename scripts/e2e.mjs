@@ -101,6 +101,14 @@ try {
     assert.deepEqual(out.data.result, ["hello", 1], "one click fires the handler once");
   });
 
+  await check("snapshot: no overlay by default, visible numbered boxes with --highlight", async () => {
+    const overlay = "(() => { const c = document.getElementById('playwright-highlight-container'); return JSON.stringify(c ? [c.style.display, c.childElementCount > 0] : null); })()";
+    await cli("agent-a", ["snapshot", "-i", "--tab", tabA]);
+    assert.equal((await cli("agent-a", ["eval", overlay, "--tab", tabA])).data.result, "null");
+    await cli("agent-a", ["snapshot", "-i", "--highlight", "--tab", tabA]);
+    assert.equal((await cli("agent-a", ["eval", overlay, "--tab", tabA])).data.result, '["block",true]');
+  });
+
   await check("speed: click on a background tab returns within 2s", async () => {
     const snap = await cli("agent-a", ["snapshot", "-i", "--tab", tabA]);
     const t = performance.now();

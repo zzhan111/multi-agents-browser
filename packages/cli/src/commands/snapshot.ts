@@ -1,6 +1,6 @@
 /**
  * snapshot 命令 - 获取当前页面快照
- * 用法：ma-browser snapshot [-i|--interactive] [-c|--compact] [-d|--depth N] [-s|--selector SEL]
+ * 用法：ma-browser snapshot [-i|--interactive] [-c|--compact] [-d|--depth N] [-s|--selector SEL] [--highlight]
  */
 
 import { generateId, type Request, type Response } from "@ma-browser/shared";
@@ -17,6 +17,8 @@ export interface SnapshotOptions {
   maxDepth?: number;
   /** CSS 选择器范围 */
   selector?: string;
+  /** 在页面上画出可见的 ref 编号框 */
+  highlight?: boolean;
   tabId?: string | number;
 }
 
@@ -34,6 +36,7 @@ export async function snapshotCommand(
     compact: options.compact,
     maxDepth: options.maxDepth,
     selector: options.selector,
+    highlight: options.highlight,
     tabId: options.tabId,
   };
 

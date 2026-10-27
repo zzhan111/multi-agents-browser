@@ -93,6 +93,7 @@ export const COMMANDS: CommandDef[] = [
       compact: z.boolean().optional().describe("Remove empty structural nodes for a more concise tree"),
       maxDepth: z.number().optional().describe("Limit tree depth"),
       selector: z.string().optional().describe("CSS selector to filter the snapshot scope"),
+      highlight: z.boolean().optional().describe("Draw visible numbered ref boxes on the page for a human to point at"),
     }),
   },
   {

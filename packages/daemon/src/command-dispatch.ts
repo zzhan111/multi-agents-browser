@@ -265,7 +265,7 @@ async function buildSnapshot(
 ): Promise<SnapshotData> {
   const script = loadBuildDomTreeScript();
   const buildArgs = {
-    showHighlightElements: false,
+    showHighlightElements: !!request.highlight,
     focusHighlightIndex: -1,
     viewportExpansion: -1,
     debugMode: false,
