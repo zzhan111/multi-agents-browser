@@ -57,11 +57,36 @@ export class SessionManager {
     return Array.from(this.sessions.values());
   }
 
-  /** Remove sessions idle for longer than maxIdleMs. */
-  gcIdle(maxIdleMs: number): void {
-    const cutoff = Date.now() - maxIdleMs;
+  /** Remove sessions idle for longer than maxIdleMs; returns the removed IDs. */
+  gcIdle(maxIdleMs: number, now = Date.now()): string[] {
+    const removed: string[] = [];
     for (const [id, s] of this.sessions) {
-      if (s.lastSeen < cutoff) this.sessions.delete(id);
+      if (s.lastSeen < now - maxIdleMs) {
+        this.sessions.delete(id);
+        removed.push(id);
+      }
+    }
+    return removed;
+  }
+}
+
+/**
+ * Drop sessions that sent nothing for maxIdleMs and release the tab leases
+ * they still hold, so an agent that exits without `tab release` does not lock
+ * its tabs until the daemon restarts.
+ */
+export function expireIdleSessions(
+  sessions: SessionManager,
+  tabs: Array<{ leaseOwner?: string; leaseMode: "shared" | "exclusive" }>,
+  maxIdleMs: number,
+  now = Date.now(),
+): string[] {
+  const removed = new Set(sessions.gcIdle(maxIdleMs, now));
+  for (const tab of tabs) {
+    if (tab.leaseOwner && removed.has(tab.leaseOwner)) {
+      tab.leaseOwner = undefined;
+      tab.leaseMode = "shared";
     }
   }
+  return [...removed];
 }

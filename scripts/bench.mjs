@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Isolated memory/latency benchmark: own Chromium profile, own ports, own BB_BROWSER_HOME.
-// Usage: node scripts/bench.mjs [path/to/daemon.js] [--rounds 30] [--keep 6]
+// Usage: node scripts/bench.mjs [path/to/daemon.js] [--rounds 30] [--keep 6] [--api-kb 20]
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, readdirSync } from "node:fs";
 import { createServer } from "node:http";
@@ -15,6 +15,7 @@ const opt = (name, fallback) => {
 const daemonPath = resolve(args.find((a) => a.endsWith(".js")) ?? "dist/daemon.js");
 const ROUNDS = opt("rounds", 30);
 const KEEP = opt("keep", 6);
+const API_KB = opt("api-kb", 20);
 const CDP_PORT = 29825 + Math.floor(Math.random() * 500);
 const HTTP_PORT = CDP_PORT + 1000;
 const home = mkdtempSync(join(tmpdir(), "ma-bench-"));
@@ -28,7 +29,7 @@ for(let i=0;i<30;i++)fetch("/api/"+i).then(r=>r.text());</script></body>`;
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>`;
 const site = createServer((req, res) => {
   if (req.url.startsWith("/img/")) { res.setHeader("content-type", "image/svg+xml"); res.end(svg); return; }
-  if (req.url.startsWith("/api/")) { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ data: "y".repeat(20000) })); return; }
+  if (req.url.startsWith("/api/")) { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ data: "y".repeat(API_KB * 1000) })); return; }
   res.setHeader("content-type", "text/html"); res.end(page(req.url.slice(1) || "0"));
 });
 await new Promise((r) => site.listen(0, "127.0.0.1", r));
@@ -99,6 +100,7 @@ const pct = (xs, p) => Math.round(xs.slice().sort((a, b) => a - b)[Math.min(xs.l
 const result = {
   daemon: daemonPath,
   rounds: ROUNDS,
+  apiKB: API_KB,
   keepOpen: KEEP,
   daemonPssMB: treePss(daemon.pid),
   chromiumPssMB: treePss(chrome.pid),

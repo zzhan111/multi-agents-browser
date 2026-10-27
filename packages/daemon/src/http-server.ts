@@ -19,7 +19,7 @@ import { COMMAND_TIMEOUT, DAEMON_PORT } from "@ma-browser/shared";
 import { CdpConnection } from "./cdp-connection.js";
 import type { CommandHistory } from "./command-history.js";
 import { CommandScheduler } from "./command-scheduler.js";
-import { SessionManager, type SessionScope } from "./session-state.js";
+import { SessionManager, expireIdleSessions, type SessionScope } from "./session-state.js";
 import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
 import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
@@ -108,6 +108,8 @@ export class HttpServer {
 
       this.server.listen(this.port, this.host, () => {
         this.startTime = Date.now();
+        const idleMs = envInt("BB_SESSION_IDLE_HOURS", 24) * 3_600_000;
+        setInterval(() => expireIdleSessions(this.sessions, this.cdp.tabManager.allTabs(), idleMs), 600_000).unref();
         resolve();
       });
     });
