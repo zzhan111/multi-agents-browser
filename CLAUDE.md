@@ -140,3 +140,5 @@ ExportDialog 新增"智能等待"开关（默认开启）：
 - `commands.rs` 新增 `get_autostart` / `set_autostart` Tauri 命令
 - `app.rs` 菜单 autostart 处理器接通注册表；初始 checkmark 从注册表读取
 - `tauri.conf.json` `targets` 增加 `"msi"`；NSIS 改 `installMode: "currentUser"`
+
+经验见 [learnings.md](learnings.md)

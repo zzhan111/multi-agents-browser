@@ -151,3 +151,5 @@ Agent 的函数签名。暴露完整 @meta：
 测试分层：
 - **单元测试** — 数据结构（RingBuffer、TabState、短 ID 生成）
 - **契约测试** — 协议一致性、设计不变量验证
+
+经验见 [learnings.md](learnings.md)
