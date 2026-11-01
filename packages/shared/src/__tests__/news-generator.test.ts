@@ -126,3 +126,51 @@ test("news generator refuses to write a package that fails the task flow", async
     rmSync(sitesDir, { recursive: true, force: true });
   }
 });
+
+test("news package names cannot escape the sites directory", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ma-news-name-"));
+  const sitesDir = join(root, "sites");
+  const site = newsSite("v1");
+  let requests = 0;
+  const fetcher = (url: string, init?: RequestInit) => { requests++; return fetch(url, init); };
+  try {
+    const base = await listen(site.server, "127.0.0.1");
+    for (const name of ["../escaped", "..", ".", "", "/absolute", "nested/name", "..\\escaped", "\0", ".. ", ".hidden", "trailing."]) {
+      await assert.rejects(generateNewsPackage({ name, base, sitesDir, fetcher }), /invalid news package name/i);
+      assert.throws(() => readNewsManifest(sitesDir, name), /invalid news package name/i);
+      await assert.rejects(healNewsPackage({ name, sitesDir }), /invalid news package name/i);
+    }
+    assert.equal(requests, 0);
+  } finally {
+    site.server.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a malformed feed item does not block a valid fallback feed", async () => {
+  const sitesDir = mkdtempSync(join(tmpdir(), "ma-news-feed-"));
+  const base = "https://news.example.test/";
+  const requested: string[] = [];
+  let mixed = false;
+  const good = `<item><title>Good</title><link>${base}story</link></item>`;
+  const fetcher = async (url: string) => {
+    requested.push(url);
+    if (url === base) return new Response('<link rel="alternate" type="application/rss+xml" href="/broken">');
+    if (url === `${base}broken`) return new Response(`<rss><item><title>Bad</title><link>http://[</link></item><item><title>No link</title></item>${mixed ? good : ""}</rss>`);
+    if (url === `${base}feed`) return new Response(`<rss>${good}</rss>`);
+    if (url === `${base}story`) return new Response(`<title>Good</title><article><p>${BODY}</p></article>`);
+    return new Response("", { status: 404 });
+  };
+  try {
+    const gen = await generateNewsPackage({ name: "valid-name", base, sitesDir, fetcher });
+    assert.equal(gen.ok, true, JSON.stringify(gen.score));
+    assert.ok(requested.includes(`${base}feed`));
+    assert.equal(gen.manifest?.feedUrl, `${base}feed`);
+    mixed = true;
+    const mixedGen = await generateNewsPackage({ name: "新闻.example-1", base, sitesDir, fetcher });
+    assert.equal(mixedGen.ok, true, JSON.stringify(mixedGen.score));
+    assert.equal(mixedGen.manifest?.feedUrl, `${base}broken`);
+  } finally {
+    rmSync(sitesDir, { recursive: true, force: true });
+  }
+});

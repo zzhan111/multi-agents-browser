@@ -81,9 +81,10 @@ const RUNTIME = String.raw`
     return blocks.map((b) => {
       let url = tag(b, "link");
       if (!url) { const h = b.match(/<link[^>]*href=["']([^"']+)["']/i); url = h ? h[1] : ""; }
-      try { url = new URL(url, base).href; } catch { /* keep raw */ }
+      if (!url) return null;
+      try { url = new URL(url, base).href; } catch { return null; }
       return { title: tag(b, "title"), url, published: tag(b, "pubDate") || tag(b, "published") || tag(b, "updated"), summary: tag(b, "description") || tag(b, "summary") };
-    }).filter((i) => i.title && i.url);
+    }).filter((i) => i && i.title && i.url);
   };
   const parseArticle = (html, url) => {
     let ld = null;
@@ -180,6 +181,12 @@ export interface GenerateResult {
   tried: { feedUrl: string; passed: number }[];
 }
 
+function assertPackageName(name: string): void {
+  if (typeof name !== "string" || !/^[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)*$/u.test(name)) {
+    throw new Error("Invalid news package name: use letters, numbers, _ or -, with optional dot-separated segments");
+  }
+}
+
 /**
  * Generate `<sitesDir>/<name>/{latest,article}.js` plus `_package.json` for a
  * news site. Writes only when every check of the task flow passes.
@@ -191,6 +198,7 @@ export async function generateNewsPackage(opts: {
   fetcher?: Fetcher;
   history?: NewsManifest["history"];
 }): Promise<GenerateResult> {
+  assertPackageName(opts.name);
   const fetcher = opts.fetcher ?? fetch;
   const base = new URL(opts.base).origin + "/";
   const tried: GenerateResult["tried"] = [];
@@ -226,6 +234,7 @@ export async function generateNewsPackage(opts: {
 }
 
 export function readNewsManifest(sitesDir: string, name: string): NewsManifest | undefined {
+  assertPackageName(name);
   const file = join(sitesDir, name, "_package.json");
   return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : undefined;
 }
