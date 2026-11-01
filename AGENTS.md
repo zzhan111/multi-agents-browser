@@ -1,5 +1,7 @@
 # ma-browser Agent 开发规范
 
+经验见 [learnings.md](learnings.md)
+
 ## 架构
 
 ```
