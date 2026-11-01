@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildAdapterScript, loadAdapters } from "@ma-browser/shared";
@@ -99,6 +99,139 @@ test("site generate + site heal: CLI builds a news package and follows a domain 
   } finally {
     oldSite.server.close();
     newSite.server.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("generate and heal immediately refresh an already-running daemon catalog", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ma-site-gen-"));
+  const oldSite = newsSite("/p/");
+  const newSite = newsSite("/news/");
+  const requests: Array<{ url?: string; auth?: string }> = [];
+  const daemon = createServer((req, res) => {
+    requests.push({ url: req.url, auth: req.headers.authorization });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ adapters: [], total: 0, cacheAge: 0 }));
+  });
+  try {
+    const oldBase = await listen(oldSite.server, "127.0.0.1");
+    const newBase = await listen(newSite.server, "localhost");
+    const daemonBase = new URL(await listen(daemon, "127.0.0.1"));
+    writeFileSync(join(home, "daemon.json"), JSON.stringify({
+      pid: process.pid, host: daemonBase.hostname, port: Number(daemonBase.port), token: "test-token",
+    }));
+
+    assert.equal((await cli(home, ["site", "generate", "fixture-news", oldBase, "--json"])).code, 0);
+    assert.deepEqual(requests, [{ url: "/api/sites?invalidate=1", auth: "Bearer test-token" }]);
+    oldSite.moveTo(newBase);
+    const healed = await cli(home, ["site", "heal", "fixture-news", "--json"]);
+    assert.equal(healed.code, 0, healed.stderr);
+    assert.equal(healed.json.results[0].status, "healed");
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].url, "/api/sites?invalidate=1");
+  } finally {
+    oldSite.server.close();
+    newSite.server.close();
+    daemon.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("site generate does not overwrite an existing private adapter", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ma-site-gen-"));
+  const site = newsSite("/p/");
+  const dir = join(home, "sites", "existing");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "latest.js"), "user latest");
+  writeFileSync(join(dir, "article.js"), "user article");
+  try {
+    const base = await listen(site.server, "127.0.0.1");
+    const gen = await cli(home, ["site", "generate", "existing", base, "--json"]);
+    assert.equal(gen.code, 1);
+    assert.equal(gen.json.success, false);
+    assert.equal(readFileSync(join(dir, "latest.js"), "utf8"), "user latest");
+    assert.equal(readFileSync(join(dir, "article.js"), "utf8"), "user article");
+  } finally {
+    site.server.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("concurrent generation of the same name does not overwrite a package", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ma-site-gen-"));
+  const site = newsSite("/p/");
+  try {
+    const base = await listen(site.server, "127.0.0.1");
+    const results = await Promise.all([0, 1].map(() => cli(home, ["site", "generate", "race", base, "--json"])));
+    assert.deepEqual(results.map((r) => r.code).sort(), [0, 1]);
+    assert.ok(existsSync(join(home, "sites", "race", "latest.js")));
+    assert.ok(existsSync(join(home, "sites", "race", "article.js")));
+  } finally {
+    site.server.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a live daemon refresh failure is reported and a later heal can retry it", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ma-site-gen-"));
+  const site = newsSite("/p/");
+  let fail = true;
+  const daemon = createServer((_req, res) => {
+    res.writeHead(fail ? 503 : 200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ adapters: [] }));
+  });
+  try {
+    const base = await listen(site.server, "127.0.0.1");
+    const daemonBase = new URL(await listen(daemon, "127.0.0.1"));
+    writeFileSync(join(home, "daemon.json"), JSON.stringify({
+      pid: process.pid, host: daemonBase.hostname, port: Number(daemonBase.port), token: "test-token",
+    }));
+    const gen = await cli(home, ["site", "generate", "news", base, "--json"]);
+    assert.equal(gen.code, 1);
+    assert.equal(gen.json.success, false);
+    assert.match(gen.json.error, /written.*catalog.*refresh/i);
+    assert.ok(existsSync(join(home, "sites", "news", "_package.json")));
+    fail = false;
+    const healed = await cli(home, ["site", "heal", "news", "--json"]);
+    assert.equal(healed.code, 0, healed.stderr);
+    assert.equal(healed.json.results[0].status, "healthy");
+  } finally {
+    site.server.close();
+    daemon.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("site generate works with a stale stopped-daemon record", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ma-site-gen-"));
+  const site = newsSite("/p/");
+  const stopped = createServer((_req, res) => { res.writeHead(503); res.end(); });
+  try {
+    const base = await listen(site.server, "127.0.0.1");
+    const staleBase = new URL(await listen(stopped, "127.0.0.1"));
+    writeFileSync(join(home, "daemon.json"), JSON.stringify({
+      pid: 2147483647, host: staleBase.hostname, port: Number(staleBase.port), token: "stale-token",
+    }));
+    const gen = await cli(home, ["site", "generate", "news", base, "--json"]);
+    assert.equal(gen.code, 0, gen.stderr);
+    assert.equal(gen.json.success, true);
+  } finally {
+    site.server.close();
+    stopped.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("site generate --json returns a JSON error for missing arguments", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ma-site-gen-"));
+  try {
+    for (const args of [["site", "generate", "--json"], ["site", "generate", "news", "--json"]]) {
+      const result = await cli(home, args);
+      assert.equal(result.code, 1);
+      assert.equal(result.json?.success, false);
+      assert.match(result.json.error, /required/i);
+    }
+  } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });

@@ -23,7 +23,11 @@ import {
   generateId,
   generateNewsPackage,
   healNewsPackage,
+  httpJson,
+  isProcessAlive,
+  isWsl,
   loadAdapters,
+  readDaemonJson,
   updateCommunityAdapters,
   type Request,
   type Response,
@@ -178,11 +182,25 @@ function siteUpdate(options: SiteOptions = {}): void {
   console.log("💡 运行 ma-browser site recommend 看看哪些和你的浏览习惯匹配");
 }
 
+/** Refresh a running daemon without starting one just to generate a package. */
+async function refreshDaemonCatalog(): Promise<void> {
+  const daemon = await readDaemonJson();
+  if (!daemon) return;
+  try {
+    await httpJson("GET", "/api/sites?invalidate=1", daemon, undefined, 2000);
+  } catch {
+    const local = !isWsl() && ["127.0.0.1", "localhost", "::1"].includes(daemon.host);
+    if (local && !isProcessAlive(daemon.pid)) return;
+    throw new Error("Package may have been written, but the daemon catalog could not be refreshed; check daemon status and run site heal");
+  }
+}
+
 /** Generate `<LOCAL_SITES_DIR>/<name>/` from a news site's URL; writes only when the whole task flow passes. */
 async function siteGenerate(name: string, url: string, options: SiteOptions): Promise<void> {
   let result;
   try {
     result = await generateNewsPackage({ name, base: url, sitesDir: LOCAL_SITES_DIR });
+    if (result.ok) await refreshDaemonCatalog();
   } catch (e) {
     if (options.json) exitJsonError(e instanceof Error ? e.message : String(e));
     console.error(`[error] site generate: ${e instanceof Error ? e.message : e}`);
@@ -224,9 +242,14 @@ async function siteHeal(name: string | undefined, options: SiteOptions): Promise
       results.push({ name: n, status: "broken" as const, reason: e instanceof Error ? e.message : String(e) });
     }
   }
-  const failed = results.some((r) => r.status === "broken");
+  let refreshError: string | undefined;
+  if (results.some((r) => r.status !== "broken")) {
+    try { await refreshDaemonCatalog(); }
+    catch (e) { refreshError = e instanceof Error ? e.message : String(e); }
+  }
+  const failed = Boolean(refreshError) || results.some((r) => r.status === "broken");
   if (options.json) {
-    console.log(JSON.stringify({ success: !failed, results }, null, 2));
+    console.log(JSON.stringify({ success: !failed, results, ...(refreshError ? { error: refreshError } : {}) }, null, 2));
   } else if (results.length === 0) {
     console.log("没有生成的包。先运行: ma-browser site generate <name> <url>");
   } else {
@@ -236,6 +259,7 @@ async function siteHeal(name: string | undefined, options: SiteOptions): Promise
       else console.error(`${r.name}: broken — ${r.reason}`);
     }
   }
+  if (refreshError && !options.json) console.error(`[error] site heal: ${refreshError}`);
   if (failed) process.exit(1);
 }
 
@@ -518,6 +542,7 @@ export async function siteCommand(
     case "update":  siteUpdate(options); break;
     case "generate":
       if (!args[1] || !args[2]) {
+        if (options.json) exitJsonError("site generate: <name> and <url> are required.");
         console.error("[error] site generate: <name> and <url> are required.");
         console.error("  Usage: ma-browser site generate <name> <url>");
         console.error("  Example: ma-browser site generate ifanr https://www.ifanr.com");

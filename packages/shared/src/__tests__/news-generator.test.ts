@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -144,6 +144,56 @@ test("news package names cannot escape the sites directory", async () => {
   } finally {
     site.server.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("news generator refuses existing packages even with supplied history", async () => {
+  const sitesDir = mkdtempSync(join(tmpdir(), "ma-news-existing-"));
+  const dir = join(sitesDir, "existing");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "latest.js"), "user latest");
+  const base = "https://news.example.test/";
+  let requests = 0;
+  const fetcher = async (url: string) => {
+    requests++;
+    if (url === base) return new Response('<link rel="alternate" type="application/rss+xml" href="/feed">');
+    if (url === `${base}feed`) return new Response(`<rss><item><title>Title</title><link>${base}story</link></item></rss>`);
+    return new Response(`<title>Title</title><article><p>${BODY}</p></article>`);
+  };
+  try {
+    await assert.rejects(generateNewsPackage({ name: "existing", base, sitesDir, fetcher, history: [] }), /already exists/i);
+    assert.equal(requests, 0);
+    assert.equal(readFileSync(join(dir, "latest.js"), "utf8"), "user latest");
+  } finally {
+    rmSync(sitesDir, { recursive: true, force: true });
+  }
+});
+
+test("heal rejects a manifest that names a different package", async () => {
+  const sitesDir = mkdtempSync(join(tmpdir(), "ma-news-manifest-"));
+  const source = join(sitesDir, "source");
+  const victim = join(sitesDir, "victim");
+  mkdirSync(source);
+  mkdirSync(victim);
+  writeFileSync(join(victim, "latest.js"), "user latest");
+  writeFileSync(join(source, "_package.json"), JSON.stringify({
+    name: "victim", base: "https://old.example.test/", feedUrl: "https://old.example.test/feed", history: [],
+  }));
+  let requests = 0;
+  const fetcher = async (url: string) => {
+    requests++;
+    if (url === "https://old.example.test/") return new Response('<link rel="canonical" href="https://new.example.test/">');
+    if (url === "https://new.example.test/") return new Response('<link rel="alternate" type="application/rss+xml" href="/feed">');
+    if (url === "https://new.example.test/feed") return new Response('<rss><item><title>Title</title><link>https://new.example.test/story</link></item></rss>');
+    return new Response(`<title>Title</title><article><p>${BODY}</p></article>`);
+  };
+  try {
+    const result = await healNewsPackage({ name: "source", sitesDir, fetcher });
+    assert.equal(result.status, "broken");
+    assert.equal(requests, 0);
+    assert.equal(readFileSync(join(victim, "latest.js"), "utf8"), "user latest");
+  } finally {
+    rmSync(sitesDir, { recursive: true, force: true });
   }
 });
 
