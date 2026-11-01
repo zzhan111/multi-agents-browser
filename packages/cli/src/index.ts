@@ -57,6 +57,8 @@ ma-browser - AI Agent 浏览器自动化工具
   site info <name>             查看 adapter 用法（参数、返回值、示例）
   site <name> [args]           运行 adapter
   site update                  更新社区 adapter 库
+  site generate <name> <url>   为新闻站生成 adapter 包（零 token）
+  site heal [name]             站点搬家/改版后自动更新生成的包
   guide                        如何把任何网站变成 adapter
   star                         ⭐ Star ma-browser on GitHub
 

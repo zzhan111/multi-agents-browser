@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "test": "tsx --test src/__tests__/daemon-startup.test.ts"
+    "test": "tsx --test src/__tests__/daemon-startup.test.ts src/__tests__/site-generate.test.ts"
   },
   "dependencies": {
     "@ma-browser/shared": "workspace:*"

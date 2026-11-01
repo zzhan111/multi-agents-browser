@@ -7,6 +7,8 @@
  *   ma-browser site <name> [args...]          运行（简写）
  *   ma-browser site run <name> [args...]      运行
  *   ma-browser site update                    更新社区 adapter 库
+ *   ma-browser site generate <name> <url>     生成新闻站 adapter 包（零 token）
+ *   ma-browser site heal [name]               检查/修复生成的包（站点搬家后重新生成）
  *
  * 目录：
  *   ~/.bb-browser/sites/       私有 adapter（优先）
@@ -19,12 +21,16 @@ import {
   LOCAL_SITES_DIR,
   buildAdapterScript,
   generateId,
+  generateNewsPackage,
+  healNewsPackage,
   loadAdapters,
   updateCommunityAdapters,
   type Request,
   type Response,
   type SiteAdapter,
 } from "@ma-browser/shared";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { handleJqResponse, sendCommand } from "../client.js";
 import { getHistoryDomains } from "../history-sqlite.js";
 import { ensureDaemonRunning } from "../daemon-manager.js";
@@ -170,6 +176,67 @@ function siteUpdate(options: SiteOptions = {}): void {
   }
   console.log(`已安装 ${result.siteCount} 个社区 adapter。`);
   console.log("💡 运行 ma-browser site recommend 看看哪些和你的浏览习惯匹配");
+}
+
+/** Generate `<LOCAL_SITES_DIR>/<name>/` from a news site's URL; writes only when the whole task flow passes. */
+async function siteGenerate(name: string, url: string, options: SiteOptions): Promise<void> {
+  let result;
+  try {
+    result = await generateNewsPackage({ name, base: url, sitesDir: LOCAL_SITES_DIR });
+  } catch (e) {
+    if (options.json) exitJsonError(e instanceof Error ? e.message : String(e));
+    console.error(`[error] site generate: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
+  }
+  if (options.json) {
+    console.log(JSON.stringify({ success: result.ok, ...result }, null, 2));
+    if (!result.ok) process.exit(1);
+    return;
+  }
+  if (!result.ok) {
+    console.error(`[error] site generate ${name}: task flow did not pass (${result.score.passed}/${result.score.total}).`);
+    for (const c of result.score.checks) console.error(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
+    for (const t of result.tried) console.error(`  tried ${t.feedUrl} (${t.passed} passed)`);
+    process.exit(1);
+  }
+  console.log(`已生成 ${name}（${result.score.passed}/${result.score.total} 检查通过，feed: ${result.manifest!.feedUrl}）`);
+  for (const f of result.files) console.log(`  ${f}`);
+  console.log(`试试: ma-browser site ${name}/latest 5`);
+}
+
+/** Generated packages are the ones with a `_package.json` manifest. */
+function generatedPackageNames(): string[] {
+  if (!existsSync(LOCAL_SITES_DIR)) return [];
+  return readdirSync(LOCAL_SITES_DIR, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && existsSync(join(LOCAL_SITES_DIR, d.name, "_package.json")))
+    .map((d) => d.name)
+    .sort();
+}
+
+/** Re-check one or all generated packages; regenerate those whose site moved or changed. */
+async function siteHeal(name: string | undefined, options: SiteOptions): Promise<void> {
+  const names = name ? [name] : generatedPackageNames();
+  const results = [];
+  for (const n of names) {
+    try {
+      results.push({ name: n, ...(await healNewsPackage({ name: n, sitesDir: LOCAL_SITES_DIR })) });
+    } catch (e) {
+      results.push({ name: n, status: "broken" as const, reason: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  const failed = results.some((r) => r.status === "broken");
+  if (options.json) {
+    console.log(JSON.stringify({ success: !failed, results }, null, 2));
+  } else if (results.length === 0) {
+    console.log("没有生成的包。先运行: ma-browser site generate <name> <url>");
+  } else {
+    for (const r of results) {
+      if (r.status === "healthy") console.log(`${r.name}: healthy`);
+      else if (r.status === "healed") console.log(`${r.name}: healed ${r.from} → ${r.to}`);
+      else console.error(`${r.name}: broken — ${r.reason}`);
+    }
+  }
+  if (failed) process.exit(1);
 }
 
 function findSiteByName(name: string): SiteMeta | undefined {
@@ -407,6 +474,8 @@ export async function siteCommand(
   ma-browser site <name> [args...]          运行 adapter（简写）
   ma-browser site run <name> [args...]      运行 adapter
   ma-browser site update                    更新社区 adapter 库 (git clone/pull)
+  ma-browser site generate <name> <url>     为新闻站生成 adapter 包（latest → article，零 token）
+  ma-browser site heal [name]               检查生成的包，站点搬家/改版后自动重新生成
 
 目录:
   ${LOCAL_SITES_DIR}      私有 adapter（优先）
@@ -447,6 +516,18 @@ export async function siteCommand(
       await siteRecommend(options);
       break;
     case "update":  siteUpdate(options); break;
+    case "generate":
+      if (!args[1] || !args[2]) {
+        console.error("[error] site generate: <name> and <url> are required.");
+        console.error("  Usage: ma-browser site generate <name> <url>");
+        console.error("  Example: ma-browser site generate ifanr https://www.ifanr.com");
+        process.exit(1);
+      }
+      await siteGenerate(args[1], args[2], options);
+      break;
+    case "heal":
+      await siteHeal(args[1], options);
+      break;
     case "run":
       if (!args[1]) {
         console.error("[error] site run: <name> is required.");
@@ -461,7 +542,7 @@ export async function siteCommand(
         await siteRun(subCommand, args.slice(1), options);
       } else {
         console.error(`[error] site: unknown subcommand "${subCommand}".`);
-        console.error("  Available: list, info, recommend, search, run, update");
+        console.error("  Available: list, info, recommend, search, run, update, generate, heal");
         console.error("  Try: ma-browser site --help");
         process.exit(1);
       }
