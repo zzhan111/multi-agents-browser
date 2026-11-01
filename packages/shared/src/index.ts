@@ -72,3 +72,16 @@ export {
   scanSites,
   updateCommunityAdapters,
 } from "./site-adapters.js";
+
+export {
+  type Fetcher,
+  type GenerateResult,
+  type HealResult,
+  type NewsManifest,
+  type NewsScore,
+  NEWS_KNOWLEDGE,
+  generateNewsPackage,
+  healNewsPackage,
+  readNewsManifest,
+  runAdapterSource,
+} from "./news-generator.js";
