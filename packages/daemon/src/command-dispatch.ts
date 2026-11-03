@@ -29,7 +29,11 @@ import {
   fuzzyAdapterNames,
   updateAdapters,
 } from "./site-runner.js";
-import { buildAdapterScript, matchTabOrigin } from "@ma-browser/shared";
+import { invalidateCatalog } from "./site-catalog.js";
+import { createAutoHealer } from "./site-autoheal.js";
+import { buildAdapterScript, matchTabOrigin, type SiteAdapter } from "@ma-browser/shared";
+
+const autoHealer = createAutoHealer();
 
 export interface DispatchContext {
   bindingStore?: BindingStore;
@@ -578,11 +582,40 @@ async function waitForTabReady(
  * Execute a site adapter: resolve the adapter + its target tab, run the adapter
  * JS via eval, and normalise the result. The adapter runs in the page context
  * of a tab on the adapter's domain so its fetch() calls carry real cookies.
+ *
+ * A failed run of a generated news package triggers one automatic heal; when
+ * the package was regenerated (site moved or changed) the run is retried once.
  */
 async function handleSiteRun(
   cdp: CdpConnection,
   request: Request,
   session?: AgentSession,
+  autoHeal = true,
+): Promise<Response> {
+  const outcome: SiteRunOutcome = {};
+  const response = await runSiteAdapter(cdp, request, session, outcome);
+  // Only failures of the adapter itself (not bad args or busy tabs) can mean the site changed.
+  if (response.success || !autoHeal || !outcome.failedAdapter) return response;
+  const healed = await autoHealer.heal(outcome.failedAdapter);
+  if (!healed) return response;
+  if (healed.status === "healed") {
+    invalidateCatalog();
+    console.error(`[ma-browser] auto-healed ${request.name}: ${healed.from} → ${healed.to}`);
+    return handleSiteRun(cdp, request, session, false);
+  }
+  const detail = healed.status === "broken" ? `broken — ${healed.reason}` : "package still passes its checks";
+  return { ...response, error: `${response.error} [auto-heal: ${detail}]` };
+}
+
+interface SiteRunOutcome {
+  failedAdapter?: SiteAdapter;
+}
+
+async function runSiteAdapter(
+  cdp: CdpConnection,
+  request: Request,
+  session: AgentSession | undefined,
+  outcome: SiteRunOutcome,
 ): Promise<Response> {
   if (!request.name) return fail(request.id, "Missing 'name' parameter for site_run");
 
@@ -616,7 +649,8 @@ async function handleSiteRun(
     } else {
       const created = await cdp.browserCommand<{ targetId: string }>(
         "Target.createTarget",
-        { url: `https://${adapter.domain}`, background: true },
+        // Generated packages record their real base (may be http or carry a port).
+        { url: autoHealer.generatedBase(adapter) ?? `https://${adapter.domain}`, background: true },
       );
       targetId = created.targetId;
       await cdp.attachAndEnable(targetId);
@@ -643,6 +677,7 @@ async function handleSiteRun(
     try {
       raw = await cdp.evaluate<unknown>(targetId, prep.script, true);
     } catch (e) {
+      outcome.failedAdapter = adapter;
       return fail(request.id, `Adapter execution failed: ${buildRequestError(e).message}`);
     }
 
@@ -659,6 +694,7 @@ async function handleSiteRun(
       const login = adapter.domain
         ? ` — make sure you are logged in to ${adapter.domain} in Chrome`
         : "";
+      outcome.failedAdapter = adapter;
       return fail(request.id, `${base}${hint}${login}`);
     }
 

@@ -1,0 +1,12 @@
+PASS browser control: open, snapshot, fill, click, eval (2886ms)
+PASS snapshot: no overlay by default, visible numbered boxes with --highlight (1508ms)
+PASS speed: click on a background tab returns within 5s (was ~10s) (1125ms)
+PASS click: a covered element is still clicked exactly once (829ms)
+PASS sessions: each agent keeps its own current tab (1372ms)
+PASS leases: an exclusive claim blocks other agents until released (1289ms)
+PASS tab refs: a stale short ID errors instead of hitting another tab (492ms)
+PASS adapters: site run executes in the page with the login cookie (602ms)
+PASS network: captured requests keep their response bodies (321ms)
+PASS persistence: cookies survive a daemon restart and a browser restart (5174ms)
+PASS generated adapters run immediately after generation and auto-heal a domain move (3383ms)
+exit=0
