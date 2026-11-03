@@ -264,8 +264,10 @@ export async function launchManagedBrowser(
 
   await mkdir(MANAGED_USER_DATA_DIR, { recursive: true });
 
+  const restoreSession = process.env.MA_BROWSER_RESTORE_SESSION === "1";
   const args = [
     ...(process.env.MA_BROWSER_HEADLESS === "1" ? ["--headless=new"] : []),
+    ...(restoreSession ? ["--restore-last-session"] : []),
     `--remote-debugging-port=${launchPort}`,
     `--user-data-dir=${MANAGED_USER_DATA_DIR}`,
     "--no-first-run",
@@ -277,7 +279,7 @@ export async function launchManagedBrowser(
     "--disable-session-crashed-bubble",
     "--hide-crash-restore-bubble",
     "--use-mock-keychain",
-    "about:blank",
+    ...(restoreSession ? [] : ["about:blank"]),
   ];
 
   let launchedPid: number | undefined;

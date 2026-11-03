@@ -12,11 +12,16 @@ $browserHome = if ($env:BB_BROWSER_HOME) { $env:BB_BROWSER_HOME } else { Join-Pa
 $daemonFile = Join-Path $browserHome 'daemon.json'
 $logDir = Join-Path $browserHome 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$env:MA_BROWSER_HEADLESS = '1'
+$env:MA_BROWSER_HEADLESS = if ([Environment]::GetEnvironmentVariable('MA_BROWSER_HEADLESS', 'User') -eq '0') { '0' } else { '1' }
+$env:MA_BROWSER_RESTORE_SESSION = '1'
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $statusItem = $menu.Items.Add('正在启动')
 $statusItem.Enabled = $false
+$modeItem = $menu.Items.Add('切换浏览器模式')
+$modeItem.Enabled = $false
+$modeItem.Add_Click({ Switch-BrowserMode })
+$menu.Add_Opening({ Update-ModeMenu })
 $logItem = $menu.Items.Add('打开日志目录')
 $logItem.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$logDir`"" })
 $exitItem = $menu.Items.Add('退出托盘（后台继续运行）')
@@ -39,6 +44,78 @@ $tray.Visible = $true
 
 $script:starter = $null
 $script:lastStart = [DateTime]::MinValue
+
+function Get-ManagedBrowser {
+  try {
+    $port = [int](Get-Content -Raw -LiteralPath (Join-Path $browserHome 'browser\cdp-port'))
+    $profile = [regex]::Escape((Join-Path $browserHome 'browser\profile'))
+    Get-CimInstance Win32_Process | Where-Object {
+      $_.Name -in @('chrome.exe', 'msedge.exe', 'brave.exe') -and $_.CommandLine -and
+      $_.CommandLine -match "--remote-debugging-port=$port(\s|$)" -and
+      $_.CommandLine -match "--user-data-dir=(?:`"$profile`"|$profile)(\s|$)" -and
+      $_.CommandLine -notmatch '(?:^|\s)--type='
+    } | Select-Object -First 1
+  } catch { $null }
+}
+
+function Update-ModeMenu {
+  $browser = Get-ManagedBrowser
+  $modeItem.Enabled = [bool]$browser
+  if ($browser) {
+    $mode = if ($browser.CommandLine -match '(?:^|\s)--headless(?:=\S+)?(?:\s|$)') { '有头' } else { '无头' }
+    $modeItem.Text = "切换为${mode}浏览器（将重启浏览器）"
+  } else {
+    $modeItem.Text = '切换浏览器模式（受管浏览器未就绪）'
+  }
+}
+
+function Switch-BrowserMode {
+  $timer.Stop()
+  $modeItem.Enabled = $false
+  $socket = $null
+  try {
+    $browser = Get-ManagedBrowser
+    if (-not $browser) { throw '未找到受管浏览器' }
+    $info = Get-Content -Raw -LiteralPath $daemonFile | ConvertFrom-Json
+    $headers = @{ Authorization = "Bearer $($info.token)" }
+    $baseUrl = "http://$($info.host):$($info.port)"
+    $status = Invoke-RestMethod -Uri "$baseUrl/status" -Headers $headers -TimeoutSec 2
+    $port = [int](Get-Content -Raw -LiteralPath (Join-Path $browserHome 'browser\cdp-port'))
+    if (-not $status.cdpConnected -or $status.cdpPort -ne $port) { throw '后台未连接受管浏览器' }
+
+    $version = Invoke-RestMethod -Uri "http://127.0.0.1:$port/json/version" -TimeoutSec 2
+    $uri = [Uri]$version.webSocketDebuggerUrl
+    if ($uri.Scheme -ne 'ws' -or -not $uri.IsLoopback -or $uri.Port -ne $port) { throw '浏览器调试地址无效' }
+    $socket = New-Object System.Net.WebSockets.ClientWebSocket
+    $cancel = [System.Threading.CancellationToken]::None
+    if (-not $socket.ConnectAsync($uri, $cancel).Wait(3000)) { throw '无法连接受管浏览器' }
+
+    Invoke-RestMethod -Uri "$baseUrl/shutdown" -Method Post -Headers $headers -TimeoutSec 3 | Out-Null
+    for ($i = 0; $i -lt 50 -and (Get-Process -Id $info.pid -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 100 }
+    if (Get-Process -Id $info.pid -ErrorAction SilentlyContinue) { throw '后台进程未退出' }
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"id":1,"method":"Browser.close"}')
+    $segment = New-Object 'System.ArraySegment[byte]' -ArgumentList @(,$bytes)
+    if (-not $socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, $cancel).Wait(3000)) { throw '无法关闭受管浏览器' }
+    for ($i = 0; $i -lt 100 -and (Get-Process -Id $browser.ProcessId -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 100 }
+    if (Get-Process -Id $browser.ProcessId -ErrorAction SilentlyContinue) { throw '浏览器未退出，请检查页面对话框' }
+
+    Remove-Item -LiteralPath (Join-Path $browserHome 'browser\browser-pid') -ErrorAction SilentlyContinue
+    $next = if ($browser.CommandLine -match '(?:^|\s)--headless(?:=\S+)?(?:\s|$)') { '0' } else { '1' }
+    [Environment]::SetEnvironmentVariable('MA_BROWSER_HEADLESS', $next, 'User')
+    $env:MA_BROWSER_HEADLESS = $next
+  } catch {
+    $tray.BalloonTipTitle = 'ma-browser 模式切换失败'
+    $tray.BalloonTipText = $_.Exception.Message
+    $tray.ShowBalloonTip(5000)
+  } finally {
+    if ($socket) { $socket.Dispose() }
+    $script:lastStart = [DateTime]::MinValue
+    Update-Tray
+    $timer.Start()
+  }
+}
+
 function Update-Tray {
   $info = $null
   $status = $null

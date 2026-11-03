@@ -67,7 +67,7 @@ After building from source, run this from the repository directory:
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PWD\scripts\windows-tray.ps1`"")
 ```
 
-The tray starts and monitors the daemon, launching new managed browsers headlessly with the existing profile. Outside the tray, set `MA_BROWSER_HEADLESS=1` for the same behavior. An already running browser is not restarted. Headless mode cannot show interactive login pages, so log in with a visible browser first. Right-click the tray icon for status, logs, or to exit the tray while leaving the daemon running.
+The tray starts and monitors the daemon, launching new managed browsers headlessly with the existing profile. Right-click the tray icon to switch between headed and headless modes; the selected mode persists across sign-ins. Switching restarts the managed browser and restores its session, but unsaved page content may be lost. Use headed mode to sign in interactively. The menu also opens logs or exits the tray while leaving the daemon running. Outside the tray, set `MA_BROWSER_HEADLESS=1` to launch a managed browser headlessly; an already running browser is not restarted.
 
 To start the tray at Windows sign-in, run this from the repository directory:
 

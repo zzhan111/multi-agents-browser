@@ -67,7 +67,7 @@ ma-browser site zhihu/hot     # 开搞
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PWD\scripts\windows-tray.ps1`"")
 ```
 
-托盘会启动并监视后台进程，新启动的受管浏览器以无头模式运行并保留其现有资料。托盘之外可设置 `MA_BROWSER_HEADLESS=1` 达到相同效果；已在运行的浏览器不会自动重启。无头模式无法显示交互式登录页面，请先在有窗口模式下登录。右键托盘图标可查看状态、打开日志或退出托盘（后台继续运行）。
+托盘会启动并监视后台进程，新启动的受管浏览器默认以无头模式运行。右键托盘图标可切换有头／无头模式，所选模式会在下次登录时保留。切换会重启受管浏览器并恢复会话，未保存的页面内容可能丢失；需要交互登录时可切换到有头模式。右键菜单也可打开日志或退出托盘（后台继续运行）。托盘之外可设置 `MA_BROWSER_HEADLESS=1` 启动无头浏览器；已在运行的浏览器不会自动重启。
 
 需要在 Windows 登录后自动启动时，在仓库目录运行：
 
