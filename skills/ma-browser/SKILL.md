@@ -1,6 +1,6 @@
 ---
 name: ma-browser
-description: 强大的信息获取与浏览器自动化工具。通过浏览器 + 用户登录态，获取公域和私域信息。可访问任意网页、内部系统、登录后页面，执行表单填写、信息提取、页面操作。支持 site 系统（36 平台 103 命令一键调用）、带登录态的 fetch、网络请求拦截与 mock、操作录制等高级功能。
+description: 强大的信息获取与浏览器自动化工具。通过浏览器 + 用户登录态，获取公域和私域信息。可访问任意网页、内部系统、登录后页面，执行表单填写、信息提取、页面操作。支持 Windows 托盘有头/无头浏览器模式查询与切换、site 系统、带登录态的 fetch、网络请求拦截与操作录制。
 allowed-tools: Bash(ma-browser:*)
 ---
 
@@ -15,6 +15,16 @@ allowed-tools: Bash(ma-browser:*)
 还可以代替用户执行浏览器操作：表单填写、按钮点击、数据提取、截图保存、批量操作。
 
 运行在用户真实浏览器中，复用已登录的账号，不触发反爬检测。
+
+## 浏览器模式（Windows 托盘）
+
+```bash
+ma-browser mode status --json    # 查询当前模式和托盘连接
+ma-browser mode headed --json    # 切到有头，供用户交互登录
+ma-browser mode headless --json  # 切回无头
+```
+
+MCP 使用 `browser_mode`，参数 `mode` 为 `status`、`headed` 或 `headless`（默认 `status`）。切换会重启所有 Agent 共享的浏览器，旧 tab ID 失效，未保存的页面内容可能丢失；切换后重新查询 tab。只读会话仅可查询。 托盘管理 daemon 时，MCP 环境设置 `MA_BROWSER_CONNECT_ONLY=1`，避免切换期间重复启动 daemon。
 
 ## 快速开始
 

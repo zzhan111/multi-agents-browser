@@ -10,6 +10,8 @@ $cli = Join-Path $root 'dist\cli.js'
 $node = (Get-Command node.exe).Source
 $browserHome = if ($env:BB_BROWSER_HOME) { $env:BB_BROWSER_HOME } else { Join-Path $env:USERPROFILE '.bb-browser' }
 $daemonFile = Join-Path $browserHome 'daemon.json'
+$modeRequestFile = Join-Path $browserHome 'browser\mode-request.json'
+$modeResultFile = Join-Path $browserHome 'browser\mode-result.json'
 $logDir = Join-Path $browserHome 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $env:MA_BROWSER_HEADLESS = if ([Environment]::GetEnvironmentVariable('MA_BROWSER_HEADLESS', 'User') -eq '0') { '0' } else { '1' }
@@ -20,7 +22,13 @@ $statusItem = $menu.Items.Add('正在启动')
 $statusItem.Enabled = $false
 $modeItem = $menu.Items.Add('切换浏览器模式')
 $modeItem.Enabled = $false
-$modeItem.Add_Click({ Switch-BrowserMode })
+$modeItem.Add_Click({
+  $browser = Get-ManagedBrowser
+  if ($browser) {
+    $target = if ($browser.CommandLine -match '(?:^|\s)--headless(?:=\S+)?(?:\s|$)') { 'headed' } else { 'headless' }
+    Switch-BrowserMode $target | Out-Null
+  }
+})
 $menu.Add_Opening({ Update-ModeMenu })
 $logItem = $menu.Items.Add('打开日志目录')
 $logItem.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$logDir`"" })
@@ -69,13 +77,16 @@ function Update-ModeMenu {
   }
 }
 
-function Switch-BrowserMode {
+function Switch-BrowserMode([string]$target) {
   $timer.Stop()
   $modeItem.Enabled = $false
   $socket = $null
   try {
+    if ($target -notin @('headed', 'headless')) { throw '无效的浏览器模式' }
     $browser = Get-ManagedBrowser
     if (-not $browser) { throw '未找到受管浏览器' }
+    $current = if ($browser.CommandLine -match '(?:^|\s)--headless(?:=\S+)?(?:\s|$)') { 'headless' } else { 'headed' }
+    if ($current -eq $target) { return @{ success = $true; changed = $false } }
     $info = Get-Content -Raw -LiteralPath $daemonFile | ConvertFrom-Json
     $headers = @{ Authorization = "Bearer $($info.token)" }
     $baseUrl = "http://$($info.host):$($info.port)"
@@ -101,13 +112,16 @@ function Switch-BrowserMode {
     if (Get-Process -Id $browser.ProcessId -ErrorAction SilentlyContinue) { throw '浏览器未退出，请检查页面对话框' }
 
     Remove-Item -LiteralPath (Join-Path $browserHome 'browser\browser-pid') -ErrorAction SilentlyContinue
-    $next = if ($browser.CommandLine -match '(?:^|\s)--headless(?:=\S+)?(?:\s|$)') { '0' } else { '1' }
+    $next = if ($target -eq 'headless') { '1' } else { '0' }
     [Environment]::SetEnvironmentVariable('MA_BROWSER_HEADLESS', $next, 'User')
     $env:MA_BROWSER_HEADLESS = $next
+    return @{ success = $true; changed = $true }
   } catch {
+    $message = $_.Exception.Message
     $tray.BalloonTipTitle = 'ma-browser 模式切换失败'
-    $tray.BalloonTipText = $_.Exception.Message
+    $tray.BalloonTipText = $message
     $tray.ShowBalloonTip(5000)
+    return @{ success = $false; error = $message }
   } finally {
     if ($socket) { $socket.Dispose() }
     $script:lastStart = [DateTime]::MinValue
@@ -117,6 +131,18 @@ function Switch-BrowserMode {
 }
 
 function Update-Tray {
+  if (Test-Path -LiteralPath $modeRequestFile) {
+    try {
+      $request = Get-Content -Raw -LiteralPath $modeRequestFile | ConvertFrom-Json
+      if ($request.id -notmatch '^[0-9a-f-]{36}$' -or $request.mode -notin @('headed', 'headless')) { throw '无效的切换请求' }
+      Remove-Item -LiteralPath $modeRequestFile
+      $result = Switch-BrowserMode $request.mode
+      @{ id = $request.id; success = $result.success; changed = $result.changed; error = $result.error } | ConvertTo-Json -Compress | Set-Content -LiteralPath $modeResultFile -Encoding UTF8
+    } catch {
+      Remove-Item -LiteralPath $modeRequestFile -ErrorAction SilentlyContinue
+    }
+    return
+  }
   $info = $null
   $status = $null
   try {

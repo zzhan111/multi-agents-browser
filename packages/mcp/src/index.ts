@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { COMMAND_TIMEOUT, COMMANDS, generateId, readDaemonJson, DAEMON_DIR } from "@ma-browser/shared";
+import { COMMAND_TIMEOUT, COMMANDS, generateId, readDaemonJson, DAEMON_DIR, browserMode } from "@ma-browser/shared";
 import type { CommandDef, Request, Response, DaemonInfo } from "@ma-browser/shared";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -102,7 +102,10 @@ async function ensureDaemon(): Promise<void> {
   // Connect-only: defer daemon ownership to the tray. Don't spawn — a
   // 127.0.0.1-bound daemon here would race the tray's 0.0.0.0 daemon and
   // break WSL access. sendCommand surfaces a clear "no daemon" error instead.
-  if (MA_BROWSER_CONNECT_ONLY) return;
+  if (MA_BROWSER_CONNECT_ONLY) {
+    cachedDaemonInfo = null;
+    return;
+  }
 
   // Invalidate cache — daemon is not running so cached info is stale
   cachedDaemonInfo = null;
@@ -362,9 +365,10 @@ const server = new McpServer(
   { name: "ma-browser", version: __BB_BROWSER_VERSION__ },
   { instructions: `ma-browser lets you control the user's real Chrome browser via CDP (Chrome DevTools Protocol).
 
-Your browser is the API. No headless browser, no cookie extraction, no anti-bot bypass.
+Your browser is the API. The managed browser can run headed or headless; existing logins remain in its dedicated profile.
 
 Key capabilities:
+- browser_mode: Inspect or switch the shared Windows tray browser between headed and headless modes
 - browser_snapshot: Read page content via accessibility tree (use ref numbers to interact)
 - browser_click/fill/type: Interact with elements by ref from snapshot
 - browser_eval: Run JavaScript in page context (most powerful — full DOM/fetch access)
@@ -595,6 +599,20 @@ for (const cmd of COMMANDS) {
     });
   }
 }
+
+// Windows tray mode is independent of the daemon, which restarts during a switch.
+server.tool(
+  "browser_mode",
+  "Query or switch the Windows tray's shared browser mode. Switching restarts the browser, invalidates tab IDs and may lose unsaved page changes. Returns after reconnecting.",
+  { mode: z.enum(["status", "headed", "headless"]).optional().describe("status (default), headed for interactive login, or headless") },
+  async ({ mode }) => {
+    try {
+      return textResult(await browserMode(mode ?? "status", BB_SESSION_ID));
+    } catch (error) {
+      return errorResult(error instanceof Error ? error.message : String(error));
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // browser_close_all — session-scoped, not in COMMANDS registry
