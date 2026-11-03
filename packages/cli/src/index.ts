@@ -687,6 +687,7 @@ async function main(): Promise<void> {
           jq: parsed.flags.jq,
           days: parsed.flags.days,
           tabId: globalTabId,
+          browser: process.argv.includes("--browser"),
         });
         break;
       }

@@ -3,9 +3,9 @@
 // Chromium + daemon + BB_BROWSER_HOME (never touches ~/.bb-browser):
 //   browser control, per-agent sessions and tab leases, site adapters, and
 //   login cookies surviving a daemon and a browser restart.
-// Usage: node scripts/e2e.mjs [path/to/dist]
+// Usage: node scripts/e2e.mjs [path/to/dist]   (E2E_ONLY=<regex>, E2E_EVIDENCE_DIR=<dir> for screenshots)
 import { execFile, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -46,18 +46,26 @@ async function(args) {
 let chrome;
 let daemon;
 async function startBrowser() {
-  chrome = spawn(process.env.CHROMIUM ?? "/usr/lib/chromium/chromium", ["--headless=new", `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${join(home, "browser", "profile")}`, "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: "ignore" });
+  chrome = spawn(process.env.CHROMIUM ?? "/usr/lib/chromium/chromium", ["--headless=new", `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${join(home, "browser", "profile")}`, "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: ["ignore", "ignore", openSync(join(home, "chromium.log"), "a")] });
   for (let i = 0; i < 100; i++) { try { await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`); return; } catch { await sleep(100); } }
   throw new Error("Chromium did not expose CDP");
 }
+// --strict-cdp keeps the daemon off the user's real browser even when our
+// Chromium is slow or restarting; assertIsolated double-checks it.
+async function daemonStatus() {
+  const { token } = JSON.parse(readFileSync(join(home, "daemon.json"), "utf8"));
+  return (await fetch(`http://127.0.0.1:${HTTP_PORT}/status`, { headers: { authorization: `Bearer ${token}` } })).json();
+}
+async function assertIsolated() {
+  const { cdpPort } = await daemonStatus();
+  if (cdpPort !== CDP_PORT) throw new Error(`daemon attached to CDP port ${cdpPort}, not the isolated Chromium on ${CDP_PORT}`);
+}
 async function startDaemon() {
   rmSync(join(home, "daemon.json"), { force: true });
-  daemon = spawn(process.execPath, [join(dist, "daemon.js"), "--port", String(HTTP_PORT), "--cdp-port", String(CDP_PORT)], { env: { ...process.env, BB_BROWSER_HOME: home }, stdio: "ignore" });
+  daemon = spawn(process.execPath, [join(dist, "daemon.js"), "--port", String(HTTP_PORT), "--cdp-port", String(CDP_PORT), "--strict-cdp"], { env: { ...process.env, BB_BROWSER_HOME: home }, stdio: "ignore" });
   for (let i = 0; i < 100; i++) {
     try {
-      const { token } = JSON.parse(readFileSync(join(home, "daemon.json"), "utf8"));
-      const res = await fetch(`http://127.0.0.1:${HTTP_PORT}/command`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ id: "ready", action: "tab_list" }) });
-      if ((await res.json()).success) return;
+      if ((await daemonStatus()).cdpConnected) return await assertIsolated();
     } catch { /* not up yet */ }
     await sleep(200);
   }
@@ -68,12 +76,16 @@ async function startDaemon() {
 const stopped = (child) => new Promise((r) => { if (child.exitCode !== null) r(); else { child.once("exit", r); child.kill(); } });
 // Close Chromium the way a user does, so it flushes cookies and releases the profile lock.
 async function closeBrowser() {
-  const exited = new Promise((r) => (chrome.exitCode !== null ? r() : chrome.once("exit", r)));
+  // Bind this instance: a late fallback kill must not hit the browser started next.
+  const old = chrome;
+  const exited = new Promise((r) => (old.exitCode !== null ? r() : old.once("exit", r)));
   const { webSocketDebuggerUrl } = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`)).json();
   const ws = new WebSocket(webSocketDebuggerUrl);
   await new Promise((r) => ws.addEventListener("open", r, { once: true }));
   ws.send(JSON.stringify({ id: 1, method: "Browser.close" }));
-  await Promise.race([exited, sleep(10000).then(() => stopped(chrome))]);
+  let timer;
+  await Promise.race([exited, new Promise((r) => { timer = setTimeout(r, 10000); }).then(() => stopped(old))]);
+  clearTimeout(timer);
 }
 
 function cli(session, args, { allowFailure = false } = {}) {
@@ -91,9 +103,12 @@ function cli(session, args, { allowFailure = false } = {}) {
 }
 const ref = (snapshot, tagName) => Object.entries(snapshot.data.snapshotData.refs).find(([, r]) => r.tagName === tagName)?.[0];
 const results = [];
+// E2E_ONLY=<regex> runs just the matching checks (each generated-package check is self-contained).
 async function check(name, fn) {
+  if (process.env.E2E_ONLY && !new RegExp(process.env.E2E_ONLY).test(name)) return results.push(`SKIP ${name}`);
   const t = performance.now();
   await fn();
+  await assertIsolated();
   results.push(`PASS ${name} (${Math.round(performance.now() - t)}ms)`);
 }
 
@@ -206,6 +221,7 @@ try {
       const listen = (server, host) => new Promise((r) => server.listen(0, host, () => r(`http://${host}:${server.address().port}/`)));
       const oldBase = await listen(oldSite.server, "127.0.0.1");
       const newBase = await listen(newSite.server, "localhost");
+      await cli("agent-a", ["open", `${origin}/form`]); // self-contained under E2E_ONLY
       await cli("agent-a", ["site", "run", "e2e/whoami", "warmup"]); // prime the daemon catalog
       await cli("agent-a", ["open", oldBase]);
       await cli("agent-a", ["site", "generate", "e2e-news", oldBase]);
@@ -222,10 +238,95 @@ try {
       newSite.server.close();
     }
   });
+  await check("login-only news site: --browser generation, origin-exact tabs, and auto-heal with the login state", async () => {
+    const body = "Members-only fixture article content. ".repeat(5);
+    let feedPath = "/rss.xml";
+    const runs = [];
+    const members = createServer((req, res) => {
+      const base = `http://${req.headers.host}/`;
+      const url = new URL(req.url, base);
+      const html = (b) => { res.writeHead(200, { "content-type": "text/html" }); res.end(b); };
+      if (url.pathname === "/login") { res.writeHead(200, { "set-cookie": "member=e2e-secret; Path=/; SameSite=Lax", "content-type": "text/html" }); return res.end("<title>member</title>logged in"); }
+      // Evidence page: renders what the CLI runs returned so far (no login needed, no cookie shown).
+      if (url.pathname === "/report") return html(`<meta charset="utf-8"><title>e2e report</title><style>body{font:14px sans-serif;margin:16px}td,th{border:1px solid #999;padding:4px 8px;text-align:left}</style><h2>login-only news package — ${url.searchParams.get("step")}</h2><table><tr><th>step</th><th>result</th></tr>${runs.map(([k, v]) => `<tr><td>${k}</td><td>${v.replace(/</g, "&lt;")}</td></tr>`).join("")}</table>`);
+      if (!/(^|; )member=e2e-secret(;|$)/.test(req.headers.cookie ?? "")) { res.writeHead(401); return res.end("login required"); }
+      if (url.pathname === "/") return html(`<link rel="alternate" type="application/rss+xml" href="${feedPath}">`);
+      if (url.pathname === feedPath) { res.writeHead(200, { "content-type": "application/rss+xml" }); return res.end(`<rss><item><title>Members</title><link>${base}story</link></item></rss>`); }
+      if (url.pathname === "/story") return html(`<title>Members</title><article><p>${body}</p></article>`);
+      res.writeHead(404); res.end();
+    });
+    // Same hostname, other port: a tab here must not serve the generated package.
+    const decoy = createServer((_req, res) => { res.writeHead(200, { "content-type": "text/html" }); res.end("<title>decoy</title>other origin"); });
+    const listen = (server) => new Promise((r) => server.listen(0, "localhost", () => r(`http://localhost:${server.address().port}/`)));
+    const tabs = async () => (await cli("agent-a", ["tab"])).data.tabs;
+    const evidence = process.env.E2E_EVIDENCE_DIR;
+    // Evidence: a one-shot Chromium (own throwaway profile) renders the report page.
+    const shot = (step) => evidence && new Promise((r, reject) => execFile(process.env.CHROMIUM ?? "/usr/lib/chromium/chromium", ["--headless=new", `--user-data-dir=${join(home, "shot-profile")}`, `--screenshot=${join(evidence, `${step}.png`)}`, "--window-size=1000,420", `${base}report?step=${encodeURIComponent(step)}`], { timeout: 30000 }, (e) => (e ? reject(e) : r())));
+    let base;
+    try {
+      base = await listen(members);
+      const decoyBase = await listen(decoy);
+      const decoyTab = (await cli("agent-a", ["open", decoyBase])).data.tab;
+      const loginTab = (await cli("agent-a", ["open", `${base}login`])).data.tab;
+      await sleep(500);
+      const anonymous = await cli("agent-a", ["site", "generate", "e2e-members", base], { allowFailure: true });
+      assert.equal(anonymous.success, false, "the generator's own requests carry no login state");
+      assert.ok(!existsSync(join(home, "sites", "e2e-members")), "a failed generation writes nothing");
+      runs.push(["generate (no --browser)", `failed: ${anonymous.score.passed}/${anonymous.score.total} checks, nothing written`]);
+
+      const before = (await tabs()).length;
+      const gen = await cli("agent-a", ["site", "generate", "e2e-members", base, "--browser"]);
+      assert.equal(gen.manifest.feedUrl, `${base}rss.xml`);
+      assert.equal((await tabs()).length, before, "generation reuses the logged-in tab and leaves no tab behind");
+      for (const file of [...gen.files, join(home, "sites", "e2e-members", "_package.json")]) {
+        assert.ok(!readFileSync(file, "utf8").includes("e2e-secret"), `${file} holds no credentials`);
+      }
+      runs.push(["generate --browser", `ok, feed ${gen.manifest.feedUrl}`]);
+
+      // Only the decoy (same hostname, other port) is open: site run must open the manifest's origin instead.
+      await cli("agent-a", ["close", "--tab", loginTab]);
+      const runFlow = async (label) => {
+        const latest = await cli("agent-a", ["site", "run", "e2e-members/latest"]);
+        assert.equal(latest.data.items[0].url, `${base}story`);
+        const article = await cli("agent-a", ["site", "run", "e2e-members/article", latest.data.items[0].url]);
+        assert.equal(article.data.title, "Members");
+        assert.ok(article.data.text.length >= 80);
+        runs.push([label, `latest → ${latest.data.items[0].url}; article "${article.data.title}" (${article.data.text.length} chars)`]);
+      };
+      await runFlow("site run latest → article");
+      const decoyNow = (await tabs()).find((t) => t.tab === decoyTab);
+      assert.equal(decoyNow?.url, decoyBase, "the other-origin tab is neither used nor navigated");
+      await shot("1-generated-and-run");
+
+      const membersTab = (await tabs()).find((t) => t.url.startsWith(base)).tab;
+      const explicit = await cli("agent-a", ["site", "run", "e2e-members/latest", "--tab", membersTab]);
+      assert.equal(explicit.data.items[0].url, `${base}story`, "an explicit --tab is still honoured");
+
+      const heal = await cli("agent-a", ["site", "heal", "e2e-members", "--browser"]);
+      assert.equal(heal.results[0].status, "healthy");
+      runs.push(["site heal --browser", heal.results[0].status]);
+
+      // Site change: the feed moves. Only the logged-in browser can re-probe it.
+      feedPath = "/feed.xml";
+      runs.push(["site change", "feed moved /rss.xml → /feed.xml"]);
+      const beforeHeal = (await tabs()).length;
+      await runFlow("site run after change (auto-heal)");
+      assert.equal(JSON.parse(readFileSync(join(home, "sites", "e2e-members", "_package.json"), "utf8")).feedUrl, `${base}feed.xml`);
+      assert.equal((await tabs()).length, beforeHeal, "auto-heal closes only the tabs it opened");
+      assert.ok((await tabs()).some((t) => t.tab === decoyTab), "existing tabs stay open");
+      await shot("2-changed-and-auto-healed");
+    } finally {
+      members.close();
+      decoy.close();
+    }
+  });
   console.log(results.join("\n"));
 } catch (error) {
   console.log(results.join("\n"));
   console.error(`FAIL ${error.message}`);
+  try { console.error(readFileSync(join(home, "logs", "daemon.log"), "utf8").split("\n").slice(-15).join("\n")); } catch { /* no log */ }
+  try { console.error(readFileSync(join(home, "chromium.log"), "utf8").split("\n").filter((l) => !/DEPRECATED_ENDPOINT|DevTools listening/.test(l)).slice(-10).join("\n")); } catch { /* no log */ }
+  try { console.error(JSON.stringify((await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json()).map((t) => `${t.type} ${t.url}`))); } catch { /* browser gone */ }
   process.exitCode = 1;
 } finally {
   if (daemon) await stopped(daemon);
