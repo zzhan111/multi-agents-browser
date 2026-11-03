@@ -198,7 +198,13 @@ export async function generateNewsPackage(opts: {
   fetcher?: Fetcher;
   history?: NewsManifest["history"];
 }): Promise<GenerateResult> {
+  return generateNewsPackageInternal(opts, false);
+}
+
+async function generateNewsPackageInternal(opts: Parameters<typeof generateNewsPackage>[0], replacing: boolean): Promise<GenerateResult> {
   assertPackageName(opts.name);
+  const dir = join(opts.sitesDir, opts.name);
+  if (!replacing && existsSync(dir)) throw new Error(`News package '${opts.name}' already exists; use site heal for generated packages`);
   const fetcher = opts.fetcher ?? fetch;
   const base = new URL(opts.base).origin + "/";
   const tried: GenerateResult["tried"] = [];
@@ -212,8 +218,18 @@ export async function generateNewsPackage(opts: {
   if (!best) return { ok: false, files: [], score: { passed: 0, total: 0, checks: [] }, tried };
   if (best.score.passed < best.score.total) return { ok: false, files: [], score: best.score, tried };
 
-  const dir = join(opts.sitesDir, opts.name);
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(opts.sitesDir, { recursive: true });
+  if (replacing) {
+    mkdirSync(dir, { recursive: true });
+  } else {
+    try { mkdirSync(dir); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new Error(`News package '${opts.name}' already exists; use site heal for generated packages`);
+      }
+      throw error;
+    }
+  }
   const files = Object.entries(best.sources).map(([command, source]) => {
     const file = join(dir, `${command}.js`);
     writeFileSync(file, source);
@@ -264,13 +280,14 @@ export async function healNewsPackage(opts: { name: string; sitesDir: string; fe
   const fetcher = opts.fetcher ?? fetch;
   const manifest = readNewsManifest(opts.sitesDir, opts.name);
   if (!manifest) return { status: "broken", reason: `no generated package '${opts.name}'` };
+  if (manifest.name !== opts.name) return { status: "broken", reason: "package name does not match its manifest" };
 
   const to = await currentOrigin(manifest.base, fetcher);
   if (to === manifest.base) {
     const { score } = await scoreFlow(manifest.name, manifest.base, manifest.feedUrl, fetcher);
     if (score.passed === score.total) return { status: "healthy", manifest, score };
   }
-  const result = await generateNewsPackage({ name: manifest.name, base: to, sitesDir: opts.sitesDir, fetcher, history: manifest.history });
+  const result = await generateNewsPackageInternal({ name: manifest.name, base: to, sitesDir: opts.sitesDir, fetcher, history: manifest.history }, true);
   if (!result.ok || !result.manifest) return { status: "broken", reason: "regeneration did not pass the task flow", score: result.score };
   return { status: "healed", from: manifest.base, to, manifest: result.manifest, score: result.score };
 }
