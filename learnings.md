@@ -10,4 +10,12 @@
 
 6. Pre-commit runs build and tests; retain the output and check failures before retrying.
 
-7. Check temporary-volume quota after EDQUOT; exhausted space can prevent shell commands, builds, and pushes.
+7. /tmp can exceed quota (EDQUOT) and block builds and pushes; set TMPDIR to a short /home path, as Chromium rejects long socket paths.
+
+8. Run package tests directly when TMPDIR matters; turbo's strict env mode drops it.
+
+9. *.log files are gitignored, so commit verification logs as .txt.
+
+10. Generated-package adapters must open new tabs at the manifest base URL, not https://<domain>, so http and port fixtures work.
+
+11. Auto-heal only on adapter failures (in-page exception or {error} result); bad args and lease conflicts are not site changes.
