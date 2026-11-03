@@ -9,6 +9,7 @@
  *   ma-browser site update                    更新社区 adapter 库
  *   ma-browser site generate <name> <url>     生成新闻站 adapter 包（零 token）
  *   ma-browser site heal [name]               检查/修复生成的包（站点搬家后重新生成）
+ *   generate/heal 加 --browser：探测请求在浏览器同源标签页里发出，复用登录态
  *
  * 目录：
  *   ~/.bb-browser/sites/       私有 adapter（优先）
@@ -19,7 +20,9 @@ import {
   COMMUNITY_REPO,
   COMMUNITY_SITES_DIR,
   LOCAL_SITES_DIR,
+  browserFetcher,
   buildAdapterScript,
+  createTabProbe,
   generateId,
   generateNewsPackage,
   healNewsPackage,
@@ -33,10 +36,13 @@ import {
   queryAdapterCatalog,
   readDaemonJson,
   updateCommunityAdapters,
+  type Fetcher,
+  type HealResult,
   type Request,
   type AdapterCatalogResult,
   type Response,
   type SiteAdapter,
+  type TabInfo,
 } from "@ma-browser/shared";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -51,6 +57,8 @@ export interface SiteOptions {
   tabId?: string | number;
   days?: number;
   jq?: string;
+  /** generate/heal: probe the site from the user's browser so login state applies */
+  browser?: boolean;
 }
 
 interface HistoryDomain {
@@ -207,27 +215,65 @@ async function refreshDaemonCatalog(): Promise<void> {
   }
 }
 
+/**
+ * With `--browser`, run the generator's requests from a tab of each URL's own
+ * origin (an existing one when the user has it open), so cookies of the
+ * logged-in browser apply. Tabs opened here are closed afterwards.
+ */
+async function withProbeFetcher<T>(options: SiteOptions, fn: (fetcher?: Fetcher) => Promise<T>): Promise<T> {
+  if (!options.browser) return fn(undefined);
+  await ensureDaemonRunning();
+  const command = async (request: Omit<Request, "id">): Promise<Response> => {
+    const resp: Response = await sendCommand({ id: generateId(), ...request } as Request);
+    if (!resp.success) throw new Error(`browser ${request.action} failed: ${resp.error}`);
+    return resp;
+  };
+  const probe = createTabProbe({
+    list: async () => ((await command({ action: "tab_list" })).data?.tabs as Array<TabInfo & { lease?: string; owner?: string }> | undefined ?? [])
+      // Tabs another agent holds exclusively are not ours to probe from.
+      .filter((t) => t.lease !== "exclusive" || t.owner === process.env.BB_SESSION_ID)
+      .map((t) => ({ id: String(t.tabId), url: t.url })),
+    open: async (url) => {
+      const tabId = (await command({ action: "tab_new", url })).data?.tabId;
+      if (tabId === undefined) throw new Error(`cannot open ${url}`);
+      return String(tabId);
+    },
+    evaluate: async (tabId, script) => (await command({ action: "eval", script, tabId })).data?.result,
+    close: async (tabId) => { await command({ action: "tab_close", tabId }); },
+  });
+  try {
+    return await fn(browserFetcher(probe.evaluate));
+  } finally {
+    await probe.dispose();
+  }
+}
+
 /** Generate `<LOCAL_SITES_DIR>/<name>/` from a news site's URL; writes only when the whole task flow passes. */
 async function siteGenerate(name: string, url: string, options: SiteOptions): Promise<void> {
   let result;
   try {
-    result = await generateNewsPackage({ name, base: url, sitesDir: LOCAL_SITES_DIR });
+    result = await withProbeFetcher(options, (fetcher) => generateNewsPackage({ name, base: url, sitesDir: LOCAL_SITES_DIR, fetcher }));
     if (result.ok) await refreshDaemonCatalog();
   } catch (e) {
-    if (options.json) exitJsonError(e instanceof Error ? e.message : String(e));
-    console.error(`[error] site generate: ${e instanceof Error ? e.message : e}`);
-    process.exit(1);
+    if (options.json) {
+      console.log(JSON.stringify({ success: false, error: e instanceof Error ? e.message : String(e) }, null, 2));
+    } else {
+      console.error(`[error] site generate: ${e instanceof Error ? e.message : e}`);
+    }
+    process.exitCode = 1;
+    return;
   }
   if (options.json) {
     console.log(JSON.stringify({ success: result.ok, ...result }, null, 2));
-    if (!result.ok) process.exit(1);
+    if (!result.ok) process.exitCode = 1;
     return;
   }
   if (!result.ok) {
     console.error(`[error] site generate ${name}: task flow did not pass (${result.score.passed}/${result.score.total}).`);
     for (const c of result.score.checks) console.error(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
     for (const t of result.tried) console.error(`  tried ${t.feedUrl} (${t.passed} passed)`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log(`已生成 ${name}（${result.score.passed}/${result.score.total} 检查通过，feed: ${result.manifest!.feedUrl}）`);
   for (const f of result.files) console.log(`  ${f}`);
@@ -246,13 +292,21 @@ function generatedPackageNames(): string[] {
 /** Re-check one or all generated packages; regenerate those whose site moved or changed. */
 async function siteHeal(name: string | undefined, options: SiteOptions): Promise<void> {
   const names = name ? [name] : generatedPackageNames();
-  const results = [];
-  for (const n of names) {
-    try {
-      results.push({ name: n, ...(await healNewsPackage({ name: n, sitesDir: LOCAL_SITES_DIR })) });
-    } catch (e) {
-      results.push({ name: n, status: "broken" as const, reason: e instanceof Error ? e.message : String(e) });
-    }
+  const results: Array<{ name: string } & (HealResult | { status: "broken"; reason: string })> = [];
+  try {
+    await withProbeFetcher(options, async (fetcher) => {
+      for (const n of names) {
+        try {
+          results.push({ name: n, ...(await healNewsPackage({ name: n, sitesDir: LOCAL_SITES_DIR, fetcher })) });
+        } catch (e) {
+          results.push({ name: n, status: "broken" as const, reason: e instanceof Error ? e.message : String(e) });
+        }
+      }
+    });
+  } catch (e) {
+    // The browser itself is unavailable: report every package as unchecked rather than healthy.
+    const reason = e instanceof Error ? e.message : String(e);
+    for (const n of names.slice(results.length)) results.push({ name: n, status: "broken" as const, reason });
   }
   let refreshError: string | undefined;
   if (results.some((r) => r.status !== "broken")) {
@@ -272,7 +326,7 @@ async function siteHeal(name: string | undefined, options: SiteOptions): Promise
     }
   }
   if (refreshError && !options.json) console.error(`[error] site heal: ${refreshError}`);
-  if (failed) process.exit(1);
+  if (failed) process.exitCode = 1;
 }
 
 function siteInfo(name: string, options: SiteOptions): void {
@@ -523,6 +577,7 @@ export async function siteCommand(
   ma-browser site update                    更新社区 adapter 库 (git clone/pull)
   ma-browser site generate <name> <url>     为新闻站生成 adapter 包（latest → article，零 token）
   ma-browser site heal [name]               检查生成的包，站点搬家/改版后自动重新生成
+    generate/heal --browser                 在已登录浏览器的同源标签页中探测（需登录的站点）
 
 目录:
   ${LOCAL_SITES_DIR}      私有 adapter（优先）
