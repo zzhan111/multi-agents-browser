@@ -51,6 +51,8 @@ interface DaemonOptions {
   port: number;
   cdpHost: string;
   cdpPort: number;
+  /** Only ever connect to cdpPort: no port scan, no managed browser (isolated test runs). */
+  strictCdp: boolean;
   token: string;
 }
 
@@ -76,6 +78,10 @@ function parseOptions(): DaemonOptions {
         type: "string",
         default: String(DEFAULT_CDP_PORT),
       },
+      "strict-cdp": {
+        type: "boolean",
+        default: false,
+      },
       token: {
         type: "string",
         default: "",
@@ -100,6 +106,7 @@ Options:
   -p, --port <port>          HTTP server port (default: ${DAEMON_PORT})
       --cdp-host <host>      Chrome CDP host (default: 127.0.0.1)
       --cdp-port <port>      Chrome CDP port (default: ${DEFAULT_CDP_PORT})
+      --strict-cdp           Only use --cdp-port: never scan other ports or launch a browser
       --token <token>        Bearer auth token (auto-generated if empty)
   -h, --help                 Show this help message
 
@@ -122,6 +129,7 @@ Endpoints:
     port: parseInt(values.port ?? String(DAEMON_PORT), 10),
     cdpHost: values["cdp-host"] ?? "127.0.0.1",
     cdpPort: parseInt(values["cdp-port"] ?? String(DEFAULT_CDP_PORT), 10),
+    strictCdp: values["strict-cdp"] ?? false,
     token,
   };
 }
@@ -186,11 +194,16 @@ function writeTokenFile(token: string): void {
 async function discoverCdpPort(
   host: string,
   port: number,
+  strict = false,
 ): Promise<{ host: string; port: number }> {
   // Try the configured port first, on both IPv4 and IPv6.
   const direct = await probeCdp(port);
   if (direct) {
     return { host: direct, port };
+  }
+  // Strict: a slow or restarting browser must not hand us someone else's.
+  if (strict) {
+    throw new Error(`No Chrome reachable at ${host}:${port} (--strict-cdp)`);
   }
 
   // Try the port recorded for a previously-launched managed browser.
@@ -411,7 +424,7 @@ async function bringUpCdpLoop(
     if (cdp.connected) return;
     attempt += 1;
     try {
-      const endpoint = await discoverCdpPort(options.cdpHost, options.cdpPort);
+      const endpoint = await discoverCdpPort(options.cdpHost, options.cdpPort, options.strictCdp);
       runtimeStatus.needsBrowserConsent = false;
       cdp.repoint(endpoint.host, endpoint.port);
       console.error(

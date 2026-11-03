@@ -50,6 +50,18 @@ describe("site auto-heal", () => {
     assert.equal(calls, 0, "never re-probes a package without a generator manifest");
   });
 
+  it("heals with the fetcher of the run that started it (the browser session)", async () => {
+    const sitesDir = mkdtempSync(join(tmpdir(), "ma-autoheal-"));
+    mkdirSync(join(sitesDir, "gen"));
+    writeFileSync(join(sitesDir, "gen", "latest.js"), `/* @meta\n{"name":"gen/latest","domain":"example.com"}\n*/\nasync function(){ return {}; }`);
+    writeFileSync(join(sitesDir, "gen", "_package.json"), JSON.stringify({ name: "gen", base: "http://example.com/" }));
+    const browser = async () => new Response("from the browser");
+    let used: unknown;
+    const healer = createAutoHealer({ sitesDir, heal: async ({ fetcher }) => { used = fetcher; return { status: "broken", reason: "x" }; } });
+    await healer.heal(adapter(sitesDir, "gen/latest"), browser);
+    assert.equal(used, browser);
+  });
+
   it("shares one heal across concurrent failures and cools down between attempts", async () => {
     const sitesDir = mkdtempSync(join(tmpdir(), "ma-autoheal-"));
     mkdirSync(join(sitesDir, "gen"));

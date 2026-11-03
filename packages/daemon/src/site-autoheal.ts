@@ -10,15 +10,19 @@
 
 import { existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
-import { LOCAL_SITES_DIR, healNewsPackage, readNewsManifest, type HealResult, type SiteAdapter } from "@ma-browser/shared";
+import { LOCAL_SITES_DIR, healNewsPackage, readNewsManifest, type Fetcher, type HealResult, type SiteAdapter } from "@ma-browser/shared";
 
 export const AUTOHEAL_COOLDOWN_MS = 60_000;
 
 export interface AutoHealer {
   /** Base URL of the generated package an adapter belongs to, if any. */
   generatedBase(adapter: SiteAdapter): string | undefined;
-  /** Heal the adapter's package; undefined when it is not generated or is cooling down. */
-  heal(adapter: SiteAdapter): Promise<HealResult | undefined>;
+  /**
+   * Heal the adapter's package; undefined when it is not generated or is
+   * cooling down. `fetcher` (the browser session) is used by the run that
+   * starts the heal; concurrent callers share that run.
+   */
+  heal(adapter: SiteAdapter, fetcher?: Fetcher): Promise<HealResult | undefined>;
 }
 
 export function createAutoHealer(opts: {
@@ -47,7 +51,7 @@ export function createAutoHealer(opts: {
       const pkg = packageOf(adapter);
       try { return pkg ? readNewsManifest(sitesDir, pkg)?.base : undefined; } catch { return undefined; }
     },
-    async heal(adapter) {
+    async heal(adapter, fetcher) {
       const pkg = packageOf(adapter);
       if (!pkg) return undefined;
       const running = inFlight.get(pkg);
@@ -55,7 +59,7 @@ export function createAutoHealer(opts: {
       const last = lastAttempt.get(pkg);
       if (last !== undefined && now() - last < cooldownMs) return undefined;
       lastAttempt.set(pkg, now());
-      const attempt = heal({ name: pkg, sitesDir })
+      const attempt = heal({ name: pkg, sitesDir, fetcher })
         .catch((e): HealResult => ({ status: "broken", reason: e instanceof Error ? e.message : String(e) }))
         .finally(() => inFlight.delete(pkg));
       inFlight.set(pkg, attempt);
