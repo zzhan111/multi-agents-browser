@@ -186,7 +186,7 @@ try {
     const afterBrowser = await cli("agent-a", ["site", "run", "e2e/whoami", "b"]);
     assert.equal(afterBrowser.data.cookie, "sid=agent-ok");
   });
-  await check("generated adapters run immediately after generation and domain healing", async () => {
+  await check("generated adapters run immediately after generation and auto-heal a domain move", async () => {
     const body = "Browser news fixture article content. ".repeat(5);
     function newsSite() {
       let moved;
@@ -212,9 +212,8 @@ try {
       const latest = await cli("agent-a", ["site", "run", "e2e-news/latest"]);
       assert.equal(latest.data.items[0].url, `${oldBase}article`);
       assert.equal((await cli("agent-a", ["site", "run", "e2e-news/article", latest.data.items[0].url])).data.title, "News");
+      // Domain move: the next normal run heals itself (no `site heal`, no daemon restart, no tab on the new domain).
       oldSite.move(newBase);
-      assert.equal((await cli("agent-a", ["site", "heal", "e2e-news"])).results[0].status, "healed");
-      await cli("agent-a", ["open", newBase]);
       const latest2 = await cli("agent-a", ["site", "run", "e2e-news/latest"]);
       assert.equal(latest2.data.items[0].url, `${newBase}article`);
       assert.equal((await cli("agent-a", ["site", "run", "e2e-news/article", latest2.data.items[0].url])).data.title, "News");
