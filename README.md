@@ -59,6 +59,24 @@ ma-browser site recommend     # see which adapters match your browsing habits
 ma-browser site zhihu/hot     # go
 ```
 
+### Windows headless tray
+
+After building from source, run this from the repository directory:
+
+```powershell
+Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PWD\scripts\windows-tray.ps1`"")
+```
+
+The tray starts and monitors the daemon, launching new managed browsers headlessly with the existing profile. Outside the tray, set `MA_BROWSER_HEADLESS=1` for the same behavior. An already running browser is not restarted. Headless mode cannot show interactive login pages, so log in with a visible browser first. Right-click the tray icon for status, logs, or to exit the tray while leaving the daemon running.
+
+To start the tray at Windows sign-in, run this from the repository directory:
+
+```powershell
+$trayScript = (Resolve-Path .\scripts\windows-tray.ps1).Path
+$command = "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$trayScript`""
+Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ma-browser-tray' -Value $command
+```
+
 ### MCP (Claude Code / Cursor)
 
 ```json

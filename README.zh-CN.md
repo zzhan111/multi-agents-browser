@@ -59,6 +59,24 @@ ma-browser site recommend     # 看看哪些和你的浏览习惯匹配
 ma-browser site zhihu/hot     # 开搞
 ```
 
+### Windows 无头托盘
+
+从源码构建后，在仓库目录运行：
+
+```powershell
+Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PWD\scripts\windows-tray.ps1`"")
+```
+
+托盘会启动并监视后台进程，新启动的受管浏览器以无头模式运行并保留其现有资料。托盘之外可设置 `MA_BROWSER_HEADLESS=1` 达到相同效果；已在运行的浏览器不会自动重启。无头模式无法显示交互式登录页面，请先在有窗口模式下登录。右键托盘图标可查看状态、打开日志或退出托盘（后台继续运行）。
+
+需要在 Windows 登录后自动启动时，在仓库目录运行：
+
+```powershell
+$trayScript = (Resolve-Path .\scripts\windows-tray.ps1).Path
+$command = "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$trayScript`""
+Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ma-browser-tray' -Value $command
+```
+
 ### MCP 接入（Claude Code / Cursor）
 
 ```json

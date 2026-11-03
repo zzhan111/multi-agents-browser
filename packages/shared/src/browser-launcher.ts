@@ -265,6 +265,7 @@ export async function launchManagedBrowser(
   await mkdir(MANAGED_USER_DATA_DIR, { recursive: true });
 
   const args = [
+    ...(process.env.MA_BROWSER_HEADLESS === "1" ? ["--headless=new"] : []),
     `--remote-debugging-port=${launchPort}`,
     `--user-data-dir=${MANAGED_USER_DATA_DIR}`,
     "--no-first-run",
