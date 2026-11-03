@@ -59,6 +59,26 @@ ma-browser site recommend     # see which adapters match your browsing habits
 ma-browser site zhihu/hot     # go
 ```
 
+### Windows headless tray
+
+After building from source, run this from the repository directory:
+
+```powershell
+Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PWD\scripts\windows-tray.ps1`"")
+```
+
+The tray starts and monitors the daemon, launching new managed browsers headlessly with the existing profile. Right-click the tray icon to switch between headed and headless modes; the selected mode persists across sign-ins. Switching restarts the managed browser and restores its session, but unsaved page content may be lost. Use headed mode to sign in interactively. The menu also opens logs or exits the tray while leaving the daemon running. Outside the tray, set `MA_BROWSER_HEADLESS=1` to launch a managed browser headlessly; an already running browser is not restarted.
+
+Agents can call `ma-browser mode status|headed|headless --json` or the MCP `browser_mode` tool with the same `mode` values. Status is read-only; a switch returns after the browser reconnects. Previous tab IDs become invalid. When the tray owns the daemon, set `MA_BROWSER_CONNECT_ONLY=1` in the MCP server environment to prevent it from spawning another daemon during a switch.
+
+To start the tray at Windows sign-in, run this from the repository directory:
+
+```powershell
+$trayScript = (Resolve-Path .\scripts\windows-tray.ps1).Path
+$command = "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$trayScript`""
+Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ma-browser-tray' -Value $command
+```
+
 ### MCP (Claude Code / Cursor)
 
 ```json

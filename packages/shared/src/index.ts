@@ -73,6 +73,8 @@ export {
   updateCommunityAdapters,
 } from "./site-adapters.js";
 
+export { browserMode, type BrowserModeAction, type BrowserModeStatus } from "./browser-mode.js";
+
 export {
   type Fetcher,
   type GenerateResult,
