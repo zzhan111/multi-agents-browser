@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { CommandTimeoutInfo } from "./command-timeouts.js";
 
 /**
  * ma-browser 通信协议 — CLI/MCP ↔ Daemon ↔ Chrome CDP
@@ -118,6 +119,8 @@ export interface Request {
   waitType?: string;
   /** 等待毫秒数（wait 命令使用） */
   ms?: number;
+  /** 命令执行预算（毫秒）。客户端按 action 计算后传入，daemon 优先采用（见 command-timeouts.ts） */
+  timeoutMs?: number;
   /** 增量查询起点（observation 命令使用，支持 seq 数值或 "last_action"） */
   since?: number | "last_action";
   /** HTTP 方法过滤（network requests 使用） */
@@ -377,6 +380,8 @@ export interface Response {
   data?: ResponseData;
   /** 失败时的错误信息 */
   error?: string;
+  /** 超时诊断（命令超时时返回，区分 cdp_connect / queue / cdp / dispatch） */
+  timeout?: CommandTimeoutInfo;
 }
 
 /** Daemon 状态 */

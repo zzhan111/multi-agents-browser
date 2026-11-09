@@ -180,6 +180,19 @@ ma-browser daemon --host 127.0.0.1    # IPv4 only (fix macOS IPv6 issues)
 ma-browser daemon --host 0.0.0.0      # listen on all interfaces (for Tailscale / ZeroTier remote access)
 ```
 
+### Command timeouts and health
+
+Each action has its own budget: 30 s by default, 60 s for `screenshot` / `eval` / `snapshot` / `open` / `refresh` / `back` / `forward` / `site update`, 120 s for `site run`, and `wait <ms>` + 5 s. The caller's environment wins (the CLI/MCP sends its budget with each command):
+
+```bash
+BB_COMMAND_TIMEOUT_SCREENSHOT_MS=120000 ma-browser screenshot   # one action
+BB_COMMAND_TIMEOUT_MS=90000 ma-browser eval "..."                # floor for every action
+```
+
+A timed-out command returns an error tagged with where it stalled: `[cdp]` (the browser never answered a CDP call, with the method), `[dispatch]` (daemon-side work, e.g. queued behind an earlier stuck command on the same tab), `[queue]` (no free command slot) or `[cdp_connect]` (the browser never connected). If the daemon sends no response at all, the client probes `/status` to tell a stuck command from an unresponsive daemon.
+
+`ma-browser status` (and `/status` → `health`) reports `ok` / `degraded` / `stalled` / `disconnected`, with the last command/success time, consecutive timeouts, timed-out commands still running, in-flight commands, pending CDP calls, event-loop lag and a recovery hint. A daemon that "can list tabs but can't screenshot" shows up as `degraded`/`stalled` instead of looking healthy.
+
 ## Architecture
 
 ```

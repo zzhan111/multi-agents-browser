@@ -180,6 +180,19 @@ ma-browser daemon --host 127.0.0.1    # 仅 IPv4（解决 macOS IPv6 问题）
 ma-browser daemon --host 0.0.0.0      # 监听所有网卡（用于 Tailscale / ZeroTier 跨机器访问）
 ```
 
+### 命令超时与健康状态
+
+每个 action 有自己的超时预算：默认 30 秒；`screenshot` / `eval` / `snapshot` / `open` / `refresh` / `back` / `forward` / `site update` 为 60 秒；`site run` 为 120 秒；`wait <ms>` 为 ms + 5 秒。以调用方环境为准（CLI/MCP 会随命令发送预算）：
+
+```bash
+BB_COMMAND_TIMEOUT_SCREENSHOT_MS=120000 ma-browser screenshot   # 单个 action
+BB_COMMAND_TIMEOUT_MS=90000 ma-browser eval "..."                # 所有 action 的下限
+```
+
+超时错误会标明卡在哪里：`[cdp]`（浏览器没有响应某个 CDP 调用，附方法名）、`[dispatch]`（daemon 侧逻辑未完成，例如排在同一 tab 上一个卡住的命令后面）、`[queue]`（没有空闲命令槽）、`[cdp_connect]`（浏览器始终未连上）。如果 daemon 完全没有响应，客户端会探测 `/status`，区分“命令卡住”和“daemon 无响应/重启中”。
+
+`ma-browser status`（以及 `/status` → `health`）报告 `ok` / `degraded` / `stalled` / `disconnected`，并给出最近命令/成功时间、连续超时数、超时后仍在运行的命令、进行中的命令、等待中的 CDP 调用、事件循环延迟和恢复建议。“能列 tab 但截不了图”的半死状态会显示为 `degraded`/`stalled`，不再看起来正常。
+
 ## 架构
 
 ```

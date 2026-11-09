@@ -7,6 +7,14 @@ declare module "ws" {
     const CLOSED: number;
     const CONNECTING: number;
     const CLOSING: number;
+
+    /** Server side, used by tests to fake a CDP endpoint. */
+    class WebSocketServer extends EventEmitter {
+      constructor(options: { server?: import("node:http").Server; port?: number });
+      on(event: "connection", listener: (socket: WebSocket) => void): this;
+      on(event: string | symbol, listener: (...args: unknown[]) => void): this;
+      close(cb?: (err?: Error) => void): void;
+    }
   }
 
   class WebSocket extends EventEmitter {

@@ -8,6 +8,7 @@
  */
 
 import { request as httpRequest } from "node:http";
+import { AsyncLocalStorage } from "node:async_hooks";
 import WebSocket from "ws";
 import type { TraceEvent } from "@ma-browser/shared";
 import { TabStateManager } from "./tab-state.js";
@@ -24,7 +25,31 @@ interface PendingCommand {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
   method: string;
+  /** Date.now() when the command was sent (for stuck-call diagnostics). */
+  startedAt: number;
+  /** Leak guard: rejects the command if the browser never answers. */
+  timer: ReturnType<typeof setTimeout>;
+  /** cdpCallContext token of the dispatch that sent it, if any. */
+  owner?: number;
 }
+
+/**
+ * Async context naming which /command dispatch issued a CDP call (a token from
+ * CommandHealth). Lets a timed-out command check whether *its own* CDP calls
+ * are still waiting on the browser, without threading an id through dispatch.
+ */
+export const cdpCallContext = new AsyncLocalStorage<number>();
+
+/**
+ * Hard ceiling for a single CDP call. Not a policy timeout (that is the
+ * per-action budget in http-server) — it only guarantees a call the browser
+ * never answers is eventually rejected and dropped from `pending`, instead of
+ * leaking for the rest of a long session.
+ */
+const CDP_COMMAND_HARD_TIMEOUT_MS = (() => {
+  const n = Number(process.env.BB_CDP_COMMAND_TIMEOUT_MS);
+  return Number.isFinite(n) && n >= 1000 ? n : 600_000;
+})();
 
 export interface CdpTargetInfo {
   id: string;
@@ -232,6 +257,7 @@ export class CdpConnection {
     this._connected = false;
 
     for (const p of this.pending.values()) {
+      clearTimeout(p.timer);
       p.reject(new Error("CDP connection closed"));
     }
     this.pending.clear();
@@ -256,6 +282,7 @@ export class CdpConnection {
         const p = this.pending.get(message.id);
         if (!p) return;
         this.pending.delete(message.id);
+        clearTimeout(p.timer);
         if (message.error) {
           p.reject(
             new Error(
@@ -333,6 +360,7 @@ export class CdpConnection {
       this.socket = null;
       this.lastError = "CDP WebSocket closed unexpectedly";
       for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
         p.reject(new Error("CDP connection closed"));
       }
       this.pending.clear();
@@ -673,16 +701,7 @@ export class CdpConnection {
   /** Send a browser-level CDP command. */
   async browserCommand<T = unknown>(method: string, params: JsonObject = {}): Promise<T> {
     if (!this.socket) throw new Error("CDP not connected");
-    const id = this.nextId++;
-    const payload = JSON.stringify({ id, method, params });
-    return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, {
-        resolve: resolve as (v: unknown) => void,
-        reject,
-        method,
-      });
-      this.socket!.send(payload);
-    });
+    return this.send<T>(method, params);
   }
 
   /** Send a session-level CDP command (flat protocol). */
@@ -694,27 +713,54 @@ export class CdpConnection {
     if (!this.socket) throw new Error("CDP not connected");
     const sessionId =
       this.sessions.get(targetId) ?? (await this.attachAndEnable(targetId));
+    return this.send<T>(method, params, sessionId);
+  }
+
+  /**
+   * Send one CDP command. Browser- and session-level responses are both
+   * matched by id in the single `message` listener, so a call that never gets
+   * an answer is rejected on socket close (or the hard timeout) instead of
+   * leaving a per-call listener attached for the rest of the session.
+   */
+  private send<T>(method: string, params: JsonObject, sessionId?: string): Promise<T> {
+    const socket = this.socket;
+    if (!socket) return Promise.reject(new Error("CDP not connected"));
     const id = this.nextId++;
-    const payload = JSON.stringify({ id, method, params, sessionId });
+    const payload = JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params });
     return new Promise<T>((resolve, reject) => {
-      const check = (raw: WebSocket.RawData) => {
-        const msg = JSON.parse(raw.toString()) as JsonObject;
-        if (msg.id === id && msg.sessionId === sessionId) {
-          this.socket!.off("message", check);
-          if (msg.error) {
-            reject(
-              new Error(
-                `${method}: ${(msg.error as JsonObject).message ?? "Unknown CDP error"}`,
-              ),
-            );
-          } else {
-            resolve(msg.result as T);
-          }
-        }
-      };
-      this.socket!.on("message", check);
-      this.socket!.send(payload);
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        reject(new Error(`${method}: CDP command timed out after ${Math.round(CDP_COMMAND_HARD_TIMEOUT_MS / 1000)}s`));
+      }, CDP_COMMAND_HARD_TIMEOUT_MS);
+      timer.unref?.();
+      this.pending.set(id, {
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        method,
+        startedAt: Date.now(),
+        timer,
+        owner: cdpCallContext.getStore(),
+      });
+      socket.send(payload);
     });
+  }
+
+  /**
+   * In-flight CDP calls (optionally only those issued under `owner`): count
+   * plus the oldest one still waiting on the browser. Used to tell "the browser stopped answering" (kind=cdp) apart from
+   * daemon-side stalls when a command times out, and surfaced in /status.
+   */
+  pendingStats(now = Date.now(), owner?: number): { count: number; oldestMethod?: string; oldestAgeMs?: number } {
+    let oldest: PendingCommand | undefined;
+    let count = 0;
+    for (const p of this.pending.values()) {
+      if (owner !== undefined && p.owner !== owner) continue;
+      count += 1;
+      if (!oldest || p.startedAt < oldest.startedAt) oldest = p;
+    }
+    return oldest
+      ? { count, oldestMethod: oldest.method, oldestAgeMs: now - oldest.startedAt }
+      : { count: 0 };
   }
 
   /**
