@@ -67,9 +67,11 @@ After building from source, run this from the repository directory:
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PWD\scripts\windows-tray.ps1`"")
 ```
 
-The tray starts and monitors the daemon, launching new managed browsers headlessly with the existing profile. Right-click the tray icon to switch between headed and headless modes; the selected mode persists across sign-ins. Switching restarts the managed browser and restores its session, but unsaved page content may be lost. Use headed mode to sign in interactively. The menu also opens logs or exits the tray while leaving the daemon running. Outside the tray, set `MA_BROWSER_HEADLESS=1` to launch a managed browser headlessly; an already running browser is not restarted.
+The tray starts and monitors the daemon, launching new managed browsers headlessly with the existing profile. Left-click the tray icon to show the managed browser: the tray always asks first, then brings a headed window to the foreground, or — in headless mode — switches to headed (restarting the browser) and fronts the new window; choosing No changes nothing, and failures appear as balloon tips. Right-click the tray icon to switch between headed and headless modes; the selected mode persists across sign-ins. Switching restarts the managed browser and restores its session, but unsaved page content may be lost. Use headed mode to sign in interactively. The menu also opens logs or exits the tray while leaving the daemon running. Outside the tray, set `MA_BROWSER_HEADLESS=1` to launch a managed browser headlessly; an already running browser is not restarted.
 
 Agents can call `ma-browser mode status|headed|headless --json` or the MCP `browser_mode` tool with the same `mode` values. Status is read-only; a switch returns after the browser reconnects. Previous tab IDs become invalid. When the tray owns the daemon, set `MA_BROWSER_CONNECT_ONLY=1` in the MCP server environment to prevent it from spawning another daemon during a switch.
+
+To verify the left-click flow by hand: with the tray in headless mode, left-click the icon, choose No and confirm `ma-browser mode status --json` still reports `headless`; then start `.\scripts\check-windows-tray.ps1 -Mode headed -ExpectForeground -DelaySeconds 60`, left-click again and choose Yes; the check passes once the window is in the foreground. Cover the window with another app and repeat with `-DelaySeconds 10`.
 
 To start the tray at Windows sign-in, run this from the repository directory:
 
