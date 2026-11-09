@@ -1,6 +1,6 @@
 # ma-browser Agent 开发规范
 
-经验见 [learnings.md](learnings.md)
+经验见 [learnings.md](learnings.md)；自动开发经验见 [docs/autodev-learnings.md](docs/autodev-learnings.md)
 
 ## 架构
 
