@@ -1,6 +1,7 @@
 # CLAUDE.md
 
 经验见 [learnings.md](learnings.md)
+经验见 [docs/autodev-learnings.md](docs/autodev-learnings.md)
 
 ## 项目改名 → MultiAgentsBrowser / `ma-browser`（2026-06-10）
 
