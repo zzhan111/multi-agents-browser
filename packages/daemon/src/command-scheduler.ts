@@ -93,7 +93,6 @@ export class CommandScheduler {
           this.waiters.splice(idx, 1);
           reject(new SchedulerTimeoutError(timeoutMs, this.stats()));
         }, timeoutMs);
-        timer.unref?.();
       }
     });
   }
