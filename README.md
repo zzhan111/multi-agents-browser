@@ -155,11 +155,14 @@ ma-browser open https://example.com
 ma-browser snapshot -i                # accessibility tree
 ma-browser click @3                   # click element
 ma-browser fill @5 "hello"            # fill input
+ma-browser upload @6 "C:\Users\me\a.pdf" # set files on <input type=file> (ref or CSS selector)
 ma-browser eval "document.title"      # run JS
 ma-browser fetch URL --json           # authenticated fetch
 ma-browser network requests --with-body --json  # capture traffic
 ma-browser screenshot                 # take screenshot
 ```
+
+`upload` uses CDP `DOM.setFileInputFiles` and fires input/change; target the file input's ref, its label/wrapper, or a selector such as `"input[type=file]"` for hidden inputs. Paths may be relative or absolute (including Windows `C:\...`); multiple files need a `multiple` input, and an `accept` mismatch is rejected unless `--force`. Custom upload widgets often read the file on change and clear the input, so `uploadedFiles` can be empty while the page UI shows the file — check with `snapshot`.
 
 All commands support `--json` output, `--jq <expr>` for inline filtering, and `--tab <id>` for concurrent multi-tab operations.
 

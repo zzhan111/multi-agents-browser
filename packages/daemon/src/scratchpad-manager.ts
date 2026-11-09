@@ -15,7 +15,7 @@ const SCRATCHPAD_TTL_MS = (() => {
 /** Actions that mutate page state — worth surfacing to other agents. */
 const WRITE_ACTIONS = new Set([
   "open", "back", "forward", "refresh",
-  "click", "hover", "fill", "type", "check", "uncheck", "select", "press", "scroll",
+  "click", "hover", "fill", "type", "check", "uncheck", "select", "upload", "press", "scroll",
   "eval", "dialog", "frame", "frame_main",
   "tab_claim", "tab_release", "task_update",
 ]);

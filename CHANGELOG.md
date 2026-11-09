@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `upload <ref|selector> <file...>` CLI command and `browser_upload` MCP tool: set local files on `<input type=file>` via CDP `DOM.setFileInputFiles`, with input/change events, accept/multiple/path validation, and `[file ...]` markers in snapshots (#32)
+
 ## [0.14.0](https://github.com/zzhan111/multi-agents-browser/compare/v0.13.0...v0.14.0) (2026-10-27)
 
 Slim core line, rebuilt from v0.12.0. The v0.13.0 features (site_freeze,
