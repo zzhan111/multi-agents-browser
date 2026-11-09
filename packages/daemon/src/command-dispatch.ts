@@ -31,6 +31,7 @@ import {
 } from "./site-runner.js";
 import { invalidateCatalog } from "./site-catalog.js";
 import { createAutoHealer } from "./site-autoheal.js";
+import { validateUploadFiles, type FileInputInfo } from "./file-upload.js";
 import { buildAdapterScript, matchTabOrigin, type SiteAdapter } from "@ma-browser/shared";
 
 const autoHealer = createAutoHealer();
@@ -184,6 +185,16 @@ function convertBuildDomTreeResult(
     return attrs["aria-label"] || attrs.title || attrs.placeholder || attrs.alt || attrs.value || collectTextContent(node, map) || attrs.name || undefined;
   };
 
+  // `[file accept=".pdf" multiple]` so agents can spot upload targets for `upload`.
+  const fileInputTag = (node: RawDomElementNode): string => {
+    const attrs = node.attributes || {};
+    if (node.tagName.toLowerCase() !== "input" || attrs.type?.toLowerCase() !== "file") return "";
+    let tag = " [file";
+    if (attrs.accept) tag += ` accept=${JSON.stringify(attrs.accept)}`;
+    if ("multiple" in attrs) tag += " multiple";
+    return tag + "]";
+  };
+
   const truncateText = (text: string, length = 50): string =>
     text.length <= length ? text : `${text.slice(0, length - 3)}...`;
 
@@ -207,6 +218,7 @@ function convertBuildDomTreeResult(
       if (!matchesSelector(node, role, name)) continue;
       let line = `${role} [ref=${refId}]`;
       if (name) line += ` ${JSON.stringify(truncateText(name))}`;
+      line += fileInputTag(node);
       lines.push(line);
       refs[refId] = { xpath: node.xpath || "", role, name, tagName: node.tagName.toLowerCase() } as RefInfo;
     }
@@ -238,6 +250,7 @@ function convertBuildDomTreeResult(
     let line = `${indent}- ${role}`;
     if (refId) line += ` [ref=${refId}]`;
     if (name) line += ` ${JSON.stringify(truncateText(name, compact ? 50 : 80))}`;
+    line += fileInputTag(el);
     if (!compact) line += ` <${el.tagName.toLowerCase()}>`;
     lines.push(line);
 
@@ -350,6 +363,118 @@ async function parseRef(cdp: CdpConnection, targetId: string, tab: TabState, ref
     return backendDOMNodeId;
   }
   throw new Error(`Unknown ref: ${ref}. Run snapshot first.`);
+}
+
+// ---------------------------------------------------------------------------
+// File upload
+// ---------------------------------------------------------------------------
+
+const UPLOAD_TIMEOUT_MS = 15_000;
+
+// Runs on the targeted element; returns the file input to use, or a string
+// describing why there is none.
+const FIND_FILE_INPUT_FN = `function() {
+  const isFile = (el) => el instanceof HTMLInputElement && el.type === 'file';
+  if (isFile(this)) return this;
+  if (this instanceof HTMLLabelElement && isFile(this.control)) return this.control;
+  for (const root of [this, this.shadowRoot]) {
+    const inner = root && root.querySelector && root.querySelector('input[type=file]');
+    if (inner) return inner;
+  }
+  return this instanceof Element ? '<' + this.tagName.toLowerCase() + '>' : String(this);
+}`;
+
+// Arms one-shot input/change listeners and reports the input's constraints.
+const ARM_FILE_INPUT_FN = `function() {
+  const seen = { input: false, change: false };
+  this.__maUploadEvents = seen;
+  this.addEventListener('input', () => { seen.input = true; }, { once: true, capture: true });
+  this.addEventListener('change', () => { seen.change = true; }, { once: true, capture: true });
+  return { multiple: this.multiple, accept: this.getAttribute('accept') || '', disabled: this.disabled };
+}`;
+
+// Fires input/change only if Chrome did not, then reports the input's files.
+const FINISH_FILE_INPUT_FN = `function() {
+  const seen = this.__maUploadEvents || { input: false, change: false };
+  const fired = { input: seen.input, change: seen.change };
+  if (!seen.input) this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  if (!seen.change) this.dispatchEvent(new Event('change', { bubbles: true }));
+  delete this.__maUploadEvents;
+  const files = Array.from(this.files || []).map((f) => ({ name: f.name, size: f.size, type: f.type }));
+  return { files, events: fired };
+}`;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function resolveUploadTarget(
+  cdp: CdpConnection,
+  targetId: string,
+  tab: TabState,
+  request: Request,
+): Promise<{ objectId: string; label: string }> {
+  if (request.ref) {
+    const backendNodeId = await parseRef(cdp, targetId, tab, request.ref);
+    const resolved = await cdp.sessionCommand<{ object: { objectId: string } }>(targetId, "DOM.resolveNode", { backendNodeId });
+    return { objectId: resolved.object.objectId, label: `@${request.ref}` };
+  }
+  const selector = request.selector!;
+  const found = await cdp.sessionCommand<{
+    result: { objectId?: string; subtype?: string };
+    exceptionDetails?: { exception?: { description?: string }; text?: string };
+  }>(targetId, "Runtime.evaluate", {
+    expression: `document.querySelector(${JSON.stringify(selector)})`,
+    returnByValue: false,
+  });
+  if (found.exceptionDetails) {
+    throw new Error(`Invalid selector ${JSON.stringify(selector)}: ${found.exceptionDetails.exception?.description?.split("\n")[0] ?? found.exceptionDetails.text}`);
+  }
+  if (!found.result.objectId || found.result.subtype === "null") {
+    throw new Error(`No element matches selector ${JSON.stringify(selector)}`);
+  }
+  return { objectId: found.result.objectId, label: JSON.stringify(selector) };
+}
+
+async function uploadFiles(
+  cdp: CdpConnection,
+  targetId: string,
+  tab: TabState,
+  request: Request,
+): Promise<{ files: string[]; uploadedFiles: Array<{ name: string; size: number; type: string }>; uploadEvents: { input: boolean; change: boolean } }> {
+  const callOn = async <T>(objectId: string, functionDeclaration: string, returnByValue: boolean) => {
+    const call = await cdp.sessionCommand<{
+      result: { value?: T; objectId?: string; type?: string; subtype?: string };
+      exceptionDetails?: { exception?: { description?: string }; text?: string };
+    }>(targetId, "Runtime.callFunctionOn", { objectId, functionDeclaration, returnByValue });
+    if (call.exceptionDetails) {
+      throw new Error(call.exceptionDetails.exception?.description || call.exceptionDetails.text || "Runtime.callFunctionOn failed");
+    }
+    return call.result;
+  };
+
+  const target = await resolveUploadTarget(cdp, targetId, tab, request);
+  const found = await callOn<string>(target.objectId, FIND_FILE_INPUT_FN, false);
+  if (found.type === "string" || !found.objectId) {
+    throw new Error(
+      `${target.label} (${found.value ?? "element"}) is not a file input and contains none. ` +
+        "Custom upload widgets often hide the real <input type=file>; target it with a selector such as \"input[type=file]\".",
+    );
+  }
+  const inputId = found.objectId;
+  const info = (await callOn<FileInputInfo>(inputId, ARM_FILE_INPUT_FN, true)).value!;
+  const files = validateUploadFiles(request.files, info, { force: request.force });
+  await cdp.sessionCommand(targetId, "DOM.setFileInputFiles", { files, objectId: inputId });
+  const done = (await callOn<{ files: Array<{ name: string; size: number; type: string }>; events: { input: boolean; change: boolean } }>(
+    inputId,
+    FINISH_FILE_INPUT_FN,
+    true,
+  )).value!;
+  return { files, uploadedFiles: done.files, uploadEvents: done.events };
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,6 +1135,24 @@ export async function dispatchRequest(
         selectedValue: request.value,
         ...(labelResult?.result?.value != null ? { selectedLabel: labelResult.result.value } : {}),
       });
+    }
+
+    case "upload": {
+      if (!request.ref && !request.selector) return fail(request.id, "Missing ref or selector parameter");
+      const seq = tab.recordAction();
+      let result: Awaited<ReturnType<typeof uploadFiles>>;
+      try {
+        result = await withTimeout(
+          uploadFiles(cdp, target.id, tab, request),
+          UPLOAD_TIMEOUT_MS,
+          `Page did not respond to file upload within ${UPLOAD_TIMEOUT_MS / 1000}s`,
+        );
+      } catch (error) {
+        // Return a plain error response instead of an HTTP 400 wrapper.
+        return fail(request.id, error);
+      }
+      const ref = request.ref ? tab.refs[request.ref] : undefined;
+      return ok(request.id, { tab: shortId, seq, role: ref?.role, name: ref?.name, ...result });
     }
 
     case "get": {
