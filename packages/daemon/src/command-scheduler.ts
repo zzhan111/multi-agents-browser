@@ -38,6 +38,14 @@ export interface SchedulerStats {
   inFlightBySession: Record<string, number>;
 }
 
+/** Rejection from {@link CommandScheduler.acquire} when the wait exceeded its budget. */
+export class SchedulerTimeoutError extends Error {
+  constructor(readonly waitedMs: number, readonly stats: SchedulerStats) {
+    super(`Timed out after ${Math.round(waitedMs / 1000)}s waiting for a command slot`);
+    this.name = "SchedulerTimeoutError";
+  }
+}
+
 export class CommandScheduler {
   private readonly globalLimit: number;
   private readonly perSessionLimit: number;
@@ -55,10 +63,15 @@ export class CommandScheduler {
    * capacity, otherwise once this caller is admitted. The returned release
    * function MUST be called exactly once when the command finishes (extra calls
    * are ignored).
+   *
+   * With `timeoutMs`, a caller still waiting after that long is removed from
+   * the queue and the promise rejects with {@link SchedulerTimeoutError}.
    */
-  acquire(sessionId: string): Promise<() => void> {
-    return new Promise<() => void>((resolve) => {
+  acquire(sessionId: string, timeoutMs?: number): Promise<() => void> {
+    return new Promise<() => void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const admit = () => {
+        if (timer) clearTimeout(timer);
         this.take(sessionId);
         let released = false;
         resolve(() => {
@@ -69,8 +82,17 @@ export class CommandScheduler {
       };
       if (this.canAdmit(sessionId)) {
         admit();
-      } else {
-        this.waiters.push({ sessionId, admit });
+        return;
+      }
+      const waiter: Waiter = { sessionId, admit };
+      this.waiters.push(waiter);
+      if (timeoutMs !== undefined && timeoutMs >= 0) {
+        timer = setTimeout(() => {
+          const idx = this.waiters.indexOf(waiter);
+          if (idx === -1) return;
+          this.waiters.splice(idx, 1);
+          reject(new SchedulerTimeoutError(timeoutMs, this.stats()));
+        }, timeoutMs);
       }
     });
   }

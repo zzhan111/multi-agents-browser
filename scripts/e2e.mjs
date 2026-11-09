@@ -26,6 +26,19 @@ const site = createServer((req, res) => {
   } else if (req.url === "/whoami") {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ cookie: req.headers.cookie ?? "" }));
+  } else if (req.url === "/upload") {
+    res.setHeader("content-type", "text/html");
+    res.end(`<title>upload</title>
+<input type="file" id="one" accept=".txt" aria-label="Doc">
+<label id="lbl">Attach<input type="file" id="many" multiple style="display:none"></label>
+<div id="custom"><button>Choose</button><input type="file" id="hidden" hidden></div>
+<p id="names"></p><button id="plain">Plain</button>
+<script>
+  window.ev = { input: 0, change: 0 };
+  one.addEventListener("input", () => window.ev.input++);
+  one.addEventListener("change", () => window.ev.change++);
+  hidden.addEventListener("change", () => { names.textContent = [...hidden.files].map((f) => f.name).join(","); hidden.value = ""; });
+</script>`);
   } else {
     res.setHeader("content-type", "text/html");
     res.end(`<title>form</title><input id="name" aria-label="Name"><button id="go" onclick="window.clicks = (window.clicks || 0) + 1; document.querySelector('#out').textContent = document.querySelector('#name').value">Go</button><p id="out"></p><div style="position:relative"><button id="under" onclick="window.underClicks = (window.underClicks || 0) + 1">Under</button><div style="position:absolute;inset:0"></div></div>`);
@@ -170,6 +183,35 @@ try {
     const net = await cli("agent-a", ["network", "requests", "whoami", "--with-body", "--tab", tabA]);
     const hit = net.data.networkRequests.find((r) => r.url.endsWith("/whoami"));
     assert.match(hit.responseBody, /sid=agent-ok/);
+  });
+
+  await check("upload: ref/selector/label targets, events, custom widgets, readable errors", async () => {
+    const txt = join(home, "note.txt");
+    const png = join(home, "pic.png");
+    writeFileSync(txt, "hello upload");
+    writeFileSync(png, "png");
+    const tab = (await cli("agent-a", ["open", `${origin}/upload`])).data.tab;
+    await sleep(500);
+    const snap = await cli("agent-a", ["snapshot", "-i", "--tab", tab]);
+    assert.match(snap.data.snapshotData.snapshot, /\[file accept="\.txt"\]/);
+    const one = Object.entries(snap.data.snapshotData.refs).find(([, r]) => r.name === "Doc")?.[0];
+    const up = await cli("agent-a", ["upload", `@${one}`, txt, "--tab", tab]);
+    assert.deepEqual(up.data.uploadedFiles, [{ name: "note.txt", size: 12, type: "text/plain" }]);
+    assert.deepEqual(up.data.uploadEvents, { input: true, change: true });
+    assert.equal((await cli("agent-a", ["eval", "JSON.stringify(window.ev)", "--tab", tab])).data.result, '{"input":1,"change":1}', "events fire exactly once");
+    const many = await cli("agent-a", ["upload", "#lbl", txt, png, "--tab", tab]);
+    assert.deepEqual(many.data.uploadedFiles.map((f) => f.name), ["note.txt", "pic.png"]);
+    const custom = await cli("agent-a", ["upload", "#custom", png, "--tab", tab]);
+    assert.equal(custom.data.uploadedFiles.length, 0, "widget cleared the input after reading it");
+    assert.equal((await cli("agent-a", ["eval", "names.textContent", "--tab", tab])).data.result, "pic.png");
+    const err = async (args) => (await cli("agent-a", ["upload", ...args, "--tab", tab], { allowFailure: true })).error;
+    assert.match(await err(["#one", join(home, "missing.txt")]), /File not found/);
+    assert.match(await err(["#one", png]), /does not match the input's accept="\.txt"/);
+    assert.equal((await cli("agent-a", ["upload", "#one", png, "--force", "--tab", tab])).data.uploadedFiles[0].name, "pic.png");
+    assert.match(await err(["#one", txt, png]), /does not accept multiple files/);
+    assert.match(await err(["#plain", txt]), /is not a file input/);
+    assert.match(await err(["#nope", txt]), /No element matches selector/);
+    await cli("agent-a", ["tab", "close", "--id", tab]);
   });
 
   await check("persistence: cookies survive a daemon restart and a browser restart", async () => {

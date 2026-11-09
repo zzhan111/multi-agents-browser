@@ -145,10 +145,27 @@ ma-browser type @3 "text"       # 追加输入（不清空）
 ma-browser check @7             # 勾选复选框
 ma-browser uncheck @7           # 取消勾选
 ma-browser select @4 "option"   # 下拉选择
+ma-browser upload @6 "C:\Users\me\report.pdf"        # 上传文件（ref 指向 file input / 其 label / 外层容器）
+ma-browser upload "input[type=file]" ./a.png ./b.png  # 隐藏 input 没有 ref 时用 CSS 选择器；多文件需 input 带 multiple
 ma-browser press Enter          # 按键
 ma-browser press Control+a      # 组合键
 ma-browser scroll down          # 向下滚动（默认 300px）
 ma-browser scroll up 500        # 向上滚动 500px
+```
+
+#### 文件上传
+
+`upload` 走 CDP `DOM.setFileInputFiles`，不会弹系统文件框；Chrome 会触发 input/change（没触发时 ma-browser 补发）。不要再手写 CDP。
+
+- snapshot 里 file input 带 `[file accept=".pdf" multiple]` 标记；很多站点把真正的 `<input type=file>` 隐藏，没有 ref，这时用选择器 `"input[type=file]"` 或点上传按钮所在容器的 ref。
+- 相对路径按当前目录解析；Windows 绝对路径（`C:\...`）直接可用。
+- 失败会给出可读错误：找不到元素 / 不是 file input、文件不存在、不匹配 `accept`（`--force` 跳过）、单文件 input 传多个文件、页面 15s 无响应。
+- `--json` 返回 `uploadedFiles`（input 当前持有的文件）和 `uploadEvents`。**自定义上传组件（React/Vue 的 Upload 等）常在 change 后读走文件并清空 input，此时 `uploadedFiles` 为空但页面已显示文件**——以 snapshot/screenshot 看到的 UI 为准，不要据此判定失败。
+
+```bash
+ma-browser snapshot -i                         # button [ref=6] "Doc" [file accept=".pdf"]
+ma-browser upload @6 /home/me/report.pdf --json --jq '.uploadedFiles'
+ma-browser snapshot -i -s upload               # 确认页面显示了文件名
 ```
 
 ### 获取信息

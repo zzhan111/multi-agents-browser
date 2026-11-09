@@ -1,0 +1,26 @@
+$ ma-browser snapshot -i --tab 7b55
+标题: upload
+URL: http://127.0.0.1:36869/upload.html
+
+button [ref=0] "Doc" [file accept=".txt"]
+button [ref=1] "Plain"
+
+$ ma-browser upload #doc <tmp>/files/note.txt --tab 7b55
+已上传 1 个文件到 #doc
+  note.txt (12 bytes)
+
+$ ma-browser eval document.querySelector('#doc').files[0].name --tab 7b55
+note.txt
+
+$ ma-browser upload #doc <tmp>/files/pic.png --tab 7b55
+错误: File <tmp>/files/pic.png does not match the input's accept=".txt" (use --force to upload anyway)
+
+$ ma-browser upload #doc <tmp>/files/missing.txt --tab 7b55
+错误: File not found: <tmp>/files/missing.txt
+
+$ ma-browser upload #plain <tmp>/files/note.txt --tab 7b55
+错误: "#plain" (<button>) is not a file input and contains none. Custom upload widgets often hide the real <input type=file>; target it with a selector such as "input[type=file]".
+
+$ ma-browser upload #doc <tmp>/files/note.txt <tmp>/files/pic.png --tab 7b55
+错误: File input does not accept multiple files (got 2); add the multiple attribute or upload one file
+

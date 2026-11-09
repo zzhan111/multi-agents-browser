@@ -67,9 +67,11 @@ After building from source, run this from the repository directory:
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PWD\scripts\windows-tray.ps1`"")
 ```
 
-The tray starts and monitors the daemon, launching new managed browsers headlessly with the existing profile. Right-click the tray icon to switch between headed and headless modes; the selected mode persists across sign-ins. Switching restarts the managed browser and restores its session, but unsaved page content may be lost. Use headed mode to sign in interactively. The menu also opens logs or exits the tray while leaving the daemon running. Outside the tray, set `MA_BROWSER_HEADLESS=1` to launch a managed browser headlessly; an already running browser is not restarted.
+The tray starts and monitors the daemon, launching new managed browsers headlessly with the existing profile. Left-click the tray icon to show the managed browser: the tray always asks first, then brings a headed window to the foreground, or — in headless mode — switches to headed (restarting the browser) and fronts the new window; choosing No changes nothing, and failures appear as balloon tips. Right-click the tray icon to switch between headed and headless modes; the selected mode persists across sign-ins. Switching restarts the managed browser and restores its session, but unsaved page content may be lost. Use headed mode to sign in interactively. The menu also opens logs or exits the tray while leaving the daemon running. Outside the tray, set `MA_BROWSER_HEADLESS=1` to launch a managed browser headlessly; an already running browser is not restarted.
 
 Agents can call `ma-browser mode status|headed|headless --json` or the MCP `browser_mode` tool with the same `mode` values. Status is read-only; a switch returns after the browser reconnects. Previous tab IDs become invalid. When the tray owns the daemon, set `MA_BROWSER_CONNECT_ONLY=1` in the MCP server environment to prevent it from spawning another daemon during a switch.
+
+To verify the left-click flow by hand: with the tray in headless mode, left-click the icon, choose No and confirm `ma-browser mode status --json` still reports `headless`; then start `.\scripts\check-windows-tray.ps1 -Mode headed -ExpectForeground -DelaySeconds 60`, left-click again and choose Yes; the check passes once the window is in the foreground. Cover the window with another app and repeat with `-DelaySeconds 10`.
 
 To start the tray at Windows sign-in, run this from the repository directory:
 
@@ -155,11 +157,14 @@ ma-browser open https://example.com
 ma-browser snapshot -i                # accessibility tree
 ma-browser click @3                   # click element
 ma-browser fill @5 "hello"            # fill input
+ma-browser upload @6 "C:\Users\me\a.pdf" # set files on <input type=file> (ref or CSS selector)
 ma-browser eval "document.title"      # run JS
 ma-browser fetch URL --json           # authenticated fetch
 ma-browser network requests --with-body --json  # capture traffic
 ma-browser screenshot                 # take screenshot
 ```
+
+`upload` uses CDP `DOM.setFileInputFiles` and fires input/change; target the file input's ref, its label/wrapper, or a selector such as `"input[type=file]"` for hidden inputs. Paths may be relative or absolute (including Windows `C:\...`); multiple files need a `multiple` input, and an `accept` mismatch is rejected unless `--force`. Custom upload widgets often read the file on change and clear the input, so `uploadedFiles` can be empty while the page UI shows the file — check with `snapshot`.
 
 All commands support `--json` output, `--jq <expr>` for inline filtering, and `--tab <id>` for concurrent multi-tab operations.
 
@@ -179,6 +184,19 @@ The daemon binds to `127.0.0.1:19824` by default. You can customize the host wit
 ma-browser daemon --host 127.0.0.1    # IPv4 only (fix macOS IPv6 issues)
 ma-browser daemon --host 0.0.0.0      # listen on all interfaces (for Tailscale / ZeroTier remote access)
 ```
+
+### Command timeouts and health
+
+Each action has its own budget: 30 s by default, 60 s for `screenshot` / `eval` / `snapshot` / `open` / `refresh` / `back` / `forward` / `site update`, 120 s for `site run`, and `wait <ms>` + 5 s. The caller's environment wins (the CLI/MCP sends its budget with each command):
+
+```bash
+BB_COMMAND_TIMEOUT_SCREENSHOT_MS=120000 ma-browser screenshot   # one action
+BB_COMMAND_TIMEOUT_MS=90000 ma-browser eval "..."                # floor for every action
+```
+
+A timed-out command returns an error tagged with where it stalled: `[cdp]` (the browser never answered a CDP call, with the method), `[dispatch]` (daemon-side work, e.g. queued behind an earlier stuck command on the same tab), `[queue]` (no free command slot) or `[cdp_connect]` (the browser never connected). If the daemon sends no response at all, the client probes `/status` to tell a stuck command from an unresponsive daemon.
+
+`ma-browser status` (and `/status` → `health`) reports `ok` / `degraded` / `stalled` / `disconnected`, with the last command/success time, consecutive timeouts, timed-out commands still running, in-flight commands, pending CDP calls, event-loop lag and a recovery hint. A daemon that "can list tabs but can't screenshot" shows up as `degraded`/`stalled` instead of looking healthy.
 
 ## Architecture
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { CommandTimeoutInfo } from "./command-timeouts.js";
 
 /**
  * ma-browser 通信协议 — CLI/MCP ↔ Daemon ↔ Chrome CDP
@@ -15,6 +16,7 @@ export type ActionType =
   | "check"
   | "uncheck"
   | "select"
+  | "upload"
   | "get"
   | "screenshot"
   | "close"
@@ -118,6 +120,8 @@ export interface Request {
   waitType?: string;
   /** 等待毫秒数（wait 命令使用） */
   ms?: number;
+  /** 命令执行预算（毫秒）。客户端按 action 计算后传入，daemon 优先采用（见 command-timeouts.ts） */
+  timeoutMs?: number;
   /** 增量查询起点（observation 命令使用，支持 seq 数值或 "last_action"） */
   since?: number | "last_action";
   /** HTTP 方法过滤（network requests 使用） */
@@ -134,6 +138,10 @@ export interface Request {
   progress?: string;
   /** 是否在响应中附带 base64 data URL（screenshot 命令使用） */
   includeBase64?: boolean;
+  /** 本地文件绝对路径（upload 命令使用） */
+  files?: string[];
+  /** 跳过 accept 校验（upload 命令使用） */
+  force?: boolean;
   /** 站点 adapter 名称（site_info / site_run 使用） */
   name?: string;
   /** 站点 adapter 位置参数（site_run 使用） */
@@ -310,6 +318,12 @@ export interface ResponseData {
   wasAlreadyChecked?: boolean;
   /** uncheck 命令：元素之前是否已取消勾选 */
   wasAlreadyUnchecked?: boolean;
+  /** upload 命令：实际设置的本地文件绝对路径 */
+  files?: string[];
+  /** upload 命令：input 当前持有的文件（自定义组件可能读完即清空，长度为 0） */
+  uploadedFiles?: Array<{ name: string; size: number; type: string }>;
+  /** upload 命令：页面是否收到 input/change 事件 */
+  uploadEvents?: { input: boolean; change: boolean };
   /** 截图路径（screenshot 操作返回，daemon 实际以 `path` 键返回） */
   path?: string;
   /** 截图 data URL（screenshot 操作返回） */
@@ -377,6 +391,8 @@ export interface Response {
   data?: ResponseData;
   /** 失败时的错误信息 */
   error?: string;
+  /** 超时诊断（命令超时时返回，区分 cdp_connect / queue / cdp / dispatch） */
+  timeout?: CommandTimeoutInfo;
 }
 
 /** Daemon 状态 */

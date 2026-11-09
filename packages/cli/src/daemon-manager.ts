@@ -9,8 +9,11 @@ import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import type { Request, Response } from "@ma-browser/shared";
 import {
-  COMMAND_TIMEOUT,
   DAEMON_JSON,
+  DaemonTimeoutError,
+  clientCommandTimeoutMs,
+  commandTimeoutMs,
+  describeDaemonTimeout,
   type DaemonInfo,
   readDaemonJson,
   isProcessAlive,
@@ -159,7 +162,18 @@ export async function daemonCommand(request: Request): Promise<Response> {
   if (!cachedInfo) {
     throw new Error("No daemon.json found. Is the daemon running?");
   }
-  return httpJson<Response>("POST", "/command", cachedInfo, request, COMMAND_TIMEOUT);
+  // Send our per-action budget so the daemon enforces the caller's policy, and
+  // wait slightly longer than it so its structured 504 timeout arrives first.
+  const body: Request = { ...request, timeoutMs: request.timeoutMs ?? commandTimeoutMs(request) };
+  const clientTimeout = clientCommandTimeoutMs(body);
+  try {
+    return await httpJson<Response>("POST", "/command", cachedInfo, body, clientTimeout, { resolveStatuses: [504] });
+  } catch (error) {
+    if (error instanceof DaemonTimeoutError) {
+      throw new Error(await describeDaemonTimeout(cachedInfo, request.action, clientTimeout));
+    }
+    throw error;
+  }
 }
 
 /**
