@@ -1,6 +1,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { COMMAND_TIMEOUT, COMMANDS, generateId, readDaemonJson, DAEMON_DIR, browserMode } from "@ma-browser/shared";
+import {
+  COMMANDS,
+  generateId,
+  readDaemonJson,
+  DAEMON_DIR,
+  browserMode,
+  clientCommandTimeoutMs,
+  commandTimeoutMs,
+  describeDaemonTimeout,
+} from "@ma-browser/shared";
 import type { CommandDef, Request, Response, DaemonInfo } from "@ma-browser/shared";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -159,13 +168,17 @@ async function sendCommand(request: Request): Promise<Response> {
     if (!info) {
       return { id: request.id, success: false, error: "No daemon.json found. Is the daemon running?" };
     }
+    // Per-action budget (sent so the daemon enforces it); we wait budget +
+    // grace so the daemon's structured timeout response arrives first.
+    const body: Request = { ...request, timeoutMs: request.timeoutMs ?? commandTimeoutMs(request) };
+    const clientTimeout = clientCommandTimeoutMs(body);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), COMMAND_TIMEOUT);
+    const timeoutId = setTimeout(() => controller.abort(), clientTimeout);
     try {
       const response = await fetch(`${daemonBaseUrl(info)}/command`, {
         method: "POST",
         headers: daemonHeaders(info),
-        body: JSON.stringify(request),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -175,20 +188,15 @@ async function sendCommand(request: Request): Promise<Response> {
       return (await response.json()) as Response;
     } catch (err) {
       clearTimeout(timeoutId);
-      // Our AbortController fired: the daemon accepted the connection but did
-      // not respond within the timeout. The daemon is UP — the target tab is
-      // almost certainly wedged (an open JavaScript dialog blocking the
-      // renderer, or a detached/crashed page). Restarting the daemon does NOT
-      // help and harms other agents sharing it, so never suggest that.
+      // Our AbortController fired: the daemon accepted the connection but sent
+      // nothing within budget + grace (its own structured timeout should have
+      // arrived first). Probe /status to tell a wedged tab (daemon healthy —
+      // restarting it would only hurt other agents) from an unresponsive daemon.
       if ((err as { name?: string })?.name === "AbortError") {
         return {
           id: request.id,
           success: false,
-          error:
-            `Command timed out after ${COMMAND_TIMEOUT / 1000}s. The daemon is running but the target tab did not respond — ` +
-            `it is likely wedged by an open JavaScript dialog or a detached/crashed page. ` +
-            `Do NOT restart the daemon. Try: browser_dialog to dismiss a dialog, browser_tab_select another tab, ` +
-            `or browser_close this tab and reopen it.`,
+          error: await describeDaemonTimeout(info, request.action, clientTimeout),
         };
       }
       // Connection-level failure (refused / network). The cached daemon address
@@ -331,7 +339,8 @@ async function runSiteCli(args: string[]): Promise<unknown> {
       [cliPath, "site", ...args],
       {
         encoding: "utf8",
-        timeout: COMMAND_TIMEOUT,
+        // The CLI subprocess waits up to the site_run client budget itself.
+        timeout: clientCommandTimeoutMs({ action: "site_run" }) + 5_000,
         maxBuffer: 10 * 1024 * 1024,
       },
       (error, stdout, stderr) => {
