@@ -1,0 +1,39 @@
+$ ma-browser status
+Daemon running: yes
+CDP connected:  yes
+Uptime:         6s
+Global seq:     8
+Health:         ok
+Last command:   0s ago; last success: 1s ago
+Last error:     upload: File input does not accept multiple files (got 2); add the multiple attribute or upload one file
+
+Tabs (2):
+  22c0  net:0 console:0 err:0 seq:1
+  7b55  net:1 console:0 err:0 seq:8
+
+💡 停止: ma-browser daemon stop
+
+$ BB_COMMAND_TIMEOUT_EVAL_MS=2000 ma-browser eval 'new Promise(() => {})'
+错误: Command "eval" timed out after 2s [cdp]: browser did not answer Runtime.evaluate for 2s. The browser stopped answering CDP calls. Dismiss any open dialog (`ma-browser dialog accept`) or close the wedged tab (`ma-browser tab close --id <tab>`); if it persists, restart the browser (`ma-browser mode headed` on the Windows tray). Raise the budget with BB_COMMAND_TIMEOUT_EVAL_MS if the command is just slow.
+
+$ BB_COMMAND_TIMEOUT_WAIT_MS=1000 ma-browser wait 3000
+错误: Command "wait" timed out after 1s [dispatch]: daemon-side work did not finish — likely queued behind 1 earlier timed-out command(s) still running on the same tab. Commands are timing out inside the daemon. Close the target tab and retry; if it persists, `ma-browser daemon shutdown` to restart the daemon. Raise the budget with BB_COMMAND_TIMEOUT_WAIT_MS if the command is just slow.
+
+$ ma-browser status
+Daemon running: yes
+CDP connected:  yes
+Uptime:         9s
+Global seq:     9
+Health:         degraded (2 consecutive command timeout(s); 2 timed-out command(s) still running)
+Last command:   1s ago; last success: 4s ago
+Timeouts:       2 consecutive
+Last error:     wait [dispatch]: Command "wait" timed out after 1s [dispatch]: daemon-side work did not finish — likely queued behind 1 earlier timed-out command(s) still running on the same tab
+  in flight:    eval 3s (timed out, still running)
+  in flight:    wait 1s (timed out, still running)
+
+Tabs (2):
+  22c0  net:0 console:0 err:0 seq:1
+  7b55  net:1 console:0 err:0 seq:9
+
+⚠️ Commands are timing out inside the daemon. Close the target tab and retry; if it persists, `ma-browser daemon shutdown` to restart the daemon.
+

@@ -1,0 +1,50 @@
+# Integration branch auto/review-integrate-30-32-r1 = main + #34 + #36 + #38 + upload-timeout fix
+$ pnpm build                                  -> exit 0
+$ pnpm lint                                   -> exit 0
+$ pnpm turbo run test --force --continue
+  @ma-browser/shared:test: ℹ tests 31
+  @ma-browser/shared:test: ℹ pass 30
+  @ma-browser/shared:test: ℹ fail 0
+  @ma-browser/shared:test: ℹ skipped 1
+  @ma-browser/mcp:test: ℹ tests 1
+  @ma-browser/mcp:test: ℹ pass 1
+  @ma-browser/mcp:test: ℹ fail 0
+  @ma-browser/mcp:test: ℹ skipped 0
+  @ma-browser/cli:test:   ✖ daemon starts successfully when CDP port is reachable (8164.160812ms)
+  @ma-browser/cli:test: ℹ tests 17
+  @ma-browser/cli:test: ℹ pass 16
+  @ma-browser/cli:test: ℹ fail 1
+  @ma-browser/cli:test: ℹ skipped 0
+  @ma-browser/cli:test: ✖ daemon starts successfully when CDP port is reachable (8164.160812ms)
+  @ma-browser/daemon:test: ℹ tests 190
+  @ma-browser/daemon:test: ℹ pass 177
+  @ma-browser/daemon:test: ℹ fail 0
+  @ma-browser/daemon:test: ℹ skipped 13
+  Failed:    @ma-browser/cli#test
+  (cli failure = pre-existing daemon-startup test, see index.md)
+
+$ node scripts/e2e.mjs                        -> exit 0
+  PASS browser control: open, snapshot, fill, click, eval (2474ms)
+  PASS snapshot: no overlay by default, visible numbered boxes with --highlight (1211ms)
+  PASS speed: click on a background tab returns within 5s (was ~10s) (659ms)
+  PASS click: a covered element is still clicked exactly once (725ms)
+  PASS sessions: each agent keeps its own current tab (1241ms)
+  PASS leases: an exclusive claim blocks other agents until released (1095ms)
+  PASS tab refs: a stale short ID errors instead of hitting another tab (502ms)
+  PASS adapters: site run executes in the page with the login cookie (420ms)
+  PASS network: captured requests keep their response bodies (218ms)
+  PASS upload: ref/selector/label targets, events, custom widgets, readable errors (3821ms)
+  PASS persistence: cookies survive a daemon restart and a browser restart (3501ms)
+  PASS generated adapters run immediately after generation and auto-heal a domain move (2329ms)
+
+$ npx tsx --test src/__tests__/command-timeouts.test.ts   (packages/daemon)
+    ✔ a healthy command succeeds and health is ok (64.462345ms)
+    ✔ a slow command within its budget is not killed (1213.271397ms)
+    ✔ a CDP call the browser never answers times out as kind=cdp with the method (1032.319607ms)
+    ✔ daemon-side stalls time out as kind=dispatch (1013.233662ms)
+    ✔ repeated timeouts mark the daemon stalled; a success resets the streak (1027.192517ms)
+  ✔ command timeouts + health (issue #30) (4461.992625ms)
+    ✔ a hung DOM.setFileInputFiles is a kind=cdp timeout counted in health (16013.011243ms)
+  ✔ upload under the per-action budget (issues #30 + #32) (16038.190842ms)
+  ℹ pass 6
+  ℹ fail 0

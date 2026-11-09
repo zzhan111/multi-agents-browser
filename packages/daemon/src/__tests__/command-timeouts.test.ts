@@ -9,6 +9,9 @@ import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { CdpConnection } from "../cdp-connection.js";
 import { HttpServer } from "../http-server.js";
@@ -16,7 +19,11 @@ import { TabStateManager } from "../tab-state.js";
 
 type Json = Record<string, unknown>;
 
-/** Fake browser: answers everything, except Runtime.evaluate("hang") never and "slow" after 1.2s. */
+/**
+ * Fake browser: answers everything, except Runtime.evaluate("hang") never and
+ * "slow" after 1.2s. A `document.querySelector` resolves to a single-file
+ * <input type=file> whose DOM.setFileInputFiles never answers (upload, #32).
+ */
 function startFakeCdp(): Promise<{ server: Server; port: number }> {
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
@@ -38,12 +45,21 @@ function startFakeCdp(): Promise<{ server: Server; port: number }> {
           case "Runtime.evaluate": {
             const expr = (msg.params as Json).expression;
             if (expr === "hang") return;
+            if (typeof expr === "string" && expr.startsWith("document.querySelector(")) {
+              return reply({ result: { type: "object", subtype: "node", objectId: "file-input" } });
+            }
             if (expr === "slow") {
               setTimeout(() => reply({ result: { type: "string", value: "slow-ok" } }), 1200);
               return;
             }
             return reply({ result: { type: "string", value: "ok" } });
           }
+          case "Runtime.callFunctionOn":
+            return (msg.params as Json).returnByValue
+              ? reply({ result: { type: "object", value: { multiple: false, accept: "", disabled: false } } })
+              : reply({ result: { type: "object", subtype: "node", objectId: "file-input" } });
+          case "DOM.setFileInputFiles":
+            return;
           default:
             return reply({});
         }
@@ -158,5 +174,53 @@ describe("command timeouts + health (issue #30)", () => {
     assert.equal(health.consecutiveTimeouts, 0);
     // The hung evals are still running in the background → still degraded.
     assert.equal(health.state, "degraded");
+  });
+});
+
+// Separate daemon: the hung evals above leave that tab's serial queue blocked.
+describe("upload under the per-action budget (issues #30 + #32)", () => {
+  let fake: { server: Server; port: number };
+  let cdp: CdpConnection;
+  let http: HttpServer;
+  let port: number;
+  let dir: string;
+
+  before(async () => {
+    dir = mkdtempSync(join(tmpdir(), "ma-upload-timeout-"));
+    fake = await startFakeCdp();
+    cdp = new CdpConnection("127.0.0.1", fake.port, new TabStateManager());
+    await cdp.connect();
+    port = await freePort();
+    http = new HttpServer({ host: "127.0.0.1", port, cdp });
+    await http.start();
+  });
+
+  after(async () => {
+    await http.stop();
+    cdp.disconnect();
+    fake.server.closeAllConnections?.();
+    await new Promise((r) => fake.server.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Budget > 15 s on purpose: upload used to cut itself off at 15 s with a
+  // plain error, hiding the hang from the classifier and from health.
+  it("a hung DOM.setFileInputFiles is a kind=cdp timeout counted in health", { timeout: 30_000 }, async () => {
+    const file = join(dir, "a.txt");
+    writeFileSync(file, "x");
+    const res = await fetch(`http://127.0.0.1:${port}/command`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "u1", action: "upload", selector: "input[type=file]", files: [file], timeoutMs: 16_000 }),
+    });
+    const json = (await res.json()) as Json;
+    assert.equal(res.status, 504);
+    assert.equal((json.timeout as Json).kind, "cdp");
+    assert.equal((json.timeout as Json).cdpMethod, "DOM.setFileInputFiles");
+    assert.match(String(json.error), /BB_COMMAND_TIMEOUT_UPLOAD_MS/);
+
+    const health = ((await (await fetch(`http://127.0.0.1:${port}/status`)).json()) as Json).health as Json;
+    assert.equal(health.consecutiveTimeouts, 1);
+    assert.equal((health.timeouts as Json).cdp, 1);
   });
 });

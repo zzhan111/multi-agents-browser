@@ -369,8 +369,6 @@ async function parseRef(cdp: CdpConnection, targetId: string, tab: TabState, ref
 // File upload
 // ---------------------------------------------------------------------------
 
-const UPLOAD_TIMEOUT_MS = 15_000;
-
 // Runs on the targeted element; returns the file input to use, or a string
 // describing why there is none.
 const FIND_FILE_INPUT_FN = `function() {
@@ -403,14 +401,6 @@ const FINISH_FILE_INPUT_FN = `function() {
   const files = Array.from(this.files || []).map((f) => ({ name: f.name, size: f.size, type: f.type }));
   return { files, events: fired };
 }`;
-
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
 
 async function resolveUploadTarget(
   cdp: CdpConnection,
@@ -1141,12 +1131,10 @@ export async function dispatchRequest(
       if (!request.ref && !request.selector) return fail(request.id, "Missing ref or selector parameter");
       const seq = tab.recordAction();
       let result: Awaited<ReturnType<typeof uploadFiles>>;
+      // No private timeout: the per-action budget in http-server classifies a
+      // hung DOM.setFileInputFiles as kind=cdp and feeds /status health.
       try {
-        result = await withTimeout(
-          uploadFiles(cdp, target.id, tab, request),
-          UPLOAD_TIMEOUT_MS,
-          `Page did not respond to file upload within ${UPLOAD_TIMEOUT_MS / 1000}s`,
-        );
+        result = await uploadFiles(cdp, target.id, tab, request);
       } catch (error) {
         // Return a plain error response instead of an HTTP 400 wrapper.
         return fail(request.id, error);
