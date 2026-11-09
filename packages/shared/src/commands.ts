@@ -194,6 +194,19 @@ export const COMMANDS: CommandDef[] = [
     }),
   },
   {
+    name: "upload",
+    action: "upload",
+    description: "Set local files on an <input type=file> (CDP DOM.setFileInputFiles) and fire input/change. Target by snapshot ref or CSS selector; a label/wrapper containing the input also works. Paths must be absolute.",
+    category: "interact",
+    args: z.object({
+      ref: z.string().optional().describe("Element ref from snapshot (the file input, its label, or a wrapper containing it)"),
+      selector: z.string().optional().describe("CSS selector, e.g. input[type=file] (use when the input is hidden and has no ref)"),
+      files: z.array(z.string()).min(1).describe("Absolute local file paths, e.g. C:\\Users\\me\\a.pdf or /home/me/a.pdf"),
+      force: z.boolean().optional().describe("Skip the accept-attribute check"),
+      tab: z.string().optional().describe("Tab short ID"),
+    }),
+  },
+  {
     name: "press",
     action: "press",
     description: "Press a keyboard key (e.g. Enter, Tab, Control+a)",

@@ -157,11 +157,14 @@ ma-browser open https://example.com
 ma-browser snapshot -i                # 可访问性树
 ma-browser click @3                   # 点击元素
 ma-browser fill @5 "hello"            # 填写输入框
+ma-browser upload @6 "C:\Users\me\a.pdf" # 给 <input type=file> 设置文件（ref 或 CSS 选择器）
 ma-browser eval "document.title"      # 执行 JS
 ma-browser fetch URL --json           # 带登录态的 fetch
 ma-browser network requests --with-body --json  # 抓包
 ma-browser screenshot                 # 截图
 ```
+
+`upload` 走 CDP `DOM.setFileInputFiles` 并触发 input/change；目标可以是 file input 的 ref、它的 label/外层容器，或隐藏 input 用 `"input[type=file]"` 选择器。路径可相对或绝对（含 Windows `C:\...`）；多文件要求 input 带 `multiple`，不匹配 `accept` 会报错（`--force` 跳过）。自定义上传组件常在 change 后读走文件并清空 input，`uploadedFiles` 可能为空而页面已显示文件——用 `snapshot` 确认。
 
 所有命令支持 `--json` 输出、`--jq <expr>` 内联过滤、和 `--tab <id>` 多标签页并发操作。
 
