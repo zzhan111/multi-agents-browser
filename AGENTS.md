@@ -2,6 +2,8 @@
 
 经验见 [learnings.md](learnings.md)
 
+经验见 [docs/autodev-learnings.md](docs/autodev-learnings.md)
+
 ## 架构
 
 ```

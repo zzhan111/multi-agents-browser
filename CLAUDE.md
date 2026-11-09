@@ -2,6 +2,8 @@
 
 经验见 [learnings.md](learnings.md)
 
+经验见 [docs/autodev-learnings.md](docs/autodev-learnings.md)
+
 ## 项目改名 → MultiAgentsBrowser / `ma-browser`（2026-06-10）
 
 本项目由 **bb-browser**（fork 自 epiral/bb-browser）改名为 **MultiAgentsBrowser**，CLI/MCP 名 **`ma-browser`**，迁到独立仓库 **github.com/zzhan111/multi-agents-browser**（保留 epiral credit，见 README/LICENSE）。本地工作目录仍是 `Z:\Apps\bb-browser`。
