@@ -19,3 +19,7 @@
 10. Generated-package adapters must open new tabs at the manifest base URL, not https://<domain>, so http and port fixtures work.
 
 11. Auto-heal only on adapter failures (in-page exception or {error} result); bad args and lease conflicts are not site changes.
+
+12. Some Chromium launchers rewrite /proc/<pid>/cmdline into one space-joined string; split args on " --" too, not only on NUL.
+
+13. Keep tests off CDP auto-discovery: the dev machine's real managed browser listens on 19825. Pass explicit ports, or call discoverCdpEndpoints({ ports, processes: false }) against fake servers.

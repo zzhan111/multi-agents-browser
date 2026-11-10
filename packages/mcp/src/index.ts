@@ -384,6 +384,11 @@ Tab management:
 - Pass tab short ID to any tool to target a specific tab
 - Omit tab to target the active tab
 
+Multiple browsers:
+- browser_cdp_list: find browsers started with --remote-debugging-port (user Chrome, sandboxes) and see which are attached
+- browser_cdp_attach: take one over (browser: "9222") or all of them (all: true) — tabs keep working in parallel
+- tab_list shows each tab's browser; pass browser to open/tab_new/tab_list/site_run to pick one. Tab IDs are unique across browsers
+
 Site adapters (pre-built commands for popular sites):
 - site_list/site_search/site_info: Discover available adapters and their signatures
 - site_recommend: Suggest adapters based on browsing history
@@ -753,9 +758,10 @@ server.tool(
     args: z.array(z.string()).optional().describe("Positional arguments in adapter-defined order"),
     namedArgs: z.record(z.string()).optional().describe("Named adapter arguments passed as --key value"),
     tab: z.string().optional().describe("Optional tab short ID to target"),
+    browser: z.string().optional().describe("Browser ID from browser_cdp_list; limits the domain-tab search and new tabs to it"),
   },
-  async ({ name, args, namedArgs, tab }) => {
-    const resp = await runCommand({ action: "site_run", name, args: args ?? [], namedArgs: namedArgs ?? {}, tabId: tab });
+  async ({ name, args, namedArgs, tab, browser }) => {
+    const resp = await runCommand({ action: "site_run", name, args: args ?? [], namedArgs: namedArgs ?? {}, tabId: tab, browser });
     if (!resp.success) return responseError(resp);
     return textResult(resp.data ?? null);
   }

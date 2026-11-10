@@ -2,7 +2,8 @@
  * Command dispatch — handles all browser commands via CDP.
  *
  * Ported from cli/cdp-client.ts dispatchRequest, adapted to use
- * CdpConnection + TabStateManager for per-tab state and seq tracking.
+ * BrowserPool (one or more CDP connections) + TabStateManager for per-tab
+ * state and seq tracking.
  */
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -17,7 +18,7 @@ import type {
   SnapshotData,
   TraceStatus,
 } from "@ma-browser/shared";
-import { CdpConnection, type CdpTargetInfo } from "./cdp-connection.js";
+import type { BrowserPool, PoolTarget } from "./browser-pool.js";
 import type { TabState } from "./tab-state.js";
 import type { AgentSession } from "./session-state.js";
 import type { BindingStore } from "./binding-store.js";
@@ -262,7 +263,7 @@ const CLEANUP_HIGHLIGHTS_SCRIPT = `(() => {
 })()`;
 
 async function buildSnapshot(
-  cdp: CdpConnection,
+  cdp: BrowserPool,
   targetId: string,
   tab: TabState,
   request: Request,
@@ -301,7 +302,7 @@ async function buildSnapshot(
 // ---------------------------------------------------------------------------
 
 async function resolveBackendNodeIdByXPath(
-  cdp: CdpConnection,
+  cdp: BrowserPool,
   targetId: string,
   xpath: string,
 ): Promise<number> {
@@ -336,7 +337,7 @@ async function resolveBackendNodeIdByXPath(
   }
 }
 
-async function parseRef(cdp: CdpConnection, targetId: string, tab: TabState, ref: string): Promise<number> {
+async function parseRef(cdp: BrowserPool, targetId: string, tab: TabState, ref: string): Promise<number> {
   const found = tab.refs[ref];
   if (!found) {
     throw new Error(`Unknown ref: ${ref}. Run snapshot first.`);
@@ -357,7 +358,7 @@ async function parseRef(cdp: CdpConnection, targetId: string, tab: TabState, ref
 // ---------------------------------------------------------------------------
 
 async function getInteractablePoint(
-  cdp: CdpConnection,
+  cdp: BrowserPool,
   targetId: string,
   backendNodeId: number,
 ): Promise<{ x: number; y: number; covered: boolean }> {
@@ -405,7 +406,7 @@ async function getInteractablePoint(
   return { x: point.x, y: point.y, covered: point.covered === true };
 }
 
-async function mouseClick(cdp: CdpConnection, targetId: string, x: number, y: number): Promise<void> {
+async function mouseClick(cdp: BrowserPool, targetId: string, x: number, y: number): Promise<void> {
   await cdp.sessionCommand(targetId, "Input.dispatchMouseEvent", {
     type: "mouseMoved", x, y, button: "none",
   });
@@ -418,7 +419,7 @@ async function mouseClick(cdp: CdpConnection, targetId: string, x: number, y: nu
 }
 
 async function insertTextIntoNode(
-  cdp: CdpConnection,
+  cdp: BrowserPool,
   targetId: string,
   backendNodeId: number,
   text: string,
@@ -476,7 +477,7 @@ async function insertTextIntoNode(
 }
 
 async function getAttributeValue(
-  cdp: CdpConnection,
+  cdp: BrowserPool,
   targetId: string,
   backendNodeId: number,
   attribute: string,
@@ -562,7 +563,7 @@ function isEvalLike(request: Request): boolean {
  * exist for the origin's cookies — so "interactive" is sufficient.
  */
 async function waitForTabReady(
-  cdp: CdpConnection,
+  cdp: BrowserPool,
   targetId: string,
   timeoutMs = 10_000,
 ): Promise<void> {
@@ -587,7 +588,7 @@ async function waitForTabReady(
  * the package was regenerated (site moved or changed) the run is retried once.
  */
 async function handleSiteRun(
-  cdp: CdpConnection,
+  cdp: BrowserPool,
   request: Request,
   session?: AgentSession,
   autoHeal = true,
@@ -612,7 +613,7 @@ interface SiteRunOutcome {
 }
 
 async function runSiteAdapter(
-  cdp: CdpConnection,
+  cdp: BrowserPool,
   request: Request,
   session: AgentSession | undefined,
   outcome: SiteRunOutcome,
@@ -636,7 +637,7 @@ async function runSiteAdapter(
   if (request.tabId !== undefined) {
     targetId = (await cdp.ensurePageTarget(String(request.tabId), session)).id;
   } else if (adapter.domain) {
-    const pages = (await cdp.getTargets()).filter((t) => t.type === "page");
+    const pages = (await cdp.getTargets(request.browser)).filter((t) => t.type === "page");
     // Skip tabs exclusively held by another session — can't run adapter there.
     const match = pages.find((t) => {
       if (!matchTabOrigin(t.url, adapter.domain)) return false;
@@ -647,17 +648,13 @@ async function runSiteAdapter(
       targetId = match.id;
       await cdp.attachAndEnable(targetId);
     } else {
-      const created = await cdp.browserCommand<{ targetId: string }>(
-        "Target.createTarget",
-        // Generated packages record their real base (may be http or carry a port).
-        { url: autoHealer.generatedBase(adapter) ?? `https://${adapter.domain}`, background: true },
-      );
-      targetId = created.targetId;
-      await cdp.attachAndEnable(targetId);
+      // Generated packages record their real base (may be http or carry a port).
+      const url = autoHealer.generatedBase(adapter) ?? `https://${adapter.domain}`;
+      targetId = await cdp.createTarget(url, request.browser, session);
       await waitForTabReady(cdp, targetId);
     }
   } else {
-    targetId = (await cdp.ensurePageTarget(undefined, session)).id;
+    targetId = (await cdp.ensurePageTarget(undefined, session, request.browser)).id;
   }
 
   return cdp.runOnTab(targetId, async () => {
@@ -703,7 +700,7 @@ async function runSiteAdapter(
 }
 
 export async function dispatchRequest(
-  cdp: CdpConnection,
+  cdp: BrowserPool,
   request: Request,
   session?: AgentSession,
   ctx?: DispatchContext,
@@ -728,7 +725,7 @@ export async function dispatchRequest(
   // when all open tabs are non-page targets), so handle them before
   // ensurePageTarget() which would throw "No page target found".
   if (request.action === "tab_list") {
-    const targets = (await cdp.getTargets()).filter((t) => t.type === "page");
+    const targets = (await cdp.getTargets(request.browser)).filter((t) => t.type === "page");
     const tabs = targets.map((t, index) => {
       const tState = cdp.tabManager.getTab(t.id);
       const recentActivity = tState ? scratchpadManager?.getRecent(tState.bbTabId) : undefined;
@@ -739,6 +736,7 @@ export async function dispatchRequest(
         active: t.id === session?.currentTargetId || (!session?.currentTargetId && index === 0),
         tabId: t.id,
         tab: tState?.shortId ?? t.id.slice(-4).toLowerCase(),
+        browser: t.browserId,
         owner: tState?.leaseOwner,
         lease: tState?.leaseMode === "exclusive" ? "exclusive" : undefined,
         ...(recentActivity ? { recentActivity } : {}),
@@ -752,17 +750,14 @@ export async function dispatchRequest(
 
   if (request.action === "tab_new") {
     const url = request.url ?? "about:blank";
-    const created = await cdp.browserCommand<{ targetId: string }>(
-      "Target.createTarget",
-      { url, background: true },
-    );
-    await cdp.attachAndEnable(created.targetId);
-    if (session) session.currentTargetId = created.targetId;
-    const newTab = cdp.tabManager.getTab(created.targetId);
+    const targetId = await cdp.createTarget(url, request.browser, session);
+    if (session) session.currentTargetId = targetId;
+    const newTab = cdp.tabManager.getTab(targetId);
     return ok(request.id, {
-      tabId: created.targetId,
+      tabId: targetId,
       url,
-      tab: newTab?.shortId ?? created.targetId.slice(-4).toLowerCase(),
+      tab: newTab?.shortId ?? targetId.slice(-4).toLowerCase(),
+      browser: newTab?.browserId,
       seq: newTab?.recordAction(),
     });
   }
@@ -797,6 +792,7 @@ export async function dispatchRequest(
   const target = await cdp.ensurePageTarget(
     tabRef !== undefined ? String(tabRef) : undefined,
     session,
+    tabRef === undefined ? request.browser : undefined,
   );
 
   const response = await cdp.runOnTab(target.id, async () => {
@@ -825,16 +821,14 @@ export async function dispatchRequest(
       const seq = tab.recordAction();
       if (tabRef === undefined) {
         // No specific tab requested — open in new tab
-        const created = await cdp.browserCommand<{ targetId: string }>(
-          "Target.createTarget",
-          { url: request.url, background: true },
-        );
-        const newTarget = await cdp.ensurePageTarget(created.targetId, session);
+        const created = await cdp.createTarget(request.url, request.browser ?? target.browserId, session);
+        const newTarget = await cdp.ensurePageTarget(created, session);
         const newTab = cdp.tabManager.getTab(newTarget.id);
         return ok(request.id, {
           url: request.url,
           tabId: newTarget.id,
           tab: newTab?.shortId ?? shortId,
+          browser: newTarget.browserId,
           seq,
         });
       }
@@ -869,7 +863,7 @@ export async function dispatchRequest(
 
     case "close": {
       const seq = tab.recordAction();
-      await cdp.browserCommand("Target.closeTarget", { targetId: target.id });
+      await cdp.closeTarget(target.id);
       tab.refs = {};
       return ok(request.id, { tab: shortId, seq });
     }
@@ -1092,8 +1086,8 @@ export async function dispatchRequest(
     // tab_list and tab_new are handled before ensurePageTarget() above.
 
     case "tab_select": {
-      const targets = (await cdp.getTargets()).filter((t) => t.type === "page");
-      let selected: CdpTargetInfo | undefined;
+      const targets = (await cdp.getTargets(request.browser)).filter((t) => t.type === "page");
+      let selected: PoolTarget | undefined;
 
       if (request.tabId !== undefined) {
         selected = cdp.findPageTarget(targets, String(request.tabId));
@@ -1114,8 +1108,8 @@ export async function dispatchRequest(
     }
 
     case "tab_close": {
-      const targets = (await cdp.getTargets()).filter((t) => t.type === "page");
-      let selected: CdpTargetInfo | undefined;
+      const targets = (await cdp.getTargets(request.browser)).filter((t) => t.type === "page");
+      let selected: PoolTarget | undefined;
 
       if (request.tabId !== undefined) {
         selected = cdp.findPageTarget(targets, String(request.tabId));
@@ -1126,7 +1120,7 @@ export async function dispatchRequest(
       if (!selected) return fail(request.id, "Tab not found");
       const closedTab = cdp.tabManager.getTab(selected.id);
       const closedShort = closedTab?.shortId;
-      await cdp.browserCommand("Target.closeTarget", { targetId: selected.id });
+      await cdp.closeTarget(selected.id);
       if (session?.currentTargetId === selected.id) {
         session.currentTargetId = undefined;
       }

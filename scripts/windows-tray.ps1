@@ -30,6 +30,11 @@ $modeItem.Add_Click({
   }
 })
 $menu.Add_Opening({ Update-ModeMenu })
+# Discover / attach browsers that already expose remote debugging (same `cdp` CLI semantics).
+$cdpMenu = New-Object System.Windows.Forms.ToolStripMenuItem('发现并接管已有 Chrome')
+$cdpMenu.DropDownItems.Add('正在扫描…') | Out-Null
+$cdpMenu.Add_DropDownOpening({ Update-CdpMenu })
+$menu.Items.Add($cdpMenu) | Out-Null
 $logItem = $menu.Items.Add('打开日志目录')
 $logItem.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$logDir`"" })
 $exitItem = $menu.Items.Add('退出托盘（后台继续运行）')
@@ -64,6 +69,64 @@ function Get-ManagedBrowser {
       $_.CommandLine -notmatch '(?:^|\s)--type='
     } | Select-Object -First 1
   } catch { $null }
+}
+
+function Show-Balloon([string]$title, [string]$text) {
+  $tray.BalloonTipTitle = $title
+  $tray.BalloonTipText = if ($text) { $text } else { '未知错误' }
+  $tray.ShowBalloonTip(5000)
+}
+
+function Invoke-Cli([string[]]$cliArgs) {
+  $output = (& $node $cli @cliArgs '--json' 2>$null | Out-String).Trim()
+  try { $output | ConvertFrom-Json } catch { [pscustomobject]@{ success = $false; error = "无法解析 CLI 输出：$output" } }
+}
+
+function Update-CdpMenu {
+  $cdpMenu.DropDownItems.Clear()
+  $result = Invoke-Cli @('cdp', 'list')
+  if (-not $result.success) {
+    $cdpMenu.DropDownItems.Add('发现失败（见通知）').Enabled = $false
+    Show-Balloon 'ma-browser 发现浏览器失败' $result.error
+    return
+  }
+  $browsers = @($result.data.browsers)
+  if ($browsers.Count -eq 0) {
+    $cdpMenu.DropDownItems.Add('未发现：请用 --remote-debugging-port=9222 和独立 --user-data-dir 启动 Chrome').Enabled = $false
+    return
+  }
+  foreach ($b in $browsers) {
+    $kind = if ($b.managed) { '受管' } else { '用户' }
+    $state = if (-not $b.attached) { '点击接管' } elseif ($b.connected) { if ($b.default) { '已接管·默认' } else { '已接管' } } else { '已接管·重连中' }
+    $item = New-Object System.Windows.Forms.ToolStripMenuItem("$($b.id)  $kind $($b.browser)  $($b.tabs) 个标签页  [$state]")
+    $item.Checked = [bool]$b.attached
+    $item.Tag = [string]$b.id
+    if ($b.userDataDir) { $item.ToolTipText = [string]$b.userDataDir }
+    if (-not $b.attached) { $item.Add_Click({ param($sender) Invoke-CdpAttach @([string]$sender.Tag) }) }
+    $cdpMenu.DropDownItems.Add($item) | Out-Null
+  }
+  if (@($browsers | Where-Object { -not $_.attached }).Count -gt 1) {
+    $cdpMenu.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+    $cdpMenu.DropDownItems.Add('全部接管').Add_Click({ Invoke-CdpAttach @('--all') })
+  }
+}
+
+function Invoke-CdpAttach([string[]]$target) {
+  $result = Invoke-Cli (@('cdp', 'attach') + $target)
+  if (-not $result.success) {
+    Show-Balloon 'ma-browser 接管失败' $result.error
+  } else {
+    $failed = @($result.data.failed | Where-Object { $_ } | ForEach-Object { "$($_.id): $($_.error)" })
+    $attached = @($result.data.attached)
+    if ($failed.Count -gt 0) {
+      Show-Balloon 'ma-browser 部分接管失败' ($failed -join "`n")
+    } elseif ($attached.Count -gt 0) {
+      Show-Balloon 'ma-browser 已接管' ("浏览器 " + ($attached -join ', '))
+    } else {
+      Show-Balloon 'ma-browser' '浏览器已在接管中'
+    }
+  }
+  Update-Tray
 }
 
 function Update-ModeMenu {
@@ -118,9 +181,7 @@ function Switch-BrowserMode([string]$target) {
     return @{ success = $true; changed = $true }
   } catch {
     $message = $_.Exception.Message
-    $tray.BalloonTipTitle = 'ma-browser 模式切换失败'
-    $tray.BalloonTipText = $message
-    $tray.ShowBalloonTip(5000)
+    Show-Balloon 'ma-browser 模式切换失败' $message
     return @{ success = $false; error = $message }
   } finally {
     if ($socket) { $socket.Dispose() }
@@ -151,7 +212,8 @@ function Update-Tray {
   } catch { }
 
   if ($status.running) {
-    $message = if ($status.cdpConnected) { '浏览器已连接' } else { '正在连接浏览器' }
+    $live = @($status.browsers | Where-Object { $_.connected })
+    $message = if ($live.Count -gt 1) { "已连接 $($live.Count) 个浏览器（$((@($live | ForEach-Object { $_.id })) -join ', ')）" } elseif ($status.cdpConnected) { '浏览器已连接' } else { '正在连接浏览器' }
   } else {
     $alive = $info -and (Get-Process -Id $info.pid -ErrorAction SilentlyContinue)
     $message = if ($alive) { '等待后台进程响应' } else { '后台未运行，正在重试' }
@@ -165,7 +227,9 @@ function Update-Tray {
     }
   }
   $statusItem.Text = $message
-  $tray.Text = "ma-browser - $message"
+  # NotifyIcon.Text is capped at 63 characters.
+  $tip = "ma-browser - $message"
+  $tray.Text = if ($tip.Length -gt 63) { $tip.Substring(0, 63) } else { $tip }
 }
 
 $timer = New-Object System.Windows.Forms.Timer

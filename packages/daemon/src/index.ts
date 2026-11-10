@@ -10,7 +10,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { writeFileSync, renameSync, readFileSync, unlinkSync } from "node:fs";
+import { writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
@@ -18,12 +18,15 @@ import path from "node:path";
 import {
   DAEMON_PORT,
   DAEMON_HOST,
-  MANAGED_PORT_FILE,
-  launchManagedBrowser,
-  probeCdp,
+  cdpDiscoveryMode,
+  discoverCdpEndpoints,
+  envCdpAddresses,
+  resolveCdpEndpoint,
+  type CdpAddress,
 } from "@ma-browser/shared";
 import { HttpServer, installLogInterceptor, type DaemonRuntimeStatus } from "./http-server.js";
 import { CdpConnection } from "./cdp-connection.js";
+import { BrowserPool } from "./browser-pool.js";
 import { TabStateManager } from "./tab-state.js";
 import { CommandHistory } from "./command-history.js";
 import { StateStore } from "./state-store.js";
@@ -51,6 +54,8 @@ interface DaemonOptions {
   port: number;
   cdpHost: string;
   cdpPort: number;
+  /** True when --cdp-port was passed (the CLI passes the endpoint it resolved). */
+  cdpExplicit: boolean;
   token: string;
 }
 
@@ -99,9 +104,16 @@ Options:
   -H, --host <host>          HTTP server host (default: ${DAEMON_HOST})
   -p, --port <port>          HTTP server port (default: ${DAEMON_PORT})
       --cdp-host <host>      Chrome CDP host (default: 127.0.0.1)
-      --cdp-port <port>      Chrome CDP port (default: ${DEFAULT_CDP_PORT})
+      --cdp-port <port>      Chrome CDP port (default: discover, else launch on ${DEFAULT_CDP_PORT})
       --token <token>        Bearer auth token (auto-generated if empty)
   -h, --help                 Show this help message
+
+Environment:
+  BB_BROWSER_CDP_URL(S)      Explicit CDP endpoint(s); extra ones are attached in parallel
+  BB_CDP_DISCOVERY           1 (default) scan loopback for running browsers; 0 off;
+                             all = also attach every browser found
+  BB_CDP_SCAN_PORTS          Extra ports to scan, e.g. 9300,9400-9410
+  BB_CDP_ALLOW_REMOTE=1      Allow cdp_attach to non-loopback hosts
 
 Endpoints:
   POST /command      Send command and get result (via CDP)
@@ -122,6 +134,7 @@ Endpoints:
     port: parseInt(values.port ?? String(DAEMON_PORT), 10),
     cdpHost: values["cdp-host"] ?? "127.0.0.1",
     cdpPort: parseInt(values["cdp-port"] ?? String(DEFAULT_CDP_PORT), 10),
+    cdpExplicit: process.argv.includes("--cdp-port"),
     token,
   };
 }
@@ -180,68 +193,68 @@ function writeTokenFile(token: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// CDP port discovery (simplified — daemon is told the port)
+// CDP endpoint resolution
 // ---------------------------------------------------------------------------
 
+function explicitEndpoints(options: DaemonOptions): CdpAddress[] {
+  const explicit = options.cdpExplicit ? [{ host: options.cdpHost, port: options.cdpPort }] : [];
+  return [...explicit, ...envCdpAddresses()];
+}
+
+/**
+ * Endpoint for the default browser, via the policy shared with the CLI
+ * (resolveCdpEndpoint): explicit > running managed > discovered > launch.
+ * Browsers already attached through cdp_attach are skipped, and while one of
+ * them is live no managed browser is launched — commands go there instead.
+ */
 async function discoverCdpPort(
-  host: string,
-  port: number,
+  pool: BrowserPool,
+  options: DaemonOptions,
 ): Promise<{ host: string; port: number }> {
-  // Try the configured port first, on both IPv4 and IPv6.
-  const direct = await probeCdp(port);
-  if (direct) {
-    return { host: direct, port };
-  }
-
-  // Try the port recorded for a previously-launched managed browser.
-  const managedPortFile = MANAGED_PORT_FILE;
-  try {
-    const managedPort = parseInt(readFileSync(managedPortFile, "utf8").trim(), 10);
-    if (Number.isInteger(managedPort) && managedPort > 0) {
-      const managedHost = await probeCdp(managedPort);
-      if (managedHost) {
-        return { host: managedHost, port: managedPort };
-      }
+  const launch = !pool.hasLiveExtra();
+  const resolved = await resolveCdpEndpoint({
+    explicit: explicitEndpoints(options),
+    exclude: pool.extraIds(),
+    launch,
+    launchPort: options.cdpPort,
+  });
+  if (resolved) {
+    if (resolved.source === "discovered") {
+      console.error(`[Daemon] Found existing browser at ${resolved.host}:${resolved.port}; using it.`);
+    } else if (resolved.source === "launched") {
+      console.error(`[Daemon] No debuggable browser found; launched a managed browser (dedicated profile) on ${resolved.port}.`);
     }
-  } catch {}
-
-  // Scan well-known CDP ports plus a wide run of odd ports from the default.
-  // Windows port-exclusion zones (Hyper-V/WSL) can displace the tray's chosen
-  // port by many hops; 20 extra odd ports (40 apart) covers common exclusion
-  // clusters without exhausting the probe budget.
-  const CDP_SCAN_CANDIDATES: number[] = [9222, 9229];
-  for (let p = DEFAULT_CDP_PORT; p <= DEFAULT_CDP_PORT + 40; p += 2) {
-    CDP_SCAN_CANDIDATES.push(p);
-  }
-  for (const candidate of CDP_SCAN_CANDIDATES) {
-    if (candidate === port) continue; // already tried above
-    const h = await probeCdp(candidate);
-    if (h) {
-      console.error(`[Daemon] Found existing browser at ${h}:${candidate}; using it.`);
-      return { host: h, port: candidate };
-    }
-  }
-
-  // Last resort: launch a managed browser under a dedicated profile. The CLI
-  // pre-launches Chrome before spawning the daemon, but the tray supervisor
-  // does not — so the daemon must be able to bootstrap its own browser. The
-  // managed instance uses its own --user-data-dir, so it coexists with the
-  // user's normal browser and never closes it.
-  console.error(
-    `[Daemon] No Chrome reachable at ${host}:${port}; launching a managed browser (dedicated profile)...`,
-  );
-  const launched = await launchManagedBrowser(port);
-  if (launched) {
-    return launched;
+    return resolved;
   }
 
   // Throwing here is non-fatal: bringUpCdp() catches it and retries, so the
   // daemon self-heals once a browser becomes available.
   throw new Error(
-    `Cannot connect to Chrome CDP at ${host}:${port}, and could not launch a ` +
-      `managed browser. Install Chrome/Edge/Brave, or start your browser with ` +
-      `--remote-debugging-port=${port}.`,
+    launch
+      ? `Cannot connect to Chrome CDP at ${options.cdpHost}:${options.cdpPort}, and could not launch a ` +
+        `managed browser. Install Chrome/Edge/Brave, or start your browser with ` +
+        `--remote-debugging-port=${options.cdpPort}.`
+      : "No default browser yet; commands use the attached browser(s) meanwhile",
   );
+}
+
+/**
+ * Attach the extra endpoints from BB_BROWSER_CDP_URLS, browsers attached in
+ * the previous run, and, with BB_CDP_DISCOVERY=all, every discovered browser.
+ * Runs once `main` is up so the default browser is picked first.
+ */
+async function autoAttach(pool: BrowserPool, options: DaemonOptions): Promise<void> {
+  const saved = pool.savedAttachments();
+  const targets: CdpAddress[] = [...explicitEndpoints(options), ...saved];
+  if (cdpDiscoveryMode() === "all") targets.push(...(await discoverCdpEndpoints()));
+  for (const addr of targets) {
+    try {
+      await pool.attach(addr);
+    } catch (err) {
+      console.error(`[Daemon] Could not attach ${addr.host}:${addr.port}: ${err instanceof Error ? err.message : String(err)}`);
+      if (saved.includes(addr)) pool.forgetAttachment(addr);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,8 +275,9 @@ async function main(): Promise<void> {
   const tabManager = new TabStateManager();
   const history = new CommandHistory();
   const cdp = new CdpConnection(options.cdpHost, options.cdpPort, tabManager);
-  const runtimeStatus: DaemonRuntimeStatus = { needsBrowserConsent: false };
   const stateStore = new StateStore(path.join(DAEMON_DIR, "state"));
+  const pool = new BrowserPool(cdp, stateStore);
+  const runtimeStatus: DaemonRuntimeStatus = { needsBrowserConsent: false };
   const agentRegistry = new AgentRegistry(stateStore);
   const bindingStore = new BindingStore(stateStore);
   const journalManager = new JournalManager(stateStore);
@@ -302,7 +316,7 @@ async function main(): Promise<void> {
     host: options.host,
     port: options.port,
     token: options.token,
-    cdp,
+    cdp: pool,
     history,
     agentRegistry,
     bindingStore,
@@ -350,13 +364,13 @@ async function main(): Promise<void> {
   // Runs detached from startup so a failure here never kills the daemon — the
   // HTTP server stays up and /status keeps reporting cdpConnected=false until
   // we succeed. The tray's /status poller renders that as yellow (重连中).
-  void bringUpCdp(cdp, options, runtimeStatus);
+  void bringUpCdp(pool, options, runtimeStatus).then(() => autoAttach(pool, options));
 
   // Self-heal: if the established CDP socket drops (e.g. user closed Chrome),
   // restart the bring-up loop so we re-discover/relaunch and return to green.
   cdp.onUnexpectedClose = () => {
     console.error("[Daemon] CDP connection dropped; restarting bring-up loop...");
-    void bringUpCdp(cdp, options, runtimeStatus);
+    void bringUpCdp(pool, options, runtimeStatus);
   };
 }
 
@@ -375,7 +389,7 @@ let _bringUpWakeUp: (() => void) | null = null;
  * a dedicated profile (never touching the user's own browser).
  */
 async function bringUpCdp(
-  cdp: CdpConnection,
+  pool: BrowserPool,
   options: DaemonOptions,
   runtimeStatus: DaemonRuntimeStatus,
 ): Promise<void> {
@@ -388,7 +402,7 @@ async function bringUpCdp(
   }
   bringUpInFlight = true;
   try {
-    await bringUpCdpLoop(cdp, options, runtimeStatus);
+    await bringUpCdpLoop(pool, options, runtimeStatus);
   } finally {
     bringUpInFlight = false;
     _bringUpWakeUp = null;
@@ -396,10 +410,11 @@ async function bringUpCdp(
 }
 
 async function bringUpCdpLoop(
-  cdp: CdpConnection,
+  pool: BrowserPool,
   options: DaemonOptions,
   runtimeStatus: DaemonRuntimeStatus,
 ): Promise<void> {
+  const cdp = pool.main;
   let attempt = 0;
   // Log attempt 1 always, then every 20th — avoids log bloat for long outages
   // and correctly handles alternating error messages (which would never match a
@@ -411,7 +426,7 @@ async function bringUpCdpLoop(
     if (cdp.connected) return;
     attempt += 1;
     try {
-      const endpoint = await discoverCdpPort(options.cdpHost, options.cdpPort);
+      const endpoint = await discoverCdpPort(pool, options);
       runtimeStatus.needsBrowserConsent = false;
       cdp.repoint(endpoint.host, endpoint.port);
       console.error(

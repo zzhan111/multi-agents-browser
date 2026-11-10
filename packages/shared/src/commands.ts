@@ -40,6 +40,7 @@ export const COMMANDS: CommandDef[] = [
     args: z.object({
       url: z.string().describe("URL to open"),
       tab: z.string().optional().describe("Tab short ID to navigate in (omit to open in a new tab)"),
+      browser: z.string().optional().describe("Browser ID (CDP port, or host:port) from browser_cdp_list; defaults to the current tab's browser"),
     }),
   },
   {
@@ -270,14 +271,47 @@ export const COMMANDS: CommandDef[] = [
   },
 
   // ---------------------------------------------------------------------------
+  // Browsers (CDP endpoints)
+  // ---------------------------------------------------------------------------
+  {
+    name: "cdp_list",
+    action: "cdp_list",
+    description: "Discover Chromium browsers on this machine with remote debugging enabled, and show which ones this daemon drives (id, port, browser, profile dir, tabs, managed, attached, default)",
+    category: "system",
+    args: z.object({}),
+  },
+  {
+    name: "cdp_attach",
+    action: "cdp_attach",
+    description: "Take over an existing browser's CDP endpoint so its tabs (and logins) can be driven in parallel with the others. Never relaunches or closes the browser",
+    category: "system",
+    args: z.object({
+      browser: z.string().optional().describe("CDP port (e.g. 9222), host:port or URL; omit with all=true"),
+      all: z.boolean().optional().describe("Attach every browser found by browser_cdp_list"),
+      allowRemote: z.boolean().optional().describe("Allow a non-loopback host (anyone reaching that port controls the browser)"),
+    }),
+  },
+  {
+    name: "cdp_detach",
+    action: "cdp_detach",
+    description: "Stop driving an attached browser (the browser keeps running)",
+    category: "system",
+    args: z.object({
+      browser: z.string().describe("Browser ID from browser_cdp_list"),
+    }),
+  },
+
+  // ---------------------------------------------------------------------------
   // Tab
   // ---------------------------------------------------------------------------
   {
     name: "tab_list",
     action: "tab_list",
-    description: "List all open browser tabs with their URLs, titles, and short IDs",
+    description: "List all open browser tabs with their URLs, titles, short IDs and browser IDs",
     category: "tab",
-    args: z.object({}),
+    args: z.object({
+      browser: z.string().optional().describe("Only list tabs of this browser (ID from browser_cdp_list)"),
+    }),
   },
   {
     name: "tab_new",
@@ -286,6 +320,7 @@ export const COMMANDS: CommandDef[] = [
     category: "tab",
     args: z.object({
       url: z.string().optional().describe("URL to open in the new tab (defaults to about:blank)"),
+      browser: z.string().optional().describe("Browser ID (CDP port, or host:port) from browser_cdp_list; defaults to the current tab's browser"),
     }),
   },
   {
@@ -461,6 +496,7 @@ export const COMMANDS: CommandDef[] = [
       name: z.string().describe("Adapter name (e.g. reddit/thread, twitter/user)"),
       args: z.string().optional().describe("Arguments to pass to the adapter (space-separated or --flag value)"),
       tab: z.string().optional().describe("Tab short ID (auto-detected from adapter domain if omitted)"),
+      browser: z.string().optional().describe("Browser ID (CDP port, or host:port) from browser_cdp_list; limits the domain-tab search and new tabs to it"),
     }),
   },
   {

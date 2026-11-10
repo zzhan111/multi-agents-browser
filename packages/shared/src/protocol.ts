@@ -45,7 +45,10 @@ export type ActionType =
   | "site_search"
   | "site_info"
   | "site_run"
-  | "site_update";
+  | "site_update"
+  | "cdp_list"
+  | "cdp_attach"
+  | "cdp_detach";
 
 /** 请求类型 */
 export interface Request {
@@ -144,6 +147,37 @@ export interface Request {
   query?: string;
   /** 域名过滤（site_search 使用） */
   domain?: string;
+  /** 目标浏览器：端口、host:port 或 URL（tab_list/tab_new/open/site_run 路由，cdp_attach/cdp_detach 目标） */
+  browser?: string;
+  /** cdp_attach：接管全部已发现的本机 CDP */
+  all?: boolean;
+  /** cdp_attach：允许非 loopback 主机 */
+  allowRemote?: boolean;
+}
+
+/** 一个可控浏览器（cdp_list / status 返回） */
+export interface BrowserInfo {
+  /** 浏览器 ID：loopback 为端口号，否则 host:port；用于 --browser */
+  id: string;
+  host: string;
+  port: number;
+  /** /json/version 的 Browser 字段（cdp_list） */
+  browser?: string;
+  /** 是否为 ma-browser 受管浏览器（专用 profile） */
+  managed?: boolean;
+  userDataDir?: string;
+  pid?: number;
+  /** 页面标签页数 */
+  tabs?: number;
+  /** 是否已被本 daemon 接管 */
+  attached?: boolean;
+  connected: boolean;
+  /** 未指定 tab/browser 时命令落到的浏览器 */
+  default: boolean;
+  /** auto：daemon 自动选择/启动的默认浏览器；attached：cdp_attach 接管 */
+  origin?: "auto" | "attached";
+  chromeVersion?: string;
+  lastError?: string;
 }
 
 /** 元素引用信息 */
@@ -174,6 +208,8 @@ export interface TabInfo {
   tabId: number | string;
   /** 短标签页 ID（daemon 模式） */
   tab?: string;
+  /** 所属浏览器 ID */
+  browser?: string;
 }
 
 /** Snapshot 命令返回的数据 */
@@ -280,6 +316,8 @@ export interface ResponseData {
   tabId?: number | string;
   /** 短标签页 ID（daemon 模式） */
   tab?: string;
+  /** 所属浏览器 ID（open/tab_new 返回；cdp_attach 返回目标浏览器） */
+  browser?: string;
   /** 租约模式（tab_claim 命令返回） */
   lease?: "shared" | "exclusive";
   /** 租约持有者 session ID（tab_claim 命令返回） */
@@ -320,6 +358,8 @@ export interface ResponseData {
   tabs?: TabInfo[];
   /** 当前活动标签页索引（tab_list 命令返回） */
   activeIndex?: number;
+  /** 浏览器列表（cdp_list / cdp_attach / cdp_detach 返回） */
+  browsers?: BrowserInfo[];
   /** Frame 信息（frame 命令返回） */
   frameInfo?: {
     /** iframe 的 CSS 选择器 */

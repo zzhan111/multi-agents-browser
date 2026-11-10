@@ -69,6 +69,8 @@ Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '
 
 The tray starts and monitors the daemon, launching new managed browsers headlessly with the existing profile. Right-click the tray icon to switch between headed and headless modes; the selected mode persists across sign-ins. Switching restarts the managed browser and restores its session, but unsaved page content may be lost. Use headed mode to sign in interactively. The menu also opens logs or exits the tray while leaving the daemon running. Outside the tray, set `MA_BROWSER_HEADLESS=1` to launch a managed browser headlessly; an already running browser is not restarted.
 
+Right-click → **发现并接管已有 Chrome** lists every debuggable browser on the machine (checked = already attached); click one to attach it, or **全部接管** to attach them all. Failures show as a balloon with the reason.
+
 Agents can call `ma-browser mode status|headed|headless --json` or the MCP `browser_mode` tool with the same `mode` values. Status is read-only; a switch returns after the browser reconnects. Previous tab IDs become invalid. When the tray owns the daemon, set `MA_BROWSER_CONNECT_ONLY=1` in the MCP server environment to prevent it from spawning another daemon during a switch.
 
 To start the tray at Windows sign-in, run this from the repository directory:
@@ -170,6 +172,36 @@ ma-browser site xueqiu/hot-stock 5 --jq '.items[] | {name, changePercent}'
 
 ma-browser site info xueqiu/stock   # view adapter args, example, domain
 ```
+
+## Use your own Chrome, or several at once
+
+ma-browser drives browsers that expose a remote-debugging port. Start your everyday Chrome (or a sandbox one) with a port and its own profile directory — Chrome 136+ refuses remote debugging on the default profile:
+
+```bash
+google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.chrome-debug"
+```
+
+```bash
+ma-browser cdp list                    # every debuggable browser here: id, browser, profile, tabs, managed, attached
+ma-browser cdp attach 9222             # take it over — never relaunched, never closed
+ma-browser cdp attach --all            # attach everything found, driven in parallel
+ma-browser tab list                    # each tab shows its browser (@9222)
+ma-browser tab list --browser 9222     # just that browser's tabs
+ma-browser open https://x.com --browser 9222   # new tab in that browser
+ma-browser status                      # connection + health per browser
+ma-browser cdp detach 9222             # stop driving it (the browser keeps running)
+```
+
+Tab IDs are unique across browsers, so `--tab <id>` always reaches the right one. Without `--tab`, `--browser` picks the browser; otherwise a command goes to your current tab's browser, then the default. MCP has the same as `browser_cdp_list` / `browser_cdp_attach` / `browser_cdp_detach` and a `browser` argument on `browser_open`, `browser_tab_new`, `browser_tab_list` and `site_run`.
+
+**Which browser a cold start uses** (CLI and daemon share one policy): `BB_BROWSER_CDP_URL[S]` / `--port` → the running managed browser → any other debuggable browser found on this machine → launch the managed browser. ma-browser launches its own browser only when nothing debuggable is running. Scanning only covers loopback: ports 9222, 9229 and 19825–19865 (odd), plus `--remote-debugging-port` in running browser command lines and `DevToolsActivePort` files. If an attached browser drops, its tabs fail with a readable error and it reconnects in the background.
+
+| Variable | Effect |
+|---|---|
+| `BB_BROWSER_CDP_URLS=http://127.0.0.1:9222,http://127.0.0.1:9333` | Explicit endpoints: the first reachable one is the default, the rest are attached at startup |
+| `BB_CDP_DISCOVERY=0` / `all` | Turn off scanning / also attach every browser found at startup (default `1`: scan, attach one) |
+| `BB_CDP_SCAN_PORTS=9300,9400-9410` | Extra ports to scan |
+| `BB_CDP_ALLOW_REMOTE=1` | Allow `cdp attach` to a non-loopback host (or pass `--allow-remote`). Anyone who can reach that port controls that browser |
 
 ## Daemon configuration
 
