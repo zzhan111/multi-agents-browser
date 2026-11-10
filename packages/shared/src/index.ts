@@ -5,6 +5,7 @@
 
 export {
   type ActionType,
+  type BrowserInfo,
   type ConsoleMessageInfo,
   type DaemonStatus,
   type JSErrorInfo,
@@ -53,10 +54,27 @@ export {
   DEFAULT_CDP_PORT,
   MANAGED_BROWSER_DIR,
   MANAGED_PORT_FILE,
+  MANAGED_USER_DATA_DIR,
   findBrowserExecutable,
   launchManagedBrowser,
   probeCdp,
 } from "./browser-launcher.js";
+
+export {
+  type CdpAddress,
+  type CdpEndpoint,
+  type ResolvedCdp,
+  browserIdFor,
+  cdpDiscoveryMode,
+  defaultScanPorts,
+  discoverCdpEndpoints,
+  envCdpAddresses,
+  explainCdpFailure,
+  inspectCdp,
+  isLoopbackHost,
+  parseCdpAddress,
+  resolveCdpEndpoint,
+} from "./cdp-discovery.js";
 
 export {
   type AdapterSource,

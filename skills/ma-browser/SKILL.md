@@ -229,11 +229,27 @@ ma-browser trace status                             # 查看录制状态
 
 详细的 network 高级用法：参见 [references/fetch-and-network.md](references/fetch-and-network.md)
 
+### 多浏览器（接管已有 Chrome）
+
+```bash
+ma-browser cdp list --json          # 本机可调试浏览器：id/browser/userDataDir/tabs/managed/attached/default
+ma-browser cdp attach 9222          # 接管用户已用 --remote-debugging-port=9222 启动的 Chrome（复用其登录态）
+ma-browser cdp attach --all         # 全部接管，并行使用
+ma-browser tab list --browser 9222  # tab 列表带 browser 字段；--browser 过滤
+ma-browser open <url> --browser 9222 --json   # 在指定浏览器新开 tab，记下 data.tab
+ma-browser cdp detach 9222          # 停止接管，不关闭浏览器
+```
+
+- tab ID 跨浏览器唯一：拿到 tab 后一律用 `--tab`，不用再带 `--browser`。
+- 需要用户本人的登录态时先 `cdp list`；没有可接管的浏览器，就请用户用 `--remote-debugging-port=9222 --user-data-dir=<目录>` 启动 Chrome，不要自己杀掉或重启用户的浏览器。
+- 报错 `Nothing is listening` / `not a Chrome DevTools endpoint` / `Refusing non-loopback` 时按提示换端口；非本机需用户明确同意后加 `--allow-remote`。
+
 ## 全局选项
 
 ```bash
 --json               # 以 JSON 格式输出（所有命令通用）
 --tab <tabId>        # 指定操作的标签页 ID（几乎所有命令通用）
+--browser <id>       # 无 --tab 时把命令/新 tab 路由到该浏览器（cdp list 的 id）
 --mcp                # 启动 MCP server（用于 Claude Code / Cursor 等 AI 工具）
 ```
 

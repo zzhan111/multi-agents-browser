@@ -53,6 +53,8 @@ export class TabState {
   shortId: string;
   /** Stable logical tab ID, decoupled from the CDP targetId (which changes on browser restart). */
   readonly bbTabId: string = randomUUID();
+  /** Browser this tab lives in (see browserIdFor): the CDP port for loopback. */
+  browserId?: string;
 
   networkRequests = new RingBuffer<SeqNetworkRequest>(NETWORK_CAPACITY);
   consoleMessages = new RingBuffer<SeqConsoleMessage>(CONSOLE_CAPACITY);

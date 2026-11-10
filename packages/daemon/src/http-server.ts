@@ -16,7 +16,7 @@ import { createWriteStream, mkdirSync, statSync, renameSync, unlinkSync } from "
 import { dirname } from "node:path";
 import type { Request } from "@ma-browser/shared";
 import { COMMAND_TIMEOUT, DAEMON_PORT } from "@ma-browser/shared";
-import { CdpConnection } from "./cdp-connection.js";
+import { dispatchCdpRequest, type BrowserPool } from "./browser-pool.js";
 import type { CommandHistory } from "./command-history.js";
 import { CommandScheduler } from "./command-scheduler.js";
 import { SessionManager, expireIdleSessions, type SessionScope } from "./session-state.js";
@@ -49,7 +49,7 @@ export interface HttpServerOptions {
   host?: string;
   port?: number;
   token?: string;
-  cdp: CdpConnection;
+  cdp: BrowserPool;
   history?: CommandHistory;
   agentRegistry?: AgentRegistry;
   bindingStore?: BindingStore;
@@ -64,7 +64,7 @@ export class HttpServer {
   private readonly host: string;
   private readonly port: number;
   private readonly token: string | null;
-  private readonly cdp: CdpConnection;
+  private readonly cdp: BrowserPool;
   private readonly history: CommandHistory | null;
   private readonly agentRegistry: AgentRegistry | null;
   private readonly bindingStore: BindingStore | null;
@@ -228,6 +228,15 @@ export class HttpServer {
         return;
       }
 
+      // Browser discovery/attach must work while no browser is connected yet.
+      if (request.action === "cdp_list" || request.action === "cdp_attach" || request.action === "cdp_detach") {
+        const finish = this.history?.record(request.action, request, (req.headers["x-bb-session"] as string | undefined) ?? "default");
+        const response = await dispatchCdpRequest(this.cdp, request);
+        finish?.(response.success);
+        this.sendJson(res, 200, response);
+        return;
+      }
+
       // Wait for CDP to be ready (two-phase startup)
       if (!this.cdp.connected) {
         try {
@@ -316,6 +325,7 @@ export class HttpServer {
       shortId: tab.shortId,
       targetId: tab.targetId,
       bbTabId: tab.bbTabId,
+      browser: tab.browserId,
       networkRequests: tab.networkRequests.size,
       consoleMessages: tab.consoleMessages.size,
       jsErrors: tab.jsErrors.size,
@@ -328,6 +338,7 @@ export class HttpServer {
       running: true,
       cdpConnected: this.cdp.connected,
       cdpPort: this.cdp.port,
+      browsers: this.cdp.info(),
       needsBrowserConsent: this.runtimeStatus.needsBrowserConsent,
       uptime: this.uptime,
       currentSeq: this.cdp.tabManager.currentSeq(),
@@ -356,6 +367,7 @@ export class HttpServer {
       cdpConnected: this.cdp.connected,
       tabCount: tabs.length,
       chromeVersion: this.cdp.chromeVersion ?? null,
+      browsers: this.cdp.info(),
     });
   }
 

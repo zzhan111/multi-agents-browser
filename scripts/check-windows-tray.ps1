@@ -21,4 +21,11 @@ $browser = Get-CimInstance Win32_Process | Where-Object {
 if (-not $browser) { throw 'The managed browser is not running with its expected profile.' }
 $headless = $browser.CommandLine -match '(?:^|\s)--headless(?:=\S+)?(?:\s|$)'
 if ($headless -ne ($Mode -eq 'headless')) { throw "The managed browser is not in $Mode mode." }
-Write-Output "Windows tray, daemon and managed $Mode browser are running."
+# The tray's "发现并接管已有 Chrome" menu runs `cdp list`; it must see the managed browser as attached.
+$cli = Join-Path (Split-Path -Parent $PSScriptRoot) 'dist\cli.js'
+$list = (& (Get-Command node.exe).Source $cli cdp list --json | Out-String) | ConvertFrom-Json
+if (-not $list.success) { throw "cdp list failed: $($list.error)" }
+$managed = @($list.data.browsers) | Where-Object { $_.port -eq $port }
+if (-not $managed -or -not $managed.attached -or -not $managed.managed) { throw 'cdp list does not show the managed browser as attached.' }
+$others = @($list.data.browsers | Where-Object { $_.port -ne $port } | ForEach-Object { "$($_.id)$(if ($_.attached) { '*' })" })
+Write-Output "Windows tray, daemon and managed $Mode browser are running. Other debuggable browsers (* = attached): $(if ($others) { $others -join ', ' } else { 'none' })"

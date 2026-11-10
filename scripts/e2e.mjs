@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // End-to-end check of the core contract through the real CLI, in an isolated
 // Chromium + daemon + BB_BROWSER_HOME (never touches ~/.bb-browser):
-//   browser control, per-agent sessions and tab leases, site adapters, and
-//   login cookies surviving a daemon and a browser restart.
+//   browser control, per-agent sessions and tab leases, site adapters,
+//   login cookies surviving a daemon and a browser restart, and attaching a
+//   second (user) Chrome to drive both in parallel.
 // Usage: node scripts/e2e.mjs [path/to/dist]
 import { execFile, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -67,13 +68,20 @@ async function startDaemon() {
 }
 const stopped = (child) => new Promise((r) => { if (child.exitCode !== null) r(); else { child.once("exit", r); child.kill(); } });
 // Close Chromium the way a user does, so it flushes cookies and releases the profile lock.
-async function closeBrowser() {
-  const exited = new Promise((r) => (chrome.exitCode !== null ? r() : chrome.once("exit", r)));
-  const { webSocketDebuggerUrl } = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`)).json();
+async function closeBrowser(proc = chrome, port = CDP_PORT) {
+  const exited = new Promise((r) => (proc.exitCode !== null ? r() : proc.once("exit", r)));
+  const { webSocketDebuggerUrl } = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
   const ws = new WebSocket(webSocketDebuggerUrl);
   await new Promise((r) => ws.addEventListener("open", r, { once: true }));
   ws.send(JSON.stringify({ id: 1, method: "Browser.close" }));
-  await Promise.race([exited, sleep(10000).then(() => stopped(chrome))]);
+  await Promise.race([exited, sleep(10000).then(() => stopped(proc))]);
+}
+// A second, unmanaged Chromium standing in for the user's own debuggable Chrome.
+let userChrome;
+async function startUserBrowser(port) {
+  userChrome = spawn(process.env.CHROMIUM ?? "/usr/lib/chromium/chromium", ["--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${join(home, "user-profile")}`, "--no-first-run", "--no-default-browser-check", "about:blank"], { stdio: "ignore" });
+  for (let i = 0; i < 100; i++) { try { await fetch(`http://127.0.0.1:${port}/json/version`); return; } catch { await sleep(100); } }
+  throw new Error("user Chromium did not expose CDP");
 }
 
 function cli(session, args, { allowFailure = false } = {}) {
@@ -222,6 +230,72 @@ try {
       newSite.server.close();
     }
   });
+  await check("browsers: discover, attach and drive a second Chrome in parallel; detach", async () => {
+    const USER_PORT = await freePort();
+    const U = String(USER_PORT);
+    const M = String(CDP_PORT);
+    await startUserBrowser(USER_PORT);
+
+    const listed = (await cli("agent-a", ["cdp", "list"])).data.browsers;
+    const main = listed.find((b) => b.port === CDP_PORT);
+    const user = listed.find((b) => b.port === USER_PORT);
+    assert.deepEqual([main.attached, main.default, main.managed], [true, true, true], "the daemon's browser is listed as attached + managed");
+    assert.deepEqual([user.attached, user.managed, user.userDataDir], [false, false, join(home, "user-profile")], "the user browser is discovered with its profile");
+
+    assert.deepEqual((await cli("agent-a", ["cdp", "attach", U])).data.attached, [U]);
+    assert.equal((await cli("agent-a", ["cdp", "attach", `http://localhost:${USER_PORT}`])).data.already, true, "same browser via another address");
+
+    const tabU = (await cli("agent-u", ["tab", "new", `${origin}/whoami`, "--browser", U])).data.tab;
+    const tabM = (await cli("agent-m", ["open", `${origin}/whoami`])).data.tab;
+    await sleep(500);
+    const [u, m] = await Promise.all([
+      cli("agent-u", ["eval", "document.cookie", "--tab", tabU]),
+      cli("agent-m", ["eval", "document.cookie", "--tab", tabM]),
+    ]);
+    assert.deepEqual([u.data.result, m.data.result], ["", "sid=agent-ok"], "each tab runs in its own browser profile");
+
+    const tabs = (await cli("agent-a", ["tab", "list"])).data.tabs;
+    assert.equal(tabs.find((t) => t.tab === tabU)?.browser, U);
+    assert.equal(tabs.find((t) => t.tab === tabM)?.browser, M);
+    const onlyU = (await cli("agent-a", ["tab", "list", "--browser", U])).data.tabs;
+    assert.ok(onlyU.length > 0 && onlyU.every((t) => t.browser === U));
+    const snapU = await cli("agent-u", ["snapshot", "--browser", U]);
+    assert.equal(snapU.success, true, "a tab-less command routes to the named browser");
+
+    const status = await cli("agent-a", ["status"]);
+    assert.deepEqual(status.browsers.map((b) => [b.id, b.connected]).sort(), [[U, true], [M, true]].sort());
+
+    // A daemon restart (e.g. the tray's mode switch) re-attaches the browser.
+    await stopped(daemon);
+    await startDaemon();
+    const reattached = async () => (await cli("agent-a", ["status"])).browsers.find((b) => b.id === U)?.connected;
+    for (let i = 0; i < 40 && !(await reattached()); i++) await sleep(250);
+    assert.equal(await reattached(), true, "attachment survives a daemon restart");
+
+    const errorOf = async (args) => (await cli("agent-a", args, { allowFailure: true })).error ?? "";
+    assert.match(await errorOf(["cdp", "attach", String(await freePort())]), /Nothing is listening/);
+    assert.match(await errorOf(["cdp", "attach", new URL(origin).port]), /not a Chrome DevTools endpoint/);
+    assert.match(await errorOf(["cdp", "attach", "10.255.255.1:9222"]), /Refusing non-loopback/);
+    assert.match(await errorOf(["tab", "new", "--browser", "1"]), /Browser not attached/);
+    assert.match(await errorOf(["cdp", "detach", M]), /default browser/);
+
+    // The user closes their Chrome: its tabs fail readably, the other browser carries on.
+    await closeBrowser(userChrome, USER_PORT);
+    await sleep(300);
+    assert.match(await errorOf(["eval", "1", "--tab", tabU]), /disconnected/);
+    assert.equal((await cli("agent-m", ["eval", "2", "--tab", tabM])).data.result, 2);
+    assert.equal((await cli("agent-a", ["status"])).browsers.find((b) => b.id === U)?.connected, false);
+
+    // It comes back on the same port: the attached browser reconnects by itself.
+    await startUserBrowser(USER_PORT);
+    for (let i = 0; i < 40 && !(await cli("agent-a", ["status"])).browsers.find((b) => b.id === U)?.connected; i++) await sleep(250);
+    assert.equal((await cli("agent-a", ["status"])).browsers.find((b) => b.id === U)?.connected, true, "reconnected");
+
+    assert.equal((await cli("agent-a", ["cdp", "detach", U])).data.detached, U);
+    const after = (await cli("agent-a", ["tab", "list"])).data.tabs;
+    assert.ok(after.every((t) => t.browser === M), "detached browser's tabs are gone");
+    assert.ok((await fetch(`http://127.0.0.1:${USER_PORT}/json/version`)).ok, "detach never closes the browser");
+  });
   console.log(results.join("\n"));
 } catch (error) {
   console.log(results.join("\n"));
@@ -230,6 +304,7 @@ try {
 } finally {
   if (daemon) await stopped(daemon);
   if (chrome) await stopped(chrome);
+  if (userChrome) await stopped(userChrome);
   site.close();
   await sleep(300);
   rmSync(home, { recursive: true, force: true });

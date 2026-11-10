@@ -69,6 +69,8 @@ Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '
 
 托盘会启动并监视后台进程，新启动的受管浏览器默认以无头模式运行。右键托盘图标可切换有头／无头模式，所选模式会在下次登录时保留。切换会重启受管浏览器并恢复会话，未保存的页面内容可能丢失；需要交互登录时可切换到有头模式。右键菜单也可打开日志或退出托盘（后台继续运行）。托盘之外可设置 `MA_BROWSER_HEADLESS=1` 启动无头浏览器；已在运行的浏览器不会自动重启。
 
+右键 →「发现并接管已有 Chrome」会列出本机所有可调试浏览器（打勾 = 已接管）；点击某一项即可接管，或点「全部接管」。失败时以气泡提示原因。
+
 Agent 可调用 `ma-browser mode status|headed|headless --json` 或 MCP `browser_mode`（`mode` 参数同名）。查询无需切换，切换完成并重新连接后才返回；旧 tab ID 会失效。托盘负责启动 daemon 时，可为 MCP 设置环境变量 `MA_BROWSER_CONNECT_ONLY=1`，避免切换期间抢先启动另一个 daemon。
 
 需要在 Windows 登录后自动启动时，在仓库目录运行：
@@ -170,6 +172,36 @@ ma-browser site xueqiu/hot-stock 5 --jq '.items[] | {name, changePercent}'
 
 ma-browser site info xueqiu/stock   # 查看 adapter 参数、示例、域名
 ```
+
+## 接管自己的 Chrome，或同时控制多个
+
+ma-browser 控制开启了 remote debugging 端口的浏览器。用端口和独立的 profile 目录启动日常 Chrome（或沙盒 Chrome）——Chrome 136+ 不允许在默认 profile 上开启远程调试：
+
+```bash
+google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.chrome-debug"
+```
+
+```bash
+ma-browser cdp list                    # 本机所有可调试浏览器：ID、版本、profile、tab 数、是否受管/已接管
+ma-browser cdp attach 9222             # 接管：不重启、不关闭
+ma-browser cdp attach --all            # 接管全部已发现的浏览器，并行使用
+ma-browser tab list                    # 每个 tab 标出所属浏览器（@9222）
+ma-browser tab list --browser 9222     # 只看该浏览器的 tab
+ma-browser open https://x.com --browser 9222   # 在该浏览器新开 tab
+ma-browser status                      # 每个浏览器的连接与健康状态
+ma-browser cdp detach 9222             # 停止接管（浏览器继续运行）
+```
+
+tab ID 在所有浏览器间唯一，`--tab <id>` 总能落到正确的浏览器。不带 `--tab` 时由 `--browser` 选浏览器，否则落到当前 tab 所在浏览器，再否则落到默认浏览器。MCP 对应 `browser_cdp_list` / `browser_cdp_attach` / `browser_cdp_detach`，`browser_open`、`browser_tab_new`、`browser_tab_list`、`site_run` 支持 `browser` 参数。
+
+**冷启动用哪个浏览器**（CLI 与 daemon 同一策略）：`BB_BROWSER_CDP_URL[S]` / `--port` → 正在运行的受管浏览器 → 本机发现的其他可调试浏览器 → 启动受管浏览器。只有本机没有任何可调试浏览器时才会自己启动。扫描只限 loopback：端口 9222、9229、19825–19865（奇数），加上运行中浏览器命令行里的 `--remote-debugging-port` 和 `DevToolsActivePort` 文件。已接管的浏览器断开时，其 tab 返回可读错误，并在后台自动重连。
+
+| 变量 | 作用 |
+|---|---|
+| `BB_BROWSER_CDP_URLS=http://127.0.0.1:9222,http://127.0.0.1:9333` | 显式端点：第一个可达的作默认，其余在启动时接管 |
+| `BB_CDP_DISCOVERY=0` / `all` | 关闭扫描 / 启动时接管全部发现的浏览器（默认 `1`：扫描，接管一个） |
+| `BB_CDP_SCAN_PORTS=9300,9400-9410` | 额外扫描的端口 |
+| `BB_CDP_ALLOW_REMOTE=1` | 允许 `cdp attach` 非本机主机（或传 `--allow-remote`）。能访问该端口的人都能控制那个浏览器 |
 
 ## Daemon 配置
 

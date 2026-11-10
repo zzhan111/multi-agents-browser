@@ -20,6 +20,7 @@ import { checkCommand, uncheckCommand } from "./commands/check.js";
 import { selectCommand } from "./commands/select.js";
 import { evalCommand } from "./commands/eval.js";
 import { tabCommand } from "./commands/tab.js";
+import { cdpCommand } from "./commands/cdp.js";
 import { frameCommand, frameMainCommand } from "./commands/frame.js";
 import { dialogCommand } from "./commands/dialog.js";
 import { networkCommand } from "./commands/network.js";
@@ -85,7 +86,12 @@ ma-browser - AI Agent 浏览器自动化工具
 标签页：
   tab [list|new|close|<n>]     管理标签页
   tab claim|release [--id]     独占/释放标签页（多 agent 互不干扰）
-  status                       查看受管浏览器状态
+  status                       查看 daemon 与已接管浏览器状态
+
+浏览器（多实例并行）：
+  cdp [list]                   发现本机已开 remote debugging 的浏览器
+  cdp attach <port>|--all      接管指定/全部浏览器（不重启、不关闭）
+  cdp detach <id>              停止接管
 
 导航：
   back / forward / refresh     后退 / 前进 / 刷新
@@ -108,6 +114,7 @@ ma-browser - AI Agent 浏览器自动化工具
   -d, --depth <n>      限制树深度（snapshot 命令）
   -s, --selector <sel> 限定 CSS 选择器范围（snapshot 命令）
   --tab <tabId>        指定操作的标签页 ID
+  --browser <id>       未指定 --tab 时把命令/新标签页路由到该浏览器（cdp list 的 ID）
   --mcp                启动 MCP server（用于 Claude Code / Cursor 等 AI 工具）
   --help, -h           显示帮助信息
   --version, -v        显示版本号
@@ -205,6 +212,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       skipNext = true;
     } else if (arg === "--tab") {
       // --tab 参数及其值，无论出现在命令前后都跳过
+      skipNext = true;
+    } else if (arg === "--browser") {
+      // --browser 及其值由 client.sendCommand 通过 process.argv 解析
       skipNext = true;
     } else if (arg === "--intent") {
       // tab claim --intent <text>，由子命令通过 process.argv 解析
@@ -553,6 +563,11 @@ async function main(): Promise<void> {
 
       case "tab": {
         await tabCommand(parsed.args, { json: parsed.flags.json, globalTabId });
+        break;
+      }
+
+      case "cdp": {
+        await cdpCommand(parsed.args, { json: parsed.flags.json });
         break;
       }
 
