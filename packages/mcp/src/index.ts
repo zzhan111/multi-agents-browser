@@ -7,8 +7,6 @@ import {
   readDaemonJson,
   DAEMON_DIR,
   browserMode,
-  isAdapterCatalogResult,
-  queryAdapterCatalog,
 } from "@ma-browser/shared";
 import type { AdapterCatalogResult, CatalogQuery, CommandDef, Request, Response, DaemonInfo } from "@ma-browser/shared";
 import { execFile, spawn } from "node:child_process";
@@ -18,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import path from "node:path";
 import { z } from "zod";
+import { discoverSiteCatalog } from "./site-discovery.js";
 
 declare const __BB_BROWSER_VERSION__: string;
 
@@ -678,54 +677,16 @@ server.tool(
 // Site tools — run in the daemon; only recommend needs the CLI (browser history)
 // ---------------------------------------------------------------------------
 
-/** Loopback daemons share this machine's adapter directories, so the local CLI may answer for them. */
-function isLoopbackHost(host: string): boolean {
-  return host === "127.0.0.1" || host === "localhost" || host === "::1";
-}
-
-const STALE_DAEMON_HINT =
-  "The daemon answered without install status — it predates this MCP server. Restart the daemon (ma-browser daemon stop, then retry) so both run the same version.";
-
-/**
- * Installed-adapter catalog with install/scan status (#44). Asks the daemon
- * (rescanning, since another process may have just installed the library),
- * and falls back to the local CLI only when the daemon is unreachable and its
- * adapter directories are this machine's — never across a remote/connect-only
- * boundary, and never on an auth or server error.
- */
+/** Installed-adapter catalog with install/scan status (#44); see site-discovery.ts. */
 async function fetchSiteCatalog(query: CatalogQuery): Promise<AdapterCatalogResult> {
-  const info = await getDaemonInfo();
-  if (info) {
-    const params = new URLSearchParams({ invalidate: "1" });
-    if (query.q) params.set("q", query.q);
-    if (query.domain) params.set("domain", query.domain);
-    let res: globalThis.Response | undefined;
-    try {
-      res = await fetch(`${daemonBaseUrl(info)}/api/sites?${params}`, { headers: daemonHeaders(info) });
-    } catch {
-      res = undefined; // unreachable: maybe fall back below
-    }
-    if (res) {
-      if (!res.ok) throw new Error(`Daemon returned HTTP ${res.status} for /api/sites; adapter install status is unknown.`);
-      const data: unknown = await res.json();
-      if (!isAdapterCatalogResult(data)) throw new Error(STALE_DAEMON_HINT);
-      return data;
-    }
-    if (MA_BROWSER_CONNECT_ONLY || !isLoopbackHost(info.host)) {
-      throw new Error(`Cannot reach the daemon at ${daemonBaseUrl(info)}; its adapter catalog lives on that host, so it was not read locally. Check the daemon and retry.`);
-    }
-  } else if (MA_BROWSER_CONNECT_ONLY) {
-    throw new Error("No daemon found (connect-only mode); adapter install status is unknown. Start the tray and retry.");
-  }
-  const full = await runSiteCli(["list", "--json"]);
-  if (!isAdapterCatalogResult(full)) {
-    throw new Error("The ma-browser CLI returned an adapter list without install status; update it to match this MCP server.");
-  }
-  // The CLI lists everything; filter here so query/domain behave exactly like the daemon.
-  return queryAdapterCatalog(
-    { adapters: full.adapters, sources: full.sources, diagnostics: full.diagnostics ?? [], truncated: Boolean(full.truncated) },
-    query,
-  );
+  return discoverSiteCatalog(query, {
+    info: await getDaemonInfo(),
+    connectOnly: MA_BROWSER_CONNECT_ONLY,
+    hostOverride: process.env.BB_DAEMON_HOST,
+    baseUrl: daemonBaseUrl,
+    headers: daemonHeaders,
+    localCatalog: () => runSiteCli(["list", "--json"]),
+  });
 }
 
 server.tool(
