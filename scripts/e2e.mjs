@@ -76,10 +76,10 @@ async function closeBrowser() {
   await Promise.race([exited, sleep(10000).then(() => stopped(chrome))]);
 }
 
-function cli(session, args, { allowFailure = false } = {}) {
+function cli(session, args, { allowFailure = false, homeDir = home } = {}) {
   return new Promise((resolveP, reject) => {
     execFile(process.execPath, [join(dist, "cli.js"), ...args, "--json"], {
-      env: { ...process.env, BB_BROWSER_HOME: home, BB_BROWSER_CDP_URL: `http://127.0.0.1:${CDP_PORT}`, BB_SESSION_ID: session },
+      env: { ...process.env, BB_BROWSER_HOME: homeDir, BB_BROWSER_CDP_URL: `http://127.0.0.1:${CDP_PORT}`, BB_SESSION_ID: session },
       timeout: 60000,
     }, (error, stdout) => {
       let json;
@@ -164,6 +164,32 @@ try {
     assert.deepEqual(run.data, { tag: "x", cookie: "sid=agent-ok" });
     const missing = await cli("agent-a", ["site", "run", "e2e/whoami"], { allowFailure: true });
     assert.equal(missing.success, false);
+  });
+
+  await check("adapter discovery: install status instead of a bare [] (#44)", async () => {
+    const bare = mkdtempSync(join(tmpdir(), "ma-e2e-bare-"));
+    try {
+      const none = await cli("agent-a", ["site", "list"], { homeDir: bare });
+      assert.equal(none.status, "not_installed");
+      assert.equal(none.action, "ma-browser site update");
+      const info = await cli("agent-a", ["site", "info", "twitter/tweets"], { homeDir: bare, allowFailure: true });
+      assert.equal(info.success, false);
+      assert.equal(info.action, "ma-browser site update");
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+    const hit = await cli("agent-a", ["site", "search", "whoami"]);
+    assert.deepEqual([hit.status, hit.adapters.map((a) => a.name)], ["ok", ["e2e/whoami"]]);
+    assert.equal((await cli("agent-a", ["site", "search", "zzz-nothing"])).status, "no_match");
+    const { token } = JSON.parse(readFileSync(join(home, "daemon.json"), "utf8"));
+    const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const http = await (await fetch(`http://127.0.0.1:${HTTP_PORT}/api/sites?domain=127.0.0.1&invalidate=1`, { headers: auth })).json();
+    assert.equal(http.status, "ok");
+    assert.equal(http.total, 1);
+    assert.equal(http.sources.find((s) => s.source === "community").status, "missing");
+    const miss = await (await fetch(`http://127.0.0.1:${HTTP_PORT}/command`, { method: "POST", headers: auth, body: JSON.stringify({ id: "m", action: "site_info", name: "e2e/who" }) })).json();
+    assert.equal(miss.success, false);
+    assert.match(miss.hint, /e2e\/whoami/, "a near miss suggests the real name");
   });
 
   await check("network: captured requests keep their response bodies", async () => {

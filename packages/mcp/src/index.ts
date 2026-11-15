@@ -1,7 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { COMMAND_TIMEOUT, COMMANDS, generateId, readDaemonJson, DAEMON_DIR, browserMode } from "@ma-browser/shared";
-import type { CommandDef, Request, Response, DaemonInfo } from "@ma-browser/shared";
+import {
+  COMMAND_TIMEOUT,
+  COMMANDS,
+  generateId,
+  readDaemonJson,
+  DAEMON_DIR,
+  browserMode,
+  isAdapterCatalogResult,
+  queryAdapterCatalog,
+} from "@ma-browser/shared";
+import type { AdapterCatalogResult, CatalogQuery, CommandDef, Request, Response, DaemonInfo } from "@ma-browser/shared";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -222,7 +231,15 @@ function errorResult(message: string) {
 }
 
 function responseError(resp: Response) {
-  return errorResult(resp.error || "Unknown error");
+  if (!resp.hint && !resp.action) return errorResult(resp.error || "Unknown error");
+  // Keep recovery guidance machine-readable instead of folding it into one string.
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({ error: resp.error || "Unknown error", hint: resp.hint ?? "", action: resp.action ?? "" }, null, 2),
+    }],
+    isError: true,
+  };
 }
 
 function textResult(value: unknown) {
@@ -385,11 +402,13 @@ Tab management:
 - Omit tab to target the active tab
 
 Site adapters (pre-built commands for popular sites):
-- site_list/site_search/site_info: Discover available adapters and their signatures
+- site_list/site_search/site_info: Discover installed adapters and their signatures. list/search return {status, adapters, hint, action, sources}; status is ok | no_match | not_installed | empty | degraded
 - site_recommend: Suggest adapters based on browsing history
 - site_run: Execute an adapter directly from MCP
-- site_update: Pull the community adapter repository
-- Available: reddit, twitter, github, hackernews, xiaohongshu, zhihu, bilibili, weibo, douban, youtube
+- site_update: Install or pull the community adapter repository (not installed by default)
+- The community library has adapters for reddit, twitter/x, github, hackernews, xiaohongshu, zhihu, bilibili, weibo, douban, youtube and more — only after site_update; site_list/site_search show what is installed here
+- For site-specific data (e.g. a profile or feed on x.com), first call site_search({query: "", domain: "x.com"}), then site_info. Do this too when a page returns 403 or a login wall
+- If status is not_installed, call site_update (with the user's consent) and search again. An adapter still needs the user's logged-in session and cannot bypass access restrictions
 
 To create a new site adapter, run: ma-browser guide` },
 );
@@ -659,24 +678,63 @@ server.tool(
 // Site tools — run in the daemon; only recommend needs the CLI (browser history)
 // ---------------------------------------------------------------------------
 
+/** Loopback daemons share this machine's adapter directories, so the local CLI may answer for them. */
+function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+const STALE_DAEMON_HINT =
+  "The daemon answered without install status — it predates this MCP server. Restart the daemon (ma-browser daemon stop, then retry) so both run the same version.";
+
+/**
+ * Installed-adapter catalog with install/scan status (#44). Asks the daemon
+ * (rescanning, since another process may have just installed the library),
+ * and falls back to the local CLI only when the daemon is unreachable and its
+ * adapter directories are this machine's — never across a remote/connect-only
+ * boundary, and never on an auth or server error.
+ */
+async function fetchSiteCatalog(query: CatalogQuery): Promise<AdapterCatalogResult> {
+  const info = await getDaemonInfo();
+  if (info) {
+    const params = new URLSearchParams({ invalidate: "1" });
+    if (query.q) params.set("q", query.q);
+    if (query.domain) params.set("domain", query.domain);
+    let res: globalThis.Response | undefined;
+    try {
+      res = await fetch(`${daemonBaseUrl(info)}/api/sites?${params}`, { headers: daemonHeaders(info) });
+    } catch {
+      res = undefined; // unreachable: maybe fall back below
+    }
+    if (res) {
+      if (!res.ok) throw new Error(`Daemon returned HTTP ${res.status} for /api/sites; adapter install status is unknown.`);
+      const data: unknown = await res.json();
+      if (!isAdapterCatalogResult(data)) throw new Error(STALE_DAEMON_HINT);
+      return data;
+    }
+    if (MA_BROWSER_CONNECT_ONLY || !isLoopbackHost(info.host)) {
+      throw new Error(`Cannot reach the daemon at ${daemonBaseUrl(info)}; its adapter catalog lives on that host, so it was not read locally. Check the daemon and retry.`);
+    }
+  } else if (MA_BROWSER_CONNECT_ONLY) {
+    throw new Error("No daemon found (connect-only mode); adapter install status is unknown. Start the tray and retry.");
+  }
+  const full = await runSiteCli(["list", "--json"]);
+  if (!isAdapterCatalogResult(full)) {
+    throw new Error("The ma-browser CLI returned an adapter list without install status; update it to match this MCP server.");
+  }
+  // The CLI lists everything; filter here so query/domain behave exactly like the daemon.
+  return queryAdapterCatalog(
+    { adapters: full.adapters, sources: full.sources, diagnostics: full.diagnostics ?? [], truncated: Boolean(full.truncated) },
+    query,
+  );
+}
+
 server.tool(
   "site_list",
-  "List installed site adapters",
+  "List installed site adapters with install status. Returns {status, adapters, total, hint, action, sources}; status not_installed means the adapter library is missing (fix: site_update), not that no adapter exists.",
   {},
   async () => {
     try {
-      const info = await getDaemonInfo();
-      if (info) {
-        const res = await fetch(`${daemonBaseUrl(info)}/api/sites`, {
-          headers: daemonHeaders(info),
-        });
-        if (res.ok) {
-          const data = await res.json() as { adapters: unknown[] };
-          return textResult(data.adapters);
-        }
-      }
-      const result = await runSiteCli(["list", "--json"]);
-      return textResult(result);
+      return textResult(await fetchSiteCatalog({}));
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }
@@ -685,27 +743,14 @@ server.tool(
 
 server.tool(
   "site_search",
-  "Search installed site adapters by name, description, or domain. Pass domain to filter by the current page's domain.",
+  "Search installed site adapters by name, description, or domain; pass query \"\" with domain (e.g. x.com) to find every adapter for a site. Returns {status, adapters, hint, action, sources}: no_match = library installed but nothing matches; not_installed/empty = install with site_update; degraded = some files unreadable.",
   {
-    query: z.string().describe("Search query — matches adapter name, description, or domain"),
+    query: z.string().describe("Search query — matches adapter name, description, or domain; may be empty when domain is given"),
     domain: z.string().optional().describe("Filter to adapters for this domain (e.g. 'github.com')"),
   },
   async ({ query, domain }) => {
     try {
-      const info = await getDaemonInfo();
-      if (info) {
-        const params = new URLSearchParams({ q: query });
-        if (domain) params.set("domain", domain);
-        const res = await fetch(`${daemonBaseUrl(info)}/api/sites?${params}`, {
-          headers: daemonHeaders(info),
-        });
-        if (res.ok) {
-          const data = await res.json() as { adapters: unknown[] };
-          return textResult(data.adapters);
-        }
-      }
-      const result = await runSiteCli(["search", query, "--json"]);
-      return textResult(result);
+      return textResult(await fetchSiteCatalog({ q: query || undefined, domain: domain || undefined }));
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }

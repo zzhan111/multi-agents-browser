@@ -26,10 +26,15 @@ import {
   httpJson,
   isProcessAlive,
   isWsl,
+  adapterNotFound,
+  catalogBaseStatus,
+  loadAdapterCatalog,
   loadAdapters,
+  queryAdapterCatalog,
   readDaemonJson,
   updateCommunityAdapters,
   type Request,
+  type AdapterCatalogResult,
   type Response,
   type SiteAdapter,
 } from "@ma-browser/shared";
@@ -92,30 +97,46 @@ function getAllSites(): SiteMeta[] {
 
 // ── 子命令 ──────────────────────────────────────────────────────
 
-function siteList(options: SiteOptions): void {
-  const sites = getAllSites();
+/** Explain a non-ok catalog in text mode (JSON callers read `status`, `hint`, `action`). */
+function printCatalogStatus(result: AdapterCatalogResult): void {
+  if (result.status === "ok") {
+    if (result.hint) console.log(`\n提示: ${result.hint}`);
+    return;
+  }
+  const label: Record<string, string> = {
+    not_installed: "尚未安装任何 site adapter 库。",
+    empty: "adapter 目录存在，但没有加载到任何 adapter。",
+    degraded: "部分 adapter 文件或目录读取失败，结果可能不完整。",
+    no_match: "已安装的 adapter 中没有匹配项。",
+  };
+  console.log(label[result.status] ?? result.status);
+  if (result.hint) console.log(`  ${result.hint}`);
+  for (const d of result.diagnostics) console.log(`  [${d.code}] ${d.path} — ${d.hint}`);
+  if (result.truncated) console.log("  （诊断已截断）");
+  if (result.action) console.log(`  修复: ${result.action}`);
+  for (const src of result.sources) console.log(`  ${src.source === "local" ? "私有" : "社区"}目录 (${src.status}): ${src.path}`);
+}
 
-  if (sites.length === 0) {
-    if (options.json) {
-      console.log("[]");
-      return;
-    }
-    console.log("未找到任何 site adapter。");
-    console.log("  安装社区 adapter: ma-browser site update");
-    console.log(`  私有 adapter 目录: ${LOCAL_SITES_DIR}`);
+/**
+ * `--json` always prints the catalog object ({adapters, status, hint, action,
+ * sources, ...}), whatever the status, and exits 0: discovery succeeded even
+ * when it found that nothing is installed (#44).
+ */
+function siteList(options: SiteOptions): void {
+  const result = queryAdapterCatalog(loadAdapterCatalog());
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
 
-  if (options.json) {
-    console.log(JSON.stringify(sites.map(s => ({
-      name: s.name, description: s.description, domain: s.domain,
-      args: s.args, source: s.source,
-    })), null, 2));
+  if (result.adapters.length === 0) {
+    printCatalogStatus(result);
     return;
   }
 
   const groups = new Map<string, SiteMeta[]>();
-  for (const s of sites) {
+  for (const s of result.adapters) {
     const platform = s.name.split("/")[0];
     if (!groups.has(platform)) groups.set(platform, []);
     groups.get(platform)!.push(s);
@@ -131,38 +152,29 @@ function siteList(options: SiteOptions): void {
     }
   }
   console.log();
+  if (result.status === "degraded" || result.hint) printCatalogStatus(result);
 }
 
 function siteSearch(query: string, options: SiteOptions): void {
-  const sites = getAllSites();
-  const q = query.toLowerCase();
-  const matches = sites.filter(s =>
-    s.name.toLowerCase().includes(q) ||
-    s.description.toLowerCase().includes(q) ||
-    s.domain.toLowerCase().includes(q)
-  );
-
-  if (matches.length === 0) {
-    if (options.json) {
-      console.log("[]");
-      return;
-    }
-    console.log(`未找到匹配 "${query}" 的 adapter。`);
-    console.log("  查看所有: ma-browser site list");
-    return;
-  }
+  const result = queryAdapterCatalog(loadAdapterCatalog(), { q: query });
 
   if (options.json) {
-    console.log(JSON.stringify(matches.map(s => ({
-      name: s.name, description: s.description, domain: s.domain, source: s.source,
-    })), null, 2));
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
 
-  for (const s of matches) {
+  if (result.adapters.length === 0) {
+    if (result.status === "no_match") console.log(`未找到匹配 "${query}" 的 adapter。`);
+    printCatalogStatus(result);
+    if (result.status === "no_match") console.log("  查看所有: ma-browser site list");
+    return;
+  }
+
+  for (const s of result.adapters) {
     const src = s.source === "local" ? " (local)" : "";
     console.log(`${s.name.padEnd(24)} ${s.description}${src}`);
   }
+  if (result.status === "degraded") printCatalogStatus(result);
 }
 
 function siteUpdate(options: SiteOptions = {}): void {
@@ -263,19 +275,19 @@ async function siteHeal(name: string | undefined, options: SiteOptions): Promise
   if (failed) process.exit(1);
 }
 
-function findSiteByName(name: string): SiteMeta | undefined {
-  return getAllSites().find((site) => site.name === name);
-}
-
 function siteInfo(name: string, options: SiteOptions): void {
-  const site = findSiteByName(name);
+  const catalog = loadAdapterCatalog();
+  const site = catalog.adapters.find((a) => a.name === name);
 
   if (!site) {
+    const suggestions = catalog.adapters.filter((a) => a.name.includes(name)).slice(0, 5).map((a) => a.name);
+    const miss = adapterNotFound(catalog, name, suggestions);
     if (options.json) {
-      exitJsonError(`adapter "${name}" not found`, { action: "ma-browser site list" });
+      exitJsonError(miss.error, { status: miss.status, hint: miss.hint, action: miss.action });
     }
-    console.error(`[error] site info: adapter "${name}" not found.`);
-    console.error("  Try: ma-browser site list");
+    console.error(`[error] site info: ${miss.error}.`);
+    if (miss.hint) console.error(`  ${miss.hint}`);
+    if (miss.action) console.error(`  修复: ${miss.action}`);
     process.exit(1);
   }
 
@@ -319,7 +331,9 @@ function siteInfo(name: string, options: SiteOptions): void {
 async function siteRecommend(options: SiteOptions): Promise<void> {
   const days = options.days ?? 30;
   const historyDomains: HistoryDomain[] = getHistoryDomains(days);
-  const sites = getAllSites();
+  const catalog = loadAdapterCatalog();
+  const catalogStatus = catalogBaseStatus(catalog);
+  const sites = catalog.adapters;
   const sitesByDomain = new Map<string, SiteMeta[]>();
 
   for (const site of sites) {
@@ -352,10 +366,17 @@ async function siteRecommend(options: SiteOptions): Promise<void> {
     }
   }
 
+  // not_available only means "no installed adapter matches" — say why when the catalog itself is the reason.
+  let catalogInfo: { status: string; hint: string; action: string } | undefined;
+  if (catalogStatus !== "ok") {
+    const { status, hint, action } = queryAdapterCatalog(catalog);
+    catalogInfo = { status, hint, action };
+  }
   const jsonData = {
     days,
     available,
     not_available: notAvailable,
+    ...(catalogInfo ? { catalog: catalogInfo } : {}),
   };
 
   if (options.jq) {
@@ -382,6 +403,12 @@ async function siteRecommend(options: SiteOptions): Promise<void> {
     }
   }
 
+  if (catalogInfo) {
+    console.log(`⚠️ ${catalogInfo.hint}`);
+    if (catalogInfo.action) console.log(`   修复: ${catalogInfo.action}`);
+    console.log();
+  }
+
   console.log("📋 你常用但还没有 adapter：");
   console.log();
   if (notAvailable.length === 0) {
@@ -403,27 +430,23 @@ async function siteRun(
   args: string[],
   options: SiteOptions
 ): Promise<void> {
-  const sites = getAllSites();
-  const site = sites.find(s => s.name === name);
+  const catalog = loadAdapterCatalog();
+  const site = catalog.adapters.find(s => s.name === name);
 
   if (!site) {
-    const fuzzy = sites.filter(s => s.name.includes(name));
+    const suggestions = catalog.adapters.filter(s => s.name.includes(name)).slice(0, 5).map(s => s.name);
+    const miss = adapterNotFound(catalog, name, suggestions);
     if (options.json) {
-      exitJsonError(`site "${name}" not found`, {
-        suggestions: fuzzy.slice(0, 5).map(s => s.name),
-        action: fuzzy.length > 0 ? undefined : "ma-browser site update",
-      });
+      exitJsonError(miss.error, { status: miss.status, suggestions, hint: miss.hint, action: miss.action });
     }
-    console.error(`[error] site: "${name}" not found.`);
-    if (fuzzy.length > 0) {
+    console.error(`[error] site: ${miss.error}.`);
+    if (suggestions.length > 0) {
       console.error("  Did you mean:");
-      for (const s of fuzzy.slice(0, 5)) {
-        console.error(`    ma-browser site ${s.name}`);
-      }
-    } else {
-      console.error("  Try: ma-browser site list");
-      console.error("  Or:  ma-browser site update");
+      for (const s of suggestions) console.error(`    ma-browser site ${s}`);
+    } else if (miss.hint) {
+      console.error(`  ${miss.hint}`);
     }
+    if (miss.action) console.error(`  修复: ${miss.action}`);
     process.exit(1);
   }
 
