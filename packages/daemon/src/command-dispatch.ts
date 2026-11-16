@@ -25,8 +25,7 @@ import type { ScratchpadManager } from "./scratchpad-manager.js";
 import {
   listAdapters,
   searchAdapters,
-  findAdapter,
-  fuzzyAdapterNames,
+  lookupAdapter,
   updateAdapters,
 } from "./site-runner.js";
 import { invalidateCatalog } from "./site-catalog.js";
@@ -98,6 +97,12 @@ function ok(id: string, data?: ExtResponseData): Response {
 
 function fail(id: string, error: unknown): Response {
   return { id, success: false, error: buildRequestError(error).message };
+}
+
+/** Failure carrying a recovery hint and a runnable fix, so clients can show more than an error string. */
+function failWithHint(id: string, error: string, hint: string, action: string): Response {
+  const message = [`${error}.`, hint, action ? `Run: ${action}` : ""].filter(Boolean).join(" ");
+  return { id, success: false, error: message, hint, action };
 }
 
 // ---------------------------------------------------------------------------
@@ -619,14 +624,12 @@ async function runSiteAdapter(
 ): Promise<Response> {
   if (!request.name) return fail(request.id, "Missing 'name' parameter for site_run");
 
-  const adapter = findAdapter(request.name);
-  if (!adapter) {
-    const fuzzy = fuzzyAdapterNames(request.name);
-    const hint = fuzzy.length
-      ? ` Did you mean: ${fuzzy.join(", ")}?`
-      : " Run site_list to see available adapters.";
-    return fail(request.id, `Site adapter '${request.name}' not found.${hint}`);
+  const found = lookupAdapter(request.name);
+  if ("notFound" in found) {
+    const { error, hint, action } = found.notFound;
+    return failWithHint(request.id, error, hint, action);
   }
+  const adapter = found.adapter;
 
   const prep = buildAdapterScript(adapter, request.args ?? [], request.namedArgs ?? {});
   if ("error" in prep) return fail(request.id, prep.error);
@@ -781,9 +784,12 @@ export async function dispatchRequest(
   }
   if (request.action === "site_info") {
     if (!request.name) return fail(request.id, "Missing 'name' parameter for site_info");
-    const adapter = findAdapter(request.name);
-    if (!adapter) return fail(request.id, `Site adapter '${request.name}' not found`);
-    return ok(request.id, adapter as unknown as ExtResponseData);
+    const found = lookupAdapter(request.name);
+    if ("notFound" in found) {
+      const { error, hint, action } = found.notFound;
+      return failWithHint(request.id, error, hint, action);
+    }
+    return ok(request.id, found.adapter as unknown as ExtResponseData);
   }
   if (request.action === "site_run") {
     return handleSiteRun(cdp, request, session);

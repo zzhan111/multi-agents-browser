@@ -377,6 +377,10 @@ export interface Response {
   data?: ResponseData;
   /** 失败时的错误信息 */
   error?: string;
+  /** 失败时的恢复说明（如 site adapter 未安装） */
+  hint?: string;
+  /** 失败时可直接执行的修复命令（如 "ma-browser site update"） */
+  action?: string;
 }
 
 /** Daemon 状态 */

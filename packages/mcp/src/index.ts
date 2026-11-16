@@ -1,7 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { COMMAND_TIMEOUT, COMMANDS, generateId, readDaemonJson, DAEMON_DIR, browserMode } from "@ma-browser/shared";
-import type { CommandDef, Request, Response, DaemonInfo } from "@ma-browser/shared";
+import {
+  COMMAND_TIMEOUT,
+  COMMANDS,
+  generateId,
+  readDaemonJson,
+  DAEMON_DIR,
+  browserMode,
+} from "@ma-browser/shared";
+import type { AdapterCatalogResult, CatalogQuery, CommandDef, Request, Response, DaemonInfo } from "@ma-browser/shared";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -9,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import path from "node:path";
 import { z } from "zod";
+import { discoverSiteCatalog } from "./site-discovery.js";
 
 declare const __BB_BROWSER_VERSION__: string;
 
@@ -222,7 +230,15 @@ function errorResult(message: string) {
 }
 
 function responseError(resp: Response) {
-  return errorResult(resp.error || "Unknown error");
+  if (!resp.hint && !resp.action) return errorResult(resp.error || "Unknown error");
+  // Keep recovery guidance machine-readable instead of folding it into one string.
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({ error: resp.error || "Unknown error", hint: resp.hint ?? "", action: resp.action ?? "" }, null, 2),
+    }],
+    isError: true,
+  };
 }
 
 function textResult(value: unknown) {
@@ -385,11 +401,13 @@ Tab management:
 - Omit tab to target the active tab
 
 Site adapters (pre-built commands for popular sites):
-- site_list/site_search/site_info: Discover available adapters and their signatures
+- site_list/site_search/site_info: Discover installed adapters and their signatures. list/search return {status, adapters, hint, action, sources}; status is ok | no_match | not_installed | empty | degraded
 - site_recommend: Suggest adapters based on browsing history
 - site_run: Execute an adapter directly from MCP
-- site_update: Pull the community adapter repository
-- Available: reddit, twitter, github, hackernews, xiaohongshu, zhihu, bilibili, weibo, douban, youtube
+- site_update: Install or pull the community adapter repository (not installed by default)
+- The community library has adapters for reddit, twitter/x, github, hackernews, xiaohongshu, zhihu, bilibili, weibo, douban, youtube and more — only after site_update; site_list/site_search show what is installed here
+- For site-specific data (e.g. a profile or feed on x.com), first call site_search({query: "", domain: "x.com"}), then site_info. Do this too when a page returns 403 or a login wall
+- If status is not_installed, call site_update (with the user's consent) and search again. An adapter still needs the user's logged-in session and cannot bypass access restrictions
 
 To create a new site adapter, run: ma-browser guide` },
 );
@@ -659,24 +677,25 @@ server.tool(
 // Site tools — run in the daemon; only recommend needs the CLI (browser history)
 // ---------------------------------------------------------------------------
 
+/** Installed-adapter catalog with install/scan status (#44); see site-discovery.ts. */
+async function fetchSiteCatalog(query: CatalogQuery): Promise<AdapterCatalogResult> {
+  return discoverSiteCatalog(query, {
+    info: await getDaemonInfo(),
+    connectOnly: MA_BROWSER_CONNECT_ONLY,
+    hostOverride: process.env.BB_DAEMON_HOST,
+    baseUrl: daemonBaseUrl,
+    headers: daemonHeaders,
+    localCatalog: () => runSiteCli(["list", "--json"]),
+  });
+}
+
 server.tool(
   "site_list",
-  "List installed site adapters",
+  "List installed site adapters with install status. Returns {status, adapters, total, hint, action, sources}; status not_installed means the adapter library is missing (fix: site_update), not that no adapter exists.",
   {},
   async () => {
     try {
-      const info = await getDaemonInfo();
-      if (info) {
-        const res = await fetch(`${daemonBaseUrl(info)}/api/sites`, {
-          headers: daemonHeaders(info),
-        });
-        if (res.ok) {
-          const data = await res.json() as { adapters: unknown[] };
-          return textResult(data.adapters);
-        }
-      }
-      const result = await runSiteCli(["list", "--json"]);
-      return textResult(result);
+      return textResult(await fetchSiteCatalog({}));
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }
@@ -685,27 +704,14 @@ server.tool(
 
 server.tool(
   "site_search",
-  "Search installed site adapters by name, description, or domain. Pass domain to filter by the current page's domain.",
+  "Search installed site adapters by name, description, or domain; pass query \"\" with domain (e.g. x.com) to find every adapter for a site. Returns {status, adapters, hint, action, sources}: no_match = library installed but nothing matches; not_installed/empty = install with site_update; degraded = some files unreadable.",
   {
-    query: z.string().describe("Search query — matches adapter name, description, or domain"),
+    query: z.string().describe("Search query — matches adapter name, description, or domain; may be empty when domain is given"),
     domain: z.string().optional().describe("Filter to adapters for this domain (e.g. 'github.com')"),
   },
   async ({ query, domain }) => {
     try {
-      const info = await getDaemonInfo();
-      if (info) {
-        const params = new URLSearchParams({ q: query });
-        if (domain) params.set("domain", domain);
-        const res = await fetch(`${daemonBaseUrl(info)}/api/sites?${params}`, {
-          headers: daemonHeaders(info),
-        });
-        if (res.ok) {
-          const data = await res.json() as { adapters: unknown[] };
-          return textResult(data.adapters);
-        }
-      }
-      const result = await runSiteCli(["search", query, "--json"]);
-      return textResult(result);
+      return textResult(await fetchSiteCatalog({ q: query || undefined, domain: domain || undefined }));
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }

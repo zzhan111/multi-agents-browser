@@ -20,7 +20,7 @@ import { CdpConnection } from "./cdp-connection.js";
 import type { CommandHistory } from "./command-history.js";
 import { CommandScheduler } from "./command-scheduler.js";
 import { SessionManager, expireIdleSessions, type SessionScope } from "./session-state.js";
-import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
+import { invalidateCatalog, queryCatalog } from "./site-catalog.js";
 import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
 import type { JournalManager } from "./agent-journal.js";
@@ -389,9 +389,8 @@ export class HttpServer {
     if (parseStringParam(url, "invalidate", "") === "1") invalidateCatalog();
     const q = parseStringParam(url, "q", "");
     const domain = parseStringParam(url, "domain", "");
-    const { adapters, cacheAge } = getCatalog();
-    const results = queryCatalog(adapters, { q: q || undefined, domain: domain || undefined });
-    this.sendJson(res, 200, { adapters: results, total: adapters.length, cacheAge });
+    // Keeps the original {adapters,total,cacheAge} fields and adds install/scan status (#44).
+    this.sendJson(res, 200, queryCatalog({ q: q || undefined, domain: domain || undefined }));
   }
 
   // ---------------------------------------------------------------------------

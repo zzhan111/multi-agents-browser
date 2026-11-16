@@ -7,6 +7,17 @@
 
 ## [Unreleased]
 
+### ⚠ Breaking
+
+- **site:** `site list --json` / `site search --json`, the MCP `site_list` / `site_search` tools and the daemon `site_list` / `site_search` commands now return an object instead of a bare array: `{adapters, total, cacheAge, status, sources, diagnostics, truncated, hint, action}`. Migrate `jq '.[]'` to `jq '.adapters[]'`. `GET /api/sites` keeps its fields and only adds the new ones. ([#44](https://github.com/zzhan111/multi-agents-browser/issues/44))
+
+### Bug Fixes
+
+- **site:** discovery reports why it is empty — `not_installed` (no adapter library), `empty`, `degraded` (unreadable files, with errno diagnostics), or `no_match` — instead of a silent `[]`; `site info` / `site run` misses point to `ma-browser site update` when nothing is installed ([#44](https://github.com/zzhan111/multi-agents-browser/issues/44))
+- **site:** explicit discovery and name misses rescan, so a library installed from another terminal shows up immediately
+- **mcp:** errors keep `hint` / `action`; the no-daemon fallback honours `domain` and never reads local directories for a remote or connect-only daemon; a pre-#44 daemon is reported as a version mismatch, not as "not installed"
+- **mcp:** instructions no longer list community platforms as "Available"; they say to `site_search` by domain first and install with `site_update`
+
 ## [0.14.0](https://github.com/zzhan111/multi-agents-browser/compare/v0.13.0...v0.14.0) (2026-10-27)
 
 Slim core line, rebuilt from v0.12.0. The v0.13.0 features (site_freeze,
