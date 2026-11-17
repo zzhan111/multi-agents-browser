@@ -1,5 +1,7 @@
-﻿param([ValidateSet('headless', 'headed')][string]$Mode = 'headless')
+﻿param([ValidateSet('headless', 'headed')][string]$Mode = 'headless', [switch]$ExpectForeground, [ValidateRange(0, 120)][int]$DelaySeconds = 0)
 $ErrorActionPreference = 'Stop'
+# -DelaySeconds lets you start the check, then left-click the tray and confirm before state is sampled.
+Start-Sleep -Seconds $DelaySeconds
 $trayPath = (Resolve-Path (Join-Path $PSScriptRoot 'windows-tray.ps1')).Path.Replace('\', '/').ToLowerInvariant()
 $tray = Get-CimInstance Win32_Process | Where-Object {
   $_.Name -eq 'powershell.exe' -and $_.CommandLine -and $_.CommandLine.Replace('\', '/').ToLowerInvariant().Contains($trayPath)
@@ -21,4 +23,19 @@ $browser = Get-CimInstance Win32_Process | Where-Object {
 if (-not $browser) { throw 'The managed browser is not running with its expected profile.' }
 $headless = $browser.CommandLine -match '(?:^|\s)--headless(?:=\S+)?(?:\s|$)'
 if ($headless -ne ($Mode -eq 'headless')) { throw "The managed browser is not in $Mode mode." }
+if ($ExpectForeground) {
+  if ($Mode -ne 'headed') { throw '-ExpectForeground requires -Mode headed.' }
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class MaBrowserForeground {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+}
+'@
+  $foregroundPid = [uint32]0
+  [MaBrowserForeground]::GetWindowThreadProcessId([MaBrowserForeground]::GetForegroundWindow(), [ref]$foregroundPid) | Out-Null
+  if ($foregroundPid -ne $browser.ProcessId) { throw "The managed browser window is not in the foreground (foreground pid $foregroundPid)." }
+  Write-Output 'The managed browser window is in the foreground.'
+}
 Write-Output "Windows tray, daemon and managed $Mode browser are running."

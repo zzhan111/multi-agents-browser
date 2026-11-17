@@ -67,9 +67,11 @@ ma-browser site zhihu/hot     # 开搞
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PWD\scripts\windows-tray.ps1`"")
 ```
 
-托盘会启动并监视后台进程，新启动的受管浏览器默认以无头模式运行。右键托盘图标可切换有头／无头模式，所选模式会在下次登录时保留。切换会重启受管浏览器并恢复会话，未保存的页面内容可能丢失；需要交互登录时可切换到有头模式。右键菜单也可打开日志或退出托盘（后台继续运行）。托盘之外可设置 `MA_BROWSER_HEADLESS=1` 启动无头浏览器；已在运行的浏览器不会自动重启。
+托盘会启动并监视后台进程，新启动的受管浏览器默认以无头模式运行。左键托盘图标可显示受管浏览器：托盘总会先确认，有头模式下将窗口置于前台；无头模式下切换为有头（会重启浏览器）并置前新窗口；选「否」不做任何改动，失败会以气泡提示原因。右键托盘图标可切换有头／无头模式，所选模式会在下次登录时保留。切换会重启受管浏览器并恢复会话，未保存的页面内容可能丢失；需要交互登录时可切换到有头模式。右键菜单也可打开日志或退出托盘（后台继续运行）。托盘之外可设置 `MA_BROWSER_HEADLESS=1` 启动无头浏览器；已在运行的浏览器不会自动重启。
 
 Agent 可调用 `ma-browser mode status|headed|headless --json` 或 MCP `browser_mode`（`mode` 参数同名）。查询无需切换，切换完成并重新连接后才返回；旧 tab ID 会失效。托盘负责启动 daemon 时，可为 MCP 设置环境变量 `MA_BROWSER_CONNECT_ONLY=1`，避免切换期间抢先启动另一个 daemon。
+
+手工验证左键流程：托盘处于无头模式时左键图标并选「否」，确认 `ma-browser mode status --json` 仍为 `headless`；然后先运行 `.\scripts\check-windows-tray.ps1 -Mode headed -ExpectForeground -DelaySeconds 60`，再左键选「是」；窗口置前后检查通过。用其他程序盖住窗口后以 `-DelaySeconds 10` 重复一次。
 
 需要在 Windows 登录后自动启动时，在仓库目录运行：
 
@@ -155,11 +157,14 @@ ma-browser open https://example.com
 ma-browser snapshot -i                # 可访问性树
 ma-browser click @3                   # 点击元素
 ma-browser fill @5 "hello"            # 填写输入框
+ma-browser upload @6 "C:\Users\me\a.pdf" # 给 <input type=file> 设置文件（ref 或 CSS 选择器）
 ma-browser eval "document.title"      # 执行 JS
 ma-browser fetch URL --json           # 带登录态的 fetch
 ma-browser network requests --with-body --json  # 抓包
 ma-browser screenshot                 # 截图
 ```
+
+`upload` 走 CDP `DOM.setFileInputFiles` 并触发 input/change；目标可以是 file input 的 ref、它的 label/外层容器，或隐藏 input 用 `"input[type=file]"` 选择器。路径可相对或绝对（含 Windows `C:\...`）；多文件要求 input 带 `multiple`，不匹配 `accept` 会报错（`--force` 跳过）。自定义上传组件常在 change 后读走文件并清空 input，`uploadedFiles` 可能为空而页面已显示文件——用 `snapshot` 确认。
 
 所有命令支持 `--json` 输出、`--jq <expr>` 内联过滤、和 `--tab <id>` 多标签页并发操作。
 
@@ -179,6 +184,19 @@ Daemon 默认绑定 `127.0.0.1:19824`，可通过 `--host` 自定义监听地址
 ma-browser daemon --host 127.0.0.1    # 仅 IPv4（解决 macOS IPv6 问题）
 ma-browser daemon --host 0.0.0.0      # 监听所有网卡（用于 Tailscale / ZeroTier 跨机器访问）
 ```
+
+### 命令超时与健康状态
+
+每个 action 有自己的超时预算：默认 30 秒；`screenshot` / `eval` / `snapshot` / `open` / `refresh` / `back` / `forward` / `site update` 为 60 秒；`site run` 为 120 秒；`wait <ms>` 为 ms + 5 秒。以调用方环境为准（CLI/MCP 会随命令发送预算）：
+
+```bash
+BB_COMMAND_TIMEOUT_SCREENSHOT_MS=120000 ma-browser screenshot   # 单个 action
+BB_COMMAND_TIMEOUT_MS=90000 ma-browser eval "..."                # 所有 action 的下限
+```
+
+超时错误会标明卡在哪里：`[cdp]`（浏览器没有响应某个 CDP 调用，附方法名）、`[dispatch]`（daemon 侧逻辑未完成，例如排在同一 tab 上一个卡住的命令后面）、`[queue]`（没有空闲命令槽）、`[cdp_connect]`（浏览器始终未连上）。如果 daemon 完全没有响应，客户端会探测 `/status`，区分“命令卡住”和“daemon 无响应/重启中”。
+
+`ma-browser status`（以及 `/status` → `health`）报告 `ok` / `degraded` / `stalled` / `disconnected`，并给出最近命令/成功时间、连续超时数、超时后仍在运行的命令、进行中的命令、等待中的 CDP 调用、事件循环延迟和恢复建议。“能列 tab 但截不了图”的半死状态会显示为 `degraded`/`stalled`，不再看起来正常。
 
 ## 架构
 

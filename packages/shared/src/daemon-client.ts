@@ -154,12 +154,27 @@ export function sessionHeaders(env: NodeJS.ProcessEnv = process.env): Record<str
   };
 }
 
+/**
+ * The daemon accepted the connection (or never answered it) but sent no HTTP
+ * response within the client timeout. Distinct from a structured daemon-side
+ * command timeout, which arrives as a normal Response with `timeout` set.
+ */
+export class DaemonTimeoutError extends Error {
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(`Daemon request timed out after ${Math.round(timeoutMs / 1000)}s (no HTTP response from daemon)`);
+    this.name = "DaemonTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export function httpJson<T>(
   method: "GET" | "POST",
   urlPath: string,
   info: { host: string; port: number; token: string },
   body?: unknown,
   timeout = 5000,
+  opts: { resolveStatuses?: readonly number[] } = {},
 ): Promise<T> {
   return new Promise((resolveP, reject) => {
     const payload = body !== undefined ? JSON.stringify(body) : undefined;
@@ -186,7 +201,18 @@ export function httpJson<T>(
         res.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
         res.on("end", () => {
           const raw = Buffer.concat(chunks).toString("utf8");
-          if ((res.statusCode ?? 500) >= 400) {
+          const status = res.statusCode ?? 500;
+          // Callers may opt in to receiving structured failure bodies (e.g. a
+          // 504 command-timeout Response) instead of an opaque HTTP error.
+          if (status >= 400 && opts.resolveStatuses?.includes(status)) {
+            try {
+              resolveP(JSON.parse(raw) as T);
+              return;
+            } catch {
+              // fall through to the generic HTTP error
+            }
+          }
+          if (status >= 400) {
             reject(new Error(`Daemon HTTP ${res.statusCode}: ${raw}`));
             return;
           }
@@ -201,9 +227,46 @@ export function httpJson<T>(
     req.on("error", reject);
     req.on("timeout", () => {
       req.destroy();
-      reject(new Error("Daemon request timed out"));
+      reject(new DaemonTimeoutError(timeout));
     });
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+// ---------------------------------------------------------------------------
+// Timeout diagnosis
+// ---------------------------------------------------------------------------
+
+interface StatusProbe {
+  health?: { state?: string; hint?: string; reasons?: string[] };
+}
+
+/**
+ * Turn "the client gave up waiting" into an actionable message by probing
+ * GET /status (2 s): if the daemon still answers, the command itself is stuck
+ * (the daemon's own budget should have answered first — likely a wedged tab);
+ * if it does not, the daemon event loop is blocked or it is restarting.
+ */
+export async function describeDaemonTimeout(
+  info: { host: string; port: number; token: string },
+  action: string,
+  timeoutMs: number,
+  probe: typeof httpJson = httpJson,
+): Promise<string> {
+  const head = `Command "${action}" got no response from the daemon within ${Math.round(timeoutMs / 1000)}s`;
+  try {
+    const status = await probe<StatusProbe>("GET", "/status", info, undefined, 2000);
+    const health = status.health;
+    const state = health?.state ? ` Daemon health: ${health.state}${health.reasons?.length ? ` (${health.reasons.join("; ")})` : ""}.` : "";
+    return (
+      `${head}, but /status still answers — the command is stuck in the daemon (wedged tab or browser).${state} ` +
+      (health?.hint ?? "Dismiss any open dialog or close the target tab and retry.")
+    );
+  } catch {
+    return (
+      `${head}, and /status does not answer either — the daemon is unresponsive (event loop blocked) or restarting. ` +
+      "Wait a few seconds and retry; if it persists, restart it (`ma-browser daemon shutdown`, or restart the Windows tray)."
+    );
+  }
 }

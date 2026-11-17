@@ -11,6 +11,12 @@
 
 - **site:** `site list --json` / `site search --json`, the MCP `site_list` / `site_search` tools and the daemon `site_list` / `site_search` commands now return an object instead of a bare array: `{adapters, total, cacheAge, status, sources, diagnostics, truncated, hint, action}`. Migrate `jq '.[]'` to `jq '.adapters[]'`. `GET /api/sites` keeps its fields and only adds the new ones. ([#44](https://github.com/zzhan111/multi-agents-browser/issues/44))
 
+### Added
+
+- `upload <ref|selector> <file...>` CLI command and `browser_upload` MCP tool: set local files on `<input type=file>` via CDP `DOM.setFileInputFiles`, with input/change events, accept/multiple/path validation, and `[file ...]` markers in snapshots (#32)
+- **daemon:** per-action command timeout budgets (`command-timeouts.ts`), timeout stage classification (`cdp_connect` / `queue` / `cdp` / `dispatch`), and half-dead health reporting in `/status` (#30)
+- **windows:** tray left-click confirmation dialog to bring the managed browser to foreground or switch headless → headed (#31)
+
 ### Bug Fixes
 
 - **site:** discovery reports why it is empty — `not_installed` (no adapter library), `empty`, `degraded` (unreadable files, with errno diagnostics), or `no_match` — instead of a silent `[]`; `site info` / `site run` misses point to `ma-browser site update` when nothing is installed ([#44](https://github.com/zzhan111/multi-agents-browser/issues/44))

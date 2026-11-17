@@ -18,6 +18,7 @@ import { scrollCommand } from "./commands/scroll.js";
 import { backCommand, forwardCommand, refreshCommand } from "./commands/nav.js";
 import { checkCommand, uncheckCommand } from "./commands/check.js";
 import { selectCommand } from "./commands/select.js";
+import { uploadCommand } from "./commands/upload.js";
 import { evalCommand } from "./commands/eval.js";
 import { tabCommand } from "./commands/tab.js";
 import { frameCommand, frameMainCommand } from "./commands/frame.js";
@@ -73,6 +74,7 @@ ma-browser - AI Agent 浏览器自动化工具
   type <ref> <text>            逐字符输入（不清空）
   check/uncheck <ref>          勾选/取消复选框
   select <ref> <val>           下拉框选择
+  upload <ref|sel> <file...>   给文件 input 设置本地文件（--force 跳过 accept 校验）
   press <key>                  发送按键
   scroll <dir> [px]            滚动页面
 
@@ -420,6 +422,23 @@ async function main(): Promise<void> {
           process.exit(1);
         }
         await selectCommand(ref, value, { json: parsed.flags.json, tabId: globalTabId });
+        break;
+      }
+
+      case "upload": {
+        const [target, ...files] = parsed.args;
+        if (!target || files.length === 0) {
+          console.error("错误：缺少 ref/selector 或文件路径");
+          console.error("用法：ma-browser upload <ref|selector> <file...> [--force]");
+          console.error('示例：ma-browser upload @7 C:\\Users\\me\\report.pdf');
+          console.error('      ma-browser upload "input[type=file]" ./a.png ./b.png');
+          process.exit(1);
+        }
+        await uploadCommand(target, files, {
+          json: parsed.flags.json,
+          tabId: globalTabId,
+          force: process.argv.includes("--force"),
+        });
         break;
       }
 

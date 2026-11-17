@@ -30,6 +30,18 @@ export {
 } from "./constants.js";
 
 export {
+  ACTION_TIMEOUTS,
+  CLIENT_TIMEOUT_GRACE_MS,
+  MAX_COMMAND_TIMEOUT_MS,
+  MIN_COMMAND_TIMEOUT_MS,
+  type CommandTimeoutInfo,
+  type CommandTimeoutKind,
+  actionTimeoutEnvName,
+  clientCommandTimeoutMs,
+  commandTimeoutMs,
+} from "./command-timeouts.js";
+
+export {
   type CommandDef,
   COMMANDS,
   findCommand,
@@ -43,6 +55,8 @@ export {
   readDaemonJson,
   isProcessAlive,
   httpJson,
+  DaemonTimeoutError,
+  describeDaemonTimeout,
   sessionHeaders,
   isWsl,
   parseDefaultGatewayHex,
