@@ -8,13 +8,14 @@
  * The pre-commit hook runs `pnpm build` before `pnpm test`, so dist/ is fresh.
  */
 
-import { describe, it, beforeEach, afterEach } from "node:test";
+import { describe, it, beforeEach, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import type { AddressInfo } from "node:net";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -34,9 +35,31 @@ const DAEMON_ENTRY = path.resolve(
   "../../../daemon/dist/index.js",
 );
 
-// Unique port counter so concurrent/sequential tests don't share daemon ports.
-let _portCounter = 39970;
-function nextPort(): number { return _portCounter++; }
+// Never let a daemon under test launch a real, detached browser when it finds
+// no CDP endpoint — that browser outlives the test run (inherited by spawned
+// daemons through process.env).
+process.env.MA_BROWSER_NO_LAUNCH = "1";
+
+after(() => {
+  rmSync(DAEMON_DIR, { recursive: true, force: true });
+});
+
+/**
+ * Ask the kernel for a free loopback port. Hard-coded ports inside the
+ * ephemeral range can be held in TIME_WAIT by an unrelated recent loopback
+ * connection, making the daemon die with EADDRINUSE; bind(0) never hands out
+ * such a port.
+ */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = http.createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address() as AddressInfo;
+      srv.close(() => resolve(port));
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,10 +92,14 @@ async function waitForDaemonJson(timeoutMs = 8000): Promise<{ pid: number; host:
   throw new Error("daemon.json not created in time");
 }
 
-/** Start a fake CDP server that responds to /json/version (HTTP only, not WebSocket) */
-function startFakeCdpServer(port: number): Promise<http.Server> {
+/**
+ * Start a fake CDP server that responds to /json/version (HTTP only, not
+ * WebSocket) on a kernel-assigned port; read the port with portOf().
+ */
+function startFakeCdpServer(): Promise<http.Server> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
+      const port = portOf(server);
       if (req.url === "/json/version") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -95,8 +122,12 @@ function startFakeCdpServer(port: number): Promise<http.Server> {
       }
     });
     server.on("error", reject);
-    server.listen(port, "127.0.0.1", () => resolve(server));
+    server.listen(0, "127.0.0.1", () => resolve(server));
   });
+}
+
+function portOf(server: http.Server): number {
+  return (server.address() as AddressInfo).port;
 }
 
 function killProcess(pid: number): void {
@@ -143,8 +174,8 @@ describe("daemon startup without Chrome", () => {
   it("daemon stays running and writes daemon.json even without Chrome (two-phase startup)", async () => {
     // Phase 1 (HTTP server) always completes regardless of Chrome availability.
     // Phase 2 (CDP) retries in the background — daemon never exits on CDP failure.
-    const daemonPort = nextPort();
-    const unusedCdpPort = nextPort();
+    const daemonPort = await freePort();
+    const unusedCdpPort = await freePort();
     const child = spawn(process.execPath, [
       DAEMON_ENTRY, "--cdp-port", String(unusedCdpPort), "--port", String(daemonPort),
     ], { detached: true, stdio: "ignore" });
@@ -162,8 +193,8 @@ describe("daemon startup without Chrome", () => {
   it("daemon writes daemon.json quickly via two-phase startup (no Chrome needed)", async () => {
     // The HTTP server (phase 1) starts in milliseconds. daemon.json appears
     // long before the CDP retry window gives up — well within 5 seconds.
-    const daemonPort = nextPort();
-    const unusedCdpPort = nextPort();
+    const daemonPort = await freePort();
+    const unusedCdpPort = await freePort();
     const child = spawn(process.execPath, [
       DAEMON_ENTRY, "--cdp-port", String(unusedCdpPort), "--port", String(daemonPort),
     ], { detached: true, stdio: "ignore" });
@@ -183,13 +214,14 @@ describe("daemon startup without Chrome", () => {
 
 describe("daemon startup with CDP available", () => {
   let fakeCdp: http.Server | null = null;
-  const cdpPort = 39998;
+  let cdpPort = 0;
   let daemonPid: number | null = null;
 
   beforeEach(async () => {
     cleanupDaemonJson();
     cleanupManagedPortFile();
-    fakeCdp = await startFakeCdpServer(cdpPort);
+    fakeCdp = await startFakeCdpServer();
+    cdpPort = portOf(fakeCdp);
   });
 
   afterEach(async () => {
@@ -206,7 +238,7 @@ describe("daemon startup with CDP available", () => {
   });
 
   it("daemon starts successfully when CDP port is reachable", async () => {
-    const daemonPort = nextPort();
+    const daemonPort = await freePort();
     const child = spawn(process.execPath, [
       DAEMON_ENTRY, "--cdp-port", String(cdpPort), "--port", String(daemonPort),
     ], { detached: true, stdio: "ignore" });
@@ -222,7 +254,7 @@ describe("daemon startup with CDP available", () => {
   });
 
   it("daemon writes correct host/port in daemon.json", async () => {
-    const daemonPort = nextPort();
+    const daemonPort = await freePort();
     const child = spawn(process.execPath, [
       DAEMON_ENTRY, "--cdp-port", String(cdpPort), "--host", "127.0.0.1", "--port", String(daemonPort),
     ], { detached: true, stdio: "ignore" });
@@ -236,7 +268,7 @@ describe("daemon startup with CDP available", () => {
   });
 
   it("daemon HTTP /status responds when CDP is connected", async () => {
-    const daemonPort = nextPort();
+    const daemonPort = await freePort();
     const child = spawn(process.execPath, [
       DAEMON_ENTRY, "--cdp-port", String(cdpPort), "--port", String(daemonPort),
     ], { detached: true, stdio: "ignore" });
@@ -281,15 +313,14 @@ describe("daemon startup with CDP available", () => {
 
 describe("ensureDaemon passes CDP info to daemon", () => {
   let fakeCdp: http.Server | null = null;
-  const cdpPort = 39994;
 
   beforeEach(async () => {
     cleanupDaemonJson();
     cleanupManagedPortFile();
+    fakeCdp = await startFakeCdpServer();
     // Write managed port file pointing to our fake CDP
     mkdirSync(path.dirname(MANAGED_PORT_FILE), { recursive: true });
-    writeFileSync(MANAGED_PORT_FILE, String(cdpPort));
-    fakeCdp = await startFakeCdpServer(cdpPort);
+    writeFileSync(MANAGED_PORT_FILE, String(portOf(fakeCdp)));
   });
 
   afterEach(async () => {
@@ -303,7 +334,7 @@ describe("ensureDaemon passes CDP info to daemon", () => {
 
   it("daemon discovers CDP via managed port file", async () => {
     // Daemon should read ~/.bb-browser/browser/cdp-port and find our fake CDP
-    const daemonPort = nextPort();
+    const daemonPort = await freePort();
     const child = spawn(process.execPath, [DAEMON_ENTRY, "--port", String(daemonPort)], {
       detached: true,
       stdio: "ignore",
@@ -341,7 +372,7 @@ describe("two-phase startup: daemon writes daemon.json before CDP (#136 fix)", (
     // With two-phase startup, the HTTP server (phase 1) always completes and
     // writes daemon.json before any CDP work begins. Phase 2 (CDP) retries in
     // the background and never kills the daemon on failure.
-    const daemonPort = nextPort();
+    const daemonPort = await freePort();
     const child = spawn(process.execPath, [DAEMON_ENTRY, "--port", String(daemonPort)], {
       detached: true,
       stdio: "ignore",
@@ -355,9 +386,9 @@ describe("two-phase startup: daemon writes daemon.json before CDP (#136 fix)", (
   });
 
   it("daemon with explicit --cdp-port pointing to fake CDP → starts successfully", async () => {
-    const cdpPort = 39992;
-    const daemonPort = nextPort();
-    const fakeCdp = await startFakeCdpServer(cdpPort);
+    const fakeCdp = await startFakeCdpServer();
+    const cdpPort = portOf(fakeCdp);
+    const daemonPort = await freePort();
 
     try {
       const child = spawn(process.execPath, [
@@ -391,9 +422,9 @@ describe("CDP 503 error includes diagnostics", () => {
   });
 
   it("503 response includes CDP target, reason, and hint — responds immediately not 30s", async () => {
-    const cdpPort = 39989;
-    const daemonPort = 39988;
-    const fakeCdp = await startFakeCdpServer(cdpPort);
+    const fakeCdp = await startFakeCdpServer();
+    const cdpPort = portOf(fakeCdp);
+    const daemonPort = await freePort();
 
     try {
       const child = spawn(process.execPath, [

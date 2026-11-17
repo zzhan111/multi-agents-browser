@@ -446,7 +446,9 @@ async function bringUpCdpLoop(
 }
 
 main().catch((error) => {
-  console.error("[Daemon] Fatal error:", error);
+  // Include the stack: the log interceptor stringifies arguments, and
+  // String(error) alone drops everything but the first line.
+  console.error("[Daemon] Fatal error:", error instanceof Error ? (error.stack ?? error.message) : error);
   // Remove daemon.json so a tray-spawned replacement doesn't find a stale
   // entry pointing at this now-dead process. (Graceful shutdown intentionally
   // skips this because a replacement daemon may already have overwritten it.)

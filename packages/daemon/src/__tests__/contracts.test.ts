@@ -5,9 +5,10 @@
  * directly, without requiring a real Chrome browser or WebSocket connection.
  */
 
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { TabStateManager, type TabState } from "../tab-state.js";
@@ -721,6 +722,10 @@ describe("daemon.json PID strategy", () => {
   const testDir = path.join(os.tmpdir(), "ma-browser-test-" + process.pid);
   const testDaemonJson = path.join(testDir, "daemon.json");
 
+  after(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
   beforeEach(() => {
     mkdirSync(testDir, { recursive: true });
     if (existsSync(testDaemonJson)) {
@@ -729,8 +734,9 @@ describe("daemon.json PID strategy", () => {
   });
 
   it("stale daemon.json with dead PID is detected", () => {
-    // Write a daemon.json with a PID that doesn't exist (e.g., 999999)
-    const stalePid = 999999;
+    // Use the pid of a child that has already exited and been reaped. A fixed
+    // "large" pid like 999999 is not guaranteed dead (pid_max can be 4194304).
+    const stalePid = spawnSync(process.execPath, ["-e", ""]).pid as number;
     const info = { pid: stalePid, host: "127.0.0.1", port: 19824, token: "stale-token" };
     writeFileSync(testDaemonJson, JSON.stringify(info));
 

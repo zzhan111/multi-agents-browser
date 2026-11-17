@@ -12,7 +12,7 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { createWriteStream, mkdirSync, statSync, renameSync, unlinkSync } from "node:fs";
+import { openSync, writeSync, mkdirSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Request } from "@ma-browser/shared";
 import { COMMAND_TIMEOUT, DAEMON_PORT } from "@ma-browser/shared";
@@ -627,14 +627,18 @@ function rotateLog(filePath: string, maxSize: number, keep: number): void {
 }
 
 export function installLogInterceptor(logFilePath?: string): void {
-  let fileSink: import("node:fs").WriteStream | null = null;
+  // Synchronous appends (not a WriteStream): a daemon that dies right after
+  // startup — e.g. listen EADDRINUSE followed by process.exit(1) — must still
+  // leave its last words in daemon.log. A stream's queued writes are dropped
+  // by process.exit, which left an empty log with no clue why startup failed.
+  let fileSink: number | null = null;
   if (logFilePath) {
     try {
       mkdirSync(dirname(logFilePath), { recursive: true });
       rotateLog(logFilePath, 10 * 1024 * 1024, 3);
-      const stream = createWriteStream(logFilePath, { flags: "a" });
-      fileSink = stream;
-      stream.write(
+      fileSink = openSync(logFilePath, "a");
+      writeSync(
+        fileSink,
         `\n===== ma-browser daemon started ${new Date().toISOString()} (pid ${process.pid}) =====\n`,
       );
     } catch {
@@ -652,9 +656,9 @@ export function installLogInterceptor(logFilePath?: string): void {
         const level = METHOD_TO_LEVEL[method] ?? "info";
         const entry: LogEntry = { ts: Date.now(), level, msg: trimmed };
         logStore.push(entry);
-        if (fileSink) {
+        if (fileSink !== null) {
           try {
-            fileSink.write(`${new Date(entry.ts).toISOString()} [${level}] ${trimmed}\n`);
+            writeSync(fileSink, `${new Date(entry.ts).toISOString()} [${level}] ${trimmed}\n`);
           } catch {}
         }
       }
@@ -662,12 +666,10 @@ export function installLogInterceptor(logFilePath?: string): void {
     };
   }
 
-  installLogInterceptor.flush = () => {
-    if (fileSink) {
-      try { fileSink.end(); } catch {}
-      fileSink = null;
-    }
-  };
+  // Writes are synchronous, so there is nothing to flush. The fd stays open so
+  // the shutdown path's own log lines still reach the file; the OS closes it
+  // at exit.
+  installLogInterceptor.flush = () => {};
 }
 
 installLogInterceptor.flush = (): void => {};  // placeholder before first call
