@@ -43,6 +43,7 @@ export const ACTION_TIMEOUTS: Readonly<Record<string, number>> = {
   back: SLOW_TIMEOUT,
   forward: SLOW_TIMEOUT,
   site_update: SLOW_TIMEOUT,
+  browser_mode: SLOW_TIMEOUT,
   site_run: LONG_TIMEOUT,
 };
 

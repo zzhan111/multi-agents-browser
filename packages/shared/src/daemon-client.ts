@@ -32,9 +32,12 @@ export interface DaemonInfo {
 // daemon.json
 // ---------------------------------------------------------------------------
 
-export async function readDaemonJson(): Promise<DaemonInfo | null> {
+export async function readDaemonJson(homeDir?: string): Promise<DaemonInfo | null> {
   try {
-    const raw = await readFile(DAEMON_JSON, "utf8");
+    const file = homeDir || process.env.BB_BROWSER_HOME
+      ? join(homeDir ?? process.env.BB_BROWSER_HOME!, "daemon.json")
+      : DAEMON_JSON;
+    const raw = await readFile(file, "utf8");
     const info = JSON.parse(raw) as DaemonInfo;
     if (
       typeof info.pid === "number" &&
@@ -174,7 +177,7 @@ export function httpJson<T>(
   info: { host: string; port: number; token: string },
   body?: unknown,
   timeout = 5000,
-  opts: { resolveStatuses?: readonly number[] } = {},
+  opts: { resolveStatuses?: readonly number[]; headers?: Record<string, string> } = {},
 ): Promise<T> {
   return new Promise((resolveP, reject) => {
     const payload = body !== undefined ? JSON.stringify(body) : undefined;
@@ -187,6 +190,7 @@ export function httpJson<T>(
         headers: {
           Authorization: `Bearer ${info.token}`,
           ...sessionHeaders(),
+          ...(opts.headers ?? {}),
           ...(payload
             ? {
                 "Content-Type": "application/json",

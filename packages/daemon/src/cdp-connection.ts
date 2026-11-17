@@ -126,6 +126,15 @@ export class CdpConnection {
   /** Chrome version string extracted from /json/version (e.g. "130.0.6723.116"). */
   chromeVersion: string | null = null;
 
+  /** Browser User-Agent string from /json/version (used to distinguish HeadlessChrome vs GUI Chrome). */
+  userAgent: string | null = null;
+
+  /** Optional hook notified when a new page target is created (e.g. popup window stealth guard). */
+  onPageTargetCreated: ((targetId: string) => void) | null = null;
+
+  /** When true (during a hot-swap restart), suppress removeTab on targetDestroyed/detached so TabState can be rebound. */
+  preservingTabsForSwap = false;
+
   /** Resolvers for commands queued before CDP is ready. */
   private readyWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 
@@ -213,6 +222,8 @@ export class CdpConnection {
       const m = /Chrome\/([\d.]+)/.exec(browser);
       if (m) this.chromeVersion = m[1];
     }
+    const ua = versionData["User-Agent"] ?? versionData.userAgent;
+    this.userAgent = typeof ua === "string" ? ua : (typeof browser === "string" ? browser : null);
 
     const ws = await connectWebSocket(wsUrl);
     this.socket = ws;
@@ -318,7 +329,9 @@ export class CdpConnection {
           if (targetId) {
             this.sessions.delete(targetId);
             this.attachedTargets.delete(sessionId);
-            this.tabManager.removeTab(targetId);
+            if (!this.preservingTabsForSwap) {
+              this.tabManager.removeTab(targetId);
+            }
           }
         }
         return;
@@ -330,6 +343,7 @@ export class CdpConnection {
         const targetInfo = params.targetInfo as JsonObject;
         if (targetInfo?.type === "page" && typeof targetInfo.targetId === "string") {
           this.attachAndEnable(targetInfo.targetId).catch(() => {});
+          this.onPageTargetCreated?.(targetInfo.targetId);
         }
         return;
       }
@@ -343,7 +357,9 @@ export class CdpConnection {
             this.sessions.delete(targetId);
             this.attachedTargets.delete(sessionId);
           }
-          this.tabManager.removeTab(targetId);
+          if (!this.preservingTabsForSwap) {
+            this.tabManager.removeTab(targetId);
+          }
         }
         return;
       }

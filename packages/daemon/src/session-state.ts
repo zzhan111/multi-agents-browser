@@ -57,6 +57,15 @@ export class SessionManager {
     return Array.from(this.sessions.values());
   }
 
+  /** Update sessions pointing at `oldTargetId` to `newTargetId` after a browser hot-swap. */
+  remapTarget(oldTargetId: string, newTargetId: string): void {
+    for (const s of this.sessions.values()) {
+      if (s.currentTargetId === oldTargetId) {
+        s.currentTargetId = newTargetId;
+      }
+    }
+  }
+
   /** Remove sessions idle for longer than maxIdleMs; returns the removed IDs. */
   gcIdle(maxIdleMs: number, now = Date.now()): string[] {
     const removed: string[] = [];

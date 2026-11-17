@@ -23,6 +23,7 @@ import {
   envCdpAddresses,
   inspectCdp,
   resolveCdpEndpoint,
+  windowsStealth,
   type CdpAddress,
 } from "@ma-browser/shared";
 import { HttpServer, installLogInterceptor, type DaemonRuntimeStatus } from "./http-server.js";
@@ -312,6 +313,7 @@ async function main(): Promise<void> {
     clearInterval(journalFlushTimer);
     journalManager.flushAll(); // flush any unflushed entries before exit
     pool.disconnectAll();
+    windowsStealth.close();
     await httpServer.stop();
     // daemon.json intentionally NOT deleted — a tray-driven restart may already
     // have a replacement daemon running, and WSL agents need the file to
@@ -449,6 +451,7 @@ async function bringUpCdpLoop(
         `[Daemon] Connecting to Chrome CDP at ${endpoint.host}:${endpoint.port} (attempt ${attempt})...`,
       );
       await cdp.connect();
+      await pool.syncInitialWindowMode();
       console.error(`[Daemon] CDP connected, monitoring ${cdp.tabManager.tabCount} tab(s)`);
       return;
     } catch (error) {

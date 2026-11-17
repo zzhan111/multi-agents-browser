@@ -16,15 +16,15 @@ allowed-tools: Bash(ma-browser:*)
 
 运行在用户真实浏览器中，复用已登录的账号，不触发反爬检测。
 
-## 浏览器模式（Windows 托盘）
+## 浏览器模式（有头 / 无头无损切换）
 
 ```bash
-ma-browser mode status --json    # 查询当前模式和托盘连接
-ma-browser mode headed --json    # 切到有头，供用户交互登录
-ma-browser mode headless --json  # 切回无头
+ma-browser mode status --json             # 查询当前模式和托盘状态
+ma-browser mode headed --focus --json     # 切到有头并置前窗口，供用户交互登录/过验证
+ma-browser mode headless --json           # 切回无头（后台隐藏窗口）
 ```
 
-MCP 使用 `browser_mode`，参数 `mode` 为 `status`、`headed` 或 `headless`（默认 `status`）。切换会重启所有 Agent 共享的浏览器，旧 tab ID 失效，未保存的页面内容可能丢失；切换后重新查询 tab。只读会话仅可查询。 托盘管理 daemon 时，MCP 环境设置 `MA_BROWSER_CONNECT_ONLY=1`，避免切换期间重复启动 daemon。
+MCP 使用 `browser_mode`，参数 `mode` 为 `status`、`headed` 或 `headless`（默认 `status`，可选 `focus: true` 置前窗口）。Windows 下默认采用零重启窗口隐身机制切换，不会重启 daemon 或浏览器，所有打开的标签页、页面内未提交状态、独占租约及短 tab ID 均保持不变；只读会话仅可查询。
 
 ## 快速开始
 

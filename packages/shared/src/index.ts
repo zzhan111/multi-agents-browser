@@ -6,6 +6,7 @@
 export {
   type ActionType,
   type BrowserInfo,
+  type BrowserModeInfo,
   type ConsoleMessageInfo,
   type DaemonStatus,
   type JSErrorInfo,
@@ -67,11 +68,16 @@ export {
 export {
   DEFAULT_CDP_PORT,
   MANAGED_BROWSER_DIR,
+  MANAGED_PID_FILE,
   MANAGED_PORT_FILE,
   MANAGED_USER_DATA_DIR,
+  type LaunchManagedBrowserOptions,
+  currentManagedBrowserDir,
   findBrowserExecutable,
   launchManagedBrowser,
   probeCdp,
+  readManagedPid,
+  readManagedPort,
 } from "./browser-launcher.js";
 
 export {
@@ -123,7 +129,26 @@ export {
   updateCommunityAdapters,
 } from "./site-adapters.js";
 
-export { browserMode, type BrowserModeAction, type BrowserModeStatus } from "./browser-mode.js";
+export {
+  browserMode,
+  type BrowserModeAction,
+  type BrowserModeOptions,
+  type BrowserModeStatus,
+} from "./browser-mode.js";
+
+export {
+  WindowsWindowController,
+  managedModeFilePath,
+  readPersistedBrowserMode,
+  resolveInitialBrowserMode,
+  windowsStealth,
+  writePersistedBrowserMode,
+  type BrowserDisplayMode,
+  type PersistedBrowserMode,
+  type WindowModeApplyResult,
+  type WindowModeDriver,
+  type WindowModeStatusResult,
+} from "./windows-stealth.js";
 
 export {
   type Fetcher,

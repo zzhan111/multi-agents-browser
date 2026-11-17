@@ -103,6 +103,46 @@ describe("TabStateManager", () => {
       assert.equal(tab1, tab2);
     });
   });
+
+  describe("rebindTab (hot-swap continuity)", () => {
+    it("preserves shortId, bbTabId, lease, and buffers while updating targetId and clearing refs", () => {
+      const mgr = makeManager();
+      const tab = mgr.addTab("OLD_TARGET_4F2A");
+      const originalBbId = tab.bbTabId;
+      assert.equal(tab.shortId, "4f2a");
+
+      tab.leaseOwner = "agent-1";
+      tab.leaseMode = "exclusive";
+      tab.refs = { "1": { role: "button", name: "Submit" } };
+      tab.activeFrameId = "frame-9";
+      addNetworkRequest(tab, { requestId: "r-before", url: "https://example.com/data" });
+      const actionSeq = tab.recordAction();
+
+      // Simulate CdpConnection.connect() registering a provisional TabState for NEW_TARGET_88BB first
+      const provisional = mgr.addTab("NEW_TARGET_88BB");
+      assert.equal(provisional.shortId, "88bb");
+
+      const rebound = mgr.rebindTab("OLD_TARGET_4F2A", "NEW_TARGET_88BB");
+      assert.equal(rebound, tab);
+      assert.equal(tab.targetId, "NEW_TARGET_88BB");
+      assert.equal(tab.shortId, "4f2a");
+      assert.equal(tab.bbTabId, originalBbId);
+      assert.equal(tab.leaseOwner, "agent-1");
+      assert.equal(tab.leaseMode, "exclusive");
+      assert.equal(tab.lastActionSeq, actionSeq);
+      assert.deepEqual(tab.refs, {});
+      assert.equal(tab.activeFrameId, null);
+      assert.equal(tab.getNetworkRequests().items.length, 1);
+
+      // Lookup maps remain a clean 1-to-1 bijection
+      assert.equal(mgr.resolveShortId("4f2a"), "NEW_TARGET_88BB");
+      assert.equal(mgr.resolveShortId("88bb"), undefined, "provisional shortId must be cleaned up");
+      assert.equal(mgr.getShortId("NEW_TARGET_88BB"), "4f2a");
+      assert.equal(mgr.getTab("OLD_TARGET_4F2A"), undefined);
+      assert.equal(mgr.getTab("NEW_TARGET_88BB"), tab);
+      assert.equal(mgr.tabCount, 1);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

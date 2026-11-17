@@ -67,13 +67,13 @@ ma-browser site zhihu/hot     # 开搞
 Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$PWD\scripts\windows-tray.ps1`"")
 ```
 
-托盘会启动并监视后台进程，新启动的受管浏览器默认以无头模式运行。左键托盘图标可显示受管浏览器：托盘总会先确认，有头模式下将窗口置于前台；无头模式下切换为有头（会重启浏览器）并置前新窗口；选「否」不做任何改动，失败会以气泡提示原因。右键托盘图标可切换有头／无头模式，所选模式会在下次登录时保留。切换会重启受管浏览器并恢复会话，未保存的页面内容可能丢失；需要交互登录时可切换到有头模式。右键菜单也可打开日志或退出托盘（后台继续运行）。托盘之外可设置 `MA_BROWSER_HEADLESS=1` 启动无头浏览器；已在运行的浏览器不会自动重启。
+托盘会启动并监视后台进程，新启动的受管浏览器默认以无头模式（Windows 零重启后台隐身）运行。左键点击托盘图标即可**一键秒弹出**受管浏览器窗口：无二次确认弹窗，无头模式下会即时显示窗口并置于前台，有头模式下直接将窗口置前，失败时以气泡提示原因。右键托盘图标可在有头（显示窗口）／无头（隐藏窗口）模式间无损切换，所选模式在下次登录时保留；切换过程不重启浏览器与后台进程，打开的标签页、页面内未保存内容及短 tab ID 均完整保留。需要交互登录或完成人机验证时切到有头模式，完成后切回无头即可。右键菜单也可打开日志或退出托盘（后台继续运行）。托盘之外可设置 `MA_BROWSER_HEADLESS=1` 以无头模式启动受管浏览器。
 
 右键 →「发现并接管已有 Chrome」会列出本机所有可调试浏览器（打勾 = 已接管）；点击某一项即可接管，或点「全部接管」。失败时以气泡提示原因。
 
-Agent 可调用 `ma-browser mode status|headed|headless --json` 或 MCP `browser_mode`（`mode` 参数同名）。查询无需切换，切换完成并重新连接后才返回；旧 tab ID 会失效。托盘负责启动 daemon 时，可为 MCP 设置环境变量 `MA_BROWSER_CONNECT_ONLY=1`，避免切换期间抢先启动另一个 daemon。
+Agent 可调用 `ma-browser mode status|headed|headless [--focus] --json` 或 MCP `browser_mode`（`mode` 参数同名）。模式切换由常驻 daemon 直接托管执行，无需重启 daemon，原有标签页、独占租约与短 tab ID 保持有效。
 
-手工验证左键流程：托盘处于无头模式时左键图标并选「否」，确认 `ma-browser mode status --json` 仍为 `headless`；然后先运行 `.\scripts\check-windows-tray.ps1 -Mode headed -ExpectForeground -DelaySeconds 60`，再左键选「是」；窗口置前后检查通过。用其他程序盖住窗口后以 `-DelaySeconds 10` 重复一次。
+手工验证左键流程：托盘处于无头模式时，先运行 `.\scripts\check-windows-tray.ps1 -Mode headed -ExpectForeground -DelaySeconds 10`，再左键点击托盘图标，窗口即时弹出置前后检查通过。用其他程序盖住窗口后以 `-DelaySeconds 10` 重复一次。
 
 需要在 Windows 登录后自动启动时，在仓库目录运行：
 

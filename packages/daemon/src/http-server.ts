@@ -264,6 +264,25 @@ export class HttpServer {
       });
       const session = this.sessions.getOrCreate(sessionId, sessionLabel, sessionScope, agentRec?.agentId);
 
+      // Browser mode query/switch is managed directly by BrowserPool (works even
+      // before CDP is connected for `status`, and enforces read-only scope).
+      if (request.action === "browser_mode") {
+        const modeAction = request.modeAction ?? "status";
+        if (modeAction !== "status" && session.scope === "read-only") {
+          this.sendJson(res, 403, {
+            id: request.id,
+            success: false,
+            error: "只读会话不能切换浏览器模式。",
+          });
+          return;
+        }
+        const finish = this.history?.record("browser_mode", request, session.id);
+        const response = await this.cdp.handleBrowserMode(request, this.sessions);
+        finish?.(response.success !== false);
+        this.sendJson(res, 200, response);
+        return;
+      }
+
       // One budget (per action, see command-timeouts.ts) covers the CDP-ready
       // wait, the scheduler queue and the dispatch, so the client — which waits
       // budget + grace — always gets this structured answer first.
@@ -280,8 +299,8 @@ export class HttpServer {
         ...extra,
       });
 
-      // Wait for CDP to be ready (two-phase startup)
-      if (!this.cdp.connected) {
+      // Wait for CDP to be ready (two-phase startup or in-flight mode hot-swap)
+      if (!this.cdp.connected || this.cdp.isSwapping()) {
         let timer: ReturnType<typeof setTimeout> | undefined;
         let timedOut = false;
         try {
