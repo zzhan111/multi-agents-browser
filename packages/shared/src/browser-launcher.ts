@@ -40,14 +40,14 @@ export const MANAGED_PID_FILE = path.join(MANAGED_BROWSER_DIR, "browser-pid");
  * so it runs alongside the user's normal browser without our needing to close
  * theirs. Logins made here persist across runs.
  */
-const MANAGED_USER_DATA_DIR = path.join(MANAGED_BROWSER_DIR, "profile");
+export const MANAGED_USER_DATA_DIR = path.join(MANAGED_BROWSER_DIR, "profile");
 
 /**
  * Hosts to probe for a CDP endpoint. Some browsers may bind the debug port on
  * IPv6 (`::1`) rather than IPv4 loopback, so we try both to ensure broad
  * compatibility.
  */
-const PROBE_HOSTS = ["127.0.0.1", "[::1]"];
+export const PROBE_HOSTS = ["127.0.0.1", "[::1]"];
 
 /**
  * Probe a CDP endpoint on `port` across IPv4 and IPv6 in parallel. Returns

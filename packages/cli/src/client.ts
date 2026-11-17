@@ -27,7 +27,17 @@ export function handleJqResponse(response: Response): void {
   }
 }
 
+/** Global `--browser <id>`: route commands without an explicit tab to that browser. */
+function globalBrowser(): string | undefined {
+  const idx = process.argv.indexOf("--browser");
+  return idx >= 0 ? process.argv[idx + 1] : undefined;
+}
+
 export async function sendCommand(request: Request): Promise<Response> {
   await ensureDaemon();
+  const browser = globalBrowser();
+  if (browser !== undefined && request.browser === undefined && !request.action.startsWith("cdp_")) {
+    request.browser = browser;
+  }
   return daemonCommand(request);
 }

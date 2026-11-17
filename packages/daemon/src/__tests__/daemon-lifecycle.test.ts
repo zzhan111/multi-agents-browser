@@ -38,6 +38,7 @@ const DAEMON_JSON = path.join(TEST_HOME, "daemon.json");
 // Never let a daemon under test launch a real, detached browser (inherited by
 // spawned daemons through process.env).
 process.env.MA_BROWSER_NO_LAUNCH = "1";
+process.env.BB_CDP_DISCOVERY = "0";
 
 after(() => {
   rmSync(TEST_HOME, { recursive: true, force: true });

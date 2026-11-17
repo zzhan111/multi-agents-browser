@@ -41,3 +41,7 @@
 21. Windows tray PowerShell scripts use UTF-8 with BOM and LF line endings; preserve the BOM when editing.
 
 22. On Windows (Node 24), synchronous process.exit right after undici fetch aborts with UV_HANDLE_CLOSING; set process.exitCode and defer hard exit past the close phase.
+
+23. Some Chromium launchers rewrite /proc/<pid>/cmdline into one space-joined string; split args on " --" too, not only on NUL.
+
+24. Keep tests off CDP auto-discovery: the dev machine's real managed browser listens on 19825. Pass explicit ports, set BB_CDP_DISCOVERY=0, or call discoverCdpEndpoints({ ports, processes: false }) against fake servers.

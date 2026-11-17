@@ -39,6 +39,7 @@ const DAEMON_ENTRY = path.resolve(
 // no CDP endpoint — that browser outlives the test run (inherited by spawned
 // daemons through process.env).
 process.env.MA_BROWSER_NO_LAUNCH = "1";
+process.env.BB_CDP_DISCOVERY = "0";
 
 after(() => {
   rmSync(DAEMON_DIR, { recursive: true, force: true });
@@ -98,8 +99,9 @@ async function waitForDaemonJson(timeoutMs = 8000): Promise<{ pid: number; host:
  */
 function startFakeCdpServer(): Promise<http.Server> {
   return new Promise((resolve, reject) => {
+    let boundPort = 0;
     const server = http.createServer((req, res) => {
-      const port = portOf(server);
+      const port = boundPort;
       if (req.url === "/json/version") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -122,7 +124,10 @@ function startFakeCdpServer(): Promise<http.Server> {
       }
     });
     server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve(server));
+    server.listen(0, "127.0.0.1", () => {
+      boundPort = portOf(server);
+      resolve(server);
+    });
   });
 }
 

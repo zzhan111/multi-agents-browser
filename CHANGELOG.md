@@ -13,6 +13,7 @@
 
 ### Added
 
+- **cdp:** discover and attach existing Chrome CDP endpoints (`cdp list` / `cdp attach` / `cdp detach`, MCP `browser_cdp_*`), and drive multiple browsers in parallel via `BrowserPool` and `--browser` (#42)
 - `upload <ref|selector> <file...>` CLI command and `browser_upload` MCP tool: set local files on `<input type=file>` via CDP `DOM.setFileInputFiles`, with input/change events, accept/multiple/path validation, and `[file ...]` markers in snapshots (#32)
 - **daemon:** per-action command timeout budgets (`command-timeouts.ts`), timeout stage classification (`cdp_connect` / `queue` / `cdp` / `dispatch`), and half-dead health reporting in `/status` (#30)
 - **windows:** tray left-click confirmation dialog to bring the managed browser to foreground or switch headless → headed (#31)

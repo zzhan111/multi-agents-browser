@@ -22,6 +22,7 @@ import {
   type CommandTimeoutInfo,
   type CommandTimeoutKind,
 } from "@ma-browser/shared";
+import { BrowserPool, dispatchCdpRequest } from "./browser-pool.js";
 import { CdpConnection, cdpCallContext } from "./cdp-connection.js";
 import { CommandHealth, recoveryHint } from "./command-health.js";
 import type { CommandHistory } from "./command-history.js";
@@ -56,7 +57,7 @@ export interface HttpServerOptions {
   host?: string;
   port?: number;
   token?: string;
-  cdp: CdpConnection;
+  cdp: BrowserPool | CdpConnection;
   history?: CommandHistory;
   agentRegistry?: AgentRegistry;
   bindingStore?: BindingStore;
@@ -71,7 +72,7 @@ export class HttpServer {
   private readonly host: string;
   private readonly port: number;
   private readonly token: string | null;
-  private readonly cdp: CdpConnection;
+  private readonly cdp: BrowserPool;
   private readonly history: CommandHistory | null;
   private readonly agentRegistry: AgentRegistry | null;
   private readonly bindingStore: BindingStore | null;
@@ -88,7 +89,7 @@ export class HttpServer {
     this.host = options.host ?? "127.0.0.1";
     this.port = options.port ?? DAEMON_PORT;
     this.token = options.token ?? null;
-    this.cdp = options.cdp;
+    this.cdp = options.cdp instanceof BrowserPool ? options.cdp : new BrowserPool(options.cdp);
     this.history = options.history ?? null;
     this.agentRegistry = options.agentRegistry ?? null;
     this.bindingStore = options.bindingStore ?? null;
@@ -236,6 +237,15 @@ export class HttpServer {
         const journal = this.journalManager?.getRecent(agentId, limit) ?? [];
         this.history?.record("resume", request, session.id)?.();
         this.sendJson(res, 200, { id: request.id, success: true, agentId, bindings, journal });
+        return;
+      }
+
+      // Browser discovery/attach must work while no browser is connected yet.
+      if (request.action === "cdp_list" || request.action === "cdp_attach" || request.action === "cdp_detach") {
+        const finish = this.history?.record(request.action, request, (req.headers["x-bb-session"] as string | undefined) ?? "default");
+        const response = await dispatchCdpRequest(this.cdp, request);
+        finish?.(response.success);
+        this.sendJson(res, 200, response);
         return;
       }
 
@@ -397,6 +407,7 @@ export class HttpServer {
       shortId: tab.shortId,
       targetId: tab.targetId,
       bbTabId: tab.bbTabId,
+      browser: tab.browserId,
       networkRequests: tab.networkRequests.size,
       consoleMessages: tab.consoleMessages.size,
       jsErrors: tab.jsErrors.size,
@@ -409,6 +420,7 @@ export class HttpServer {
       running: true,
       cdpConnected: this.cdp.connected,
       cdpPort: this.cdp.port,
+      browsers: this.cdp.info(),
       needsBrowserConsent: this.runtimeStatus.needsBrowserConsent,
       uptime: this.uptime,
       currentSeq: this.cdp.tabManager.currentSeq(),
@@ -442,6 +454,7 @@ export class HttpServer {
       healthState: this.health.snapshot({ cdpConnected: this.cdp.connected }).state,
       tabCount: tabs.length,
       chromeVersion: this.cdp.chromeVersion ?? null,
+      browsers: this.cdp.info(),
     });
   }
 

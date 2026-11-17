@@ -10,10 +10,9 @@
 import { request as httpRequest } from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
 import WebSocket from "ws";
-import type { TraceEvent } from "@ma-browser/shared";
+import { browserIdFor, type TraceEvent } from "@ma-browser/shared";
 import { TabStateManager } from "./tab-state.js";
 import { TRACE_INJECTION_SCRIPT, TRACE_PREFIX } from "./trace-inject.js";
-import type { AgentSession } from "./session-state.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -113,8 +112,6 @@ export class CdpConnection {
   private sessions = new Map<string, string>();
   /** sessionId -> targetId */
   private attachedTargets = new Map<string, string>();
-  /** Per-target serial queue: commands on the same tab run one at a time. */
-  private tabQueues = new Map<string, Promise<void>>();
 
   host: string;
   port: number;
@@ -147,6 +144,11 @@ export class CdpConnection {
     this.host = host;
     this.port = port;
     this.tabManager = tabManager;
+  }
+
+  /** Browser ID for --browser routing: the port for loopback, else host:port. */
+  get browserId(): string {
+    return browserIdFor(this.host, this.port);
   }
 
   get connected(): boolean {
@@ -595,7 +597,7 @@ export class CdpConnection {
   async attachAndEnable(targetId: string): Promise<string> {
     if (this.sessions.has(targetId)) {
       // Already attached — register tab state if not present
-      this.tabManager.addTab(targetId);
+      this.tabManager.addTab(targetId).browserId = this.browserId;
       return this.sessions.get(targetId)!;
     }
 
@@ -607,7 +609,7 @@ export class CdpConnection {
     this.attachedTargets.set(result.sessionId, targetId);
 
     // Register in tab state manager
-    this.tabManager.addTab(targetId);
+    this.tabManager.addTab(targetId).browserId = this.browserId;
 
     // Enable domains
     await this.sessionCommand(targetId, "Page.enable").catch(() => {});
@@ -640,53 +642,6 @@ export class CdpConnection {
       title: t.title,
       url: t.url,
     }));
-  }
-
-  /**
-   * Resolve a tab reference: short ID, full target ID, or (1-3 digits only) a
-   * list index. Short IDs are at least 4 hex chars, so an unknown or stale
-   * short ID never falls back to "whatever tab sits at that index".
-   */
-  findPageTarget(targets: CdpTargetInfo[], ref: string): CdpTargetInfo | undefined {
-    const resolved = this.tabManager.resolveShortId(ref);
-    return (resolved ? targets.find((t) => t.id === resolved) : undefined)
-      ?? targets.find((t) => t.id === ref)
-      ?? (/^\d{1,3}$/.test(ref) ? targets[Number(ref)] : undefined);
-  }
-
-  /**
-   * Ensure we have a valid page target and return it. Supports resolution by:
-   *   - short ID string
-   *   - full target ID string
-   *   - numeric index
-   *   - undefined (use session.currentTargetId or first page)
-   *
-   * When `session` is provided, the resolved target is recorded back into
-   * session.currentTargetId so each caller maintains its own "current tab"
-   * without affecting other concurrent callers.
-   */
-  async ensurePageTarget(tabRef?: string | number, session?: AgentSession): Promise<CdpTargetInfo> {
-    const targets = (await this.getTargets()).filter((t) => t.type === "page");
-    if (targets.length === 0) throw new Error("No page target found");
-
-    let target: CdpTargetInfo | undefined;
-
-    if (typeof tabRef === "string") {
-      target = this.findPageTarget(targets, tabRef);
-    } else if (typeof tabRef === "number") {
-      target = targets[tabRef];
-    } else if (session?.currentTargetId) {
-      target = targets.find((t) => t.id === session.currentTargetId);
-    }
-
-    if (typeof tabRef === "string" && !target) {
-      throw new Error(`Tab not found: ${tabRef}`);
-    }
-
-    target ??= targets[0];
-    if (session) session.currentTargetId = target.id;
-    await this.attachAndEnable(target.id);
-    return target;
   }
 
   /** Check if a session exists for a given targetId. */
@@ -779,26 +734,6 @@ export class CdpConnection {
       method,
       frameId ? { ...params, frameId } : params,
     );
-  }
-
-  /**
-   * Run `fn` on the given tab serially. Concurrent calls for the same targetId
-   * are queued; calls for different tabs run in parallel.
-   *
-   * The queue always advances even if a previous item errored, so a single
-   * failing command never blocks the tab permanently.
-   */
-  runOnTab<T>(targetId: string, fn: () => Promise<T>): Promise<T> {
-    const prev = this.tabQueues.get(targetId) ?? Promise.resolve();
-    const result = prev.then(() => fn(), () => fn());
-    const tail = result.then(() => {}, () => {});
-    this.tabQueues.set(targetId, tail);
-    tail.then(() => {
-      if (this.tabQueues.get(targetId) === tail) {
-        this.tabQueues.delete(targetId);
-      }
-    });
-    return result;
   }
 
   /** Inject trace event listeners into a page (start recording). */

@@ -116,7 +116,8 @@ function formatTabList(tabs: TabInfo[], activeIndex: number): string {
   for (const tab of tabs) {
     const prefix = tab.active ? "*" : " ";
     const title = tab.title || "(无标题)";
-    lines.push(`${prefix} [${tab.index}] ${tab.url} - ${title}`);
+    const browser = tab.browser ? ` @${tab.browser}` : "";
+    lines.push(`${prefix} [${tab.index}] ${tab.tab ?? ""}${browser} ${tab.url} - ${title}`);
   }
 
   return lines.join("\n");

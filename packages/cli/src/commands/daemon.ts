@@ -32,9 +32,27 @@ export async function statusCommand(
   const health = status.health as HealthView | undefined;
   for (const line of formatHealth(health)) console.log(line);
 
+  const browsers = status.browsers as Array<{
+    id: string;
+    connected: boolean;
+    default: boolean;
+    origin?: string;
+    chromeVersion?: string;
+    tabs?: number;
+    lastError?: string;
+  }> | undefined;
+  if (browsers && browsers.length > 0) {
+    console.log(`\nBrowsers (${browsers.length}):`);
+    for (const b of browsers) {
+      const flags = [b.connected ? "connected" : "disconnected", b.default ? "default" : "", b.origin ?? ""].filter(Boolean).join(", ");
+      console.log(`  ${b.id.padEnd(6)} ${flags}  tabs:${b.tabs ?? 0}${b.chromeVersion ? `  Chrome ${b.chromeVersion}` : ""}${b.lastError ? `  (${b.lastError})` : ""}`);
+    }
+  }
+
   const tabs = status.tabs as Array<{
     shortId: string;
     targetId: string;
+    browser?: string;
     networkRequests: number;
     consoleMessages: number;
     jsErrors: number;
@@ -46,7 +64,7 @@ export async function statusCommand(
     for (const tab of tabs) {
       const active = tab.targetId === status.currentTargetId ? " *" : "";
       console.log(
-        `  ${tab.shortId}${active}  net:${tab.networkRequests} console:${tab.consoleMessages} err:${tab.jsErrors} seq:${tab.lastActionSeq}`
+        `  ${tab.shortId}${active}${tab.browser ? `  browser:${tab.browser}` : ""}  net:${tab.networkRequests} console:${tab.consoleMessages} err:${tab.jsErrors} seq:${tab.lastActionSeq}`
       );
     }
   } else {
