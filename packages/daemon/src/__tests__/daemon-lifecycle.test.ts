@@ -2,10 +2,13 @@
  * Daemon lifecycle integration tests — daemon.json + HTTP server.
  *
  * These tests verify the daemon.json file lifecycle WITHOUT requiring Chrome.
- * Each test uses unique ports to avoid EADDRINUSE conflicts.
+ * Ports come from the kernel (listen on port 0), never a hard-coded range:
+ * a fixed port inside the ephemeral range (32768–60999 on Linux) can be held
+ * in TIME_WAIT by any recent outgoing loopback connection, and then the
+ * daemon dies with EADDRINUSE before writing daemon.json.
  */
 
-import { describe, it, afterEach } from "node:test";
+import { describe, it, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   spawn,
@@ -13,8 +16,9 @@ import {
 } from "node:child_process";
 import process from "node:process";
 import { readFile, writeFile, unlink } from "node:fs/promises";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -31,21 +35,39 @@ mkdirSync(TEST_HOME, { recursive: true });
 process.env.BB_BROWSER_HOME = TEST_HOME;
 const DAEMON_JSON = path.join(TEST_HOME, "daemon.json");
 
-// Each test gets unique ports to avoid EADDRINUSE
-let portCounter = 49800;
-function nextPorts(): { daemonPort: number; cdpPort: number } {
-  const daemonPort = portCounter++;
-  const cdpPort = portCounter++;
-  return { daemonPort, cdpPort };
+// Never let a daemon under test launch a real, detached browser (inherited by
+// spawned daemons through process.env).
+process.env.MA_BROWSER_NO_LAUNCH = "1";
+process.env.BB_CDP_DISCOVERY = "0";
+
+after(() => {
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
+
+/**
+ * Ask the kernel for a free loopback port. bind(0) skips ports that are in
+ * use *or* held in TIME_WAIT, unlike a hard-coded port.
+ */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address() as AddressInfo;
+      srv.close(() => resolve(port));
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function startFakeCdp(port: number): Promise<Server> {
+/** Start a fake CDP endpoint on a kernel-assigned port; read it via cdpPortOf(). */
+function startFakeCdp(): Promise<Server> {
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
+      const port = (server.address() as AddressInfo).port;
       if (req.url === "/json/version" && req.method === "GET") {
         const body = JSON.stringify({
           Browser: "FakeChrome/0.0",
@@ -62,8 +84,12 @@ function startFakeCdp(port: number): Promise<Server> {
       }
     });
     server.on("error", reject);
-    server.listen(port, "127.0.0.1", () => resolve(server));
+    server.listen(0, "127.0.0.1", () => resolve(server));
   });
+}
+
+function cdpPortOf(server: Server): number {
+  return (server.address() as AddressInfo).port;
 }
 
 function stopFakeCdp(server: Server): Promise<void> {
@@ -72,28 +98,48 @@ function stopFakeCdp(server: Server): Promise<void> {
   });
 }
 
+const daemonStderr = new WeakMap<ChildProcess, string>();
+
 function spawnDaemon(port: number, cdpPort: number): ChildProcess {
   // Use the compiled dist so no tsx/shell-script issues on Windows.
   // The pre-commit hook runs `pnpm build` before `pnpm test`, so dist is fresh.
+  // `node dist/index.js` directly (no wrapper), so child.pid IS the daemon pid.
   const distEntry = path.resolve(__dirname, "../../dist/index.js");
-  return spawn(
+  const child = spawn(
     process.execPath,
     [distEntry, "--port", String(port), "--cdp-port", String(cdpPort)],
-    { stdio: "pipe", env: { ...process.env } },
+    { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env } },
   );
+  // Keep stderr so a daemon that dies at startup explains itself in the
+  // assertion message instead of a bare timeout.
+  daemonStderr.set(child, "");
+  child.stderr?.on("data", (chunk: Buffer) => {
+    daemonStderr.set(child, (daemonStderr.get(child) ?? "") + chunk.toString());
+  });
+  return child;
 }
 
-async function waitForDaemonJson(timeoutMs = 8000): Promise<Record<string, unknown>> {
+async function waitForDaemonJson(
+  child: ChildProcess, timeoutMs = 8000,
+): Promise<Record<string, unknown>> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
       const raw = await readFile(DAEMON_JSON, "utf8");
       return JSON.parse(raw) as Record<string, unknown>;
     } catch {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(
+          `daemon exited before writing daemon.json (code=${child.exitCode}, signal=${child.signalCode}); stderr:\n` +
+            (daemonStderr.get(child) || "(empty)"),
+        );
+      }
       await new Promise((r) => setTimeout(r, 200));
     }
   }
-  throw new Error("daemon.json not created in time");
+  throw new Error(
+    `daemon.json not created in time; daemon stderr so far:\n${daemonStderr.get(child) || "(empty)"}`,
+  );
 }
 
 async function waitForStatus(
@@ -136,16 +182,9 @@ describe("daemon lifecycle (no Chrome needed)", () => {
   let fakeCdp: Server | null = null;
 
   afterEach(async () => {
-    // Kill the actual daemon process (from daemon.json PID, not tsx wrapper PID)
-    try {
-      const raw = await readFile(DAEMON_JSON, "utf8");
-      const info = JSON.parse(raw);
-      if (info.pid) {
-        try { process.kill(info.pid, "SIGKILL"); } catch {}
-      }
-    } catch {}
-
-    // Also kill the tsx wrapper
+    // Only ever signal the process this test spawned. Never trust the pid in
+    // daemon.json here: some tests write a fake "successor" pid into it, and
+    // that pid may belong to an unrelated process on this machine.
     if (daemon && !daemon.killed && daemon.exitCode === null) {
       await killDaemon(daemon);
     }
@@ -160,12 +199,12 @@ describe("daemon lifecycle (no Chrome needed)", () => {
   });
 
   it("writes daemon.json on startup with pid/host/port/token", async () => {
-    const { daemonPort, cdpPort } = nextPorts();
+    const daemonPort = await freePort();
     await cleanupDaemonJson();
-    fakeCdp = await startFakeCdp(cdpPort);
-    daemon = spawnDaemon(daemonPort, cdpPort);
+    fakeCdp = await startFakeCdp();
+    daemon = spawnDaemon(daemonPort, cdpPortOf(fakeCdp));
 
-    const info = await waitForDaemonJson();
+    const info = await waitForDaemonJson(daemon);
 
     assert.equal(typeof info.pid, "number");
     assert.equal(typeof info.host, "string");
@@ -176,12 +215,12 @@ describe("daemon lifecycle (no Chrome needed)", () => {
   });
 
   it("GET /status returns running: true", async () => {
-    const { daemonPort, cdpPort } = nextPorts();
+    const daemonPort = await freePort();
     await cleanupDaemonJson();
-    fakeCdp = await startFakeCdp(cdpPort);
-    daemon = spawnDaemon(daemonPort, cdpPort);
+    fakeCdp = await startFakeCdp();
+    daemon = spawnDaemon(daemonPort, cdpPortOf(fakeCdp));
 
-    const info = await waitForDaemonJson();
+    const info = await waitForDaemonJson(daemon);
     const status = await waitForStatus(
       info.host as string, info.port as number, info.token as string,
     );
@@ -196,11 +235,11 @@ describe("daemon lifecycle (no Chrome needed)", () => {
     // daemon.json would strand WSL agents and other clients that depend on
     // it for discovery. The replacement daemon overwrites daemon.json on
     // its own startup, so stale entries are harmless.
-    const { daemonPort, cdpPort } = nextPorts();
+    const daemonPort = await freePort();
     await cleanupDaemonJson();
-    fakeCdp = await startFakeCdp(cdpPort);
-    daemon = spawnDaemon(daemonPort, cdpPort);
-    const info = await waitForDaemonJson();
+    fakeCdp = await startFakeCdp();
+    daemon = spawnDaemon(daemonPort, cdpPortOf(fakeCdp));
+    const info = await waitForDaemonJson(daemon);
 
     assert.ok(existsSync(DAEMON_JSON));
 
@@ -215,9 +254,9 @@ describe("daemon lifecycle (no Chrome needed)", () => {
       // Connection reset mid-response is normal when the server shuts down.
     }
 
-    // Give the daemon a moment to exit.
+    // Give the daemon a moment to exit. Keep `daemon`: afterEach reaps it if
+    // the graceful shutdown stalled.
     await new Promise((r) => setTimeout(r, 800));
-    daemon = null;
 
     assert.ok(existsSync(DAEMON_JSON), "daemon.json should survive graceful HTTP shutdown");
   });
@@ -227,11 +266,11 @@ describe("daemon lifecycle (no Chrome needed)", () => {
     // daemon.json (new pid) before this daemon's async shutdown runs. Since
     // daemon.json is never deleted on shutdown, the successor's file is
     // always safe regardless of timing.
-    const { daemonPort, cdpPort } = nextPorts();
+    const daemonPort = await freePort();
     await cleanupDaemonJson();
-    fakeCdp = await startFakeCdp(cdpPort);
-    daemon = spawnDaemon(daemonPort, cdpPort);
-    const info = await waitForDaemonJson();
+    fakeCdp = await startFakeCdp();
+    daemon = spawnDaemon(daemonPort, cdpPortOf(fakeCdp));
+    const info = await waitForDaemonJson(daemon);
 
     // A "successor" overwrites daemon.json with a foreign pid.
     const successor = { ...info, pid: 999_999 };
@@ -248,7 +287,7 @@ describe("daemon lifecycle (no Chrome needed)", () => {
       // Connection reset mid-response is normal when the server shuts down.
     }
     await new Promise((r) => setTimeout(r, 800));
-    daemon = null;
+    // Keep `daemon`: afterEach reaps it if the graceful shutdown stalled.
 
     assert.ok(existsSync(DAEMON_JSON), "successor's daemon.json must survive the old daemon's shutdown");
     const after = JSON.parse(await readFile(DAEMON_JSON, "utf8"));
@@ -256,11 +295,11 @@ describe("daemon lifecycle (no Chrome needed)", () => {
   });
 
   it("stale daemon.json survives kill -9", async () => {
-    const { daemonPort, cdpPort } = nextPorts();
+    const daemonPort = await freePort();
     await cleanupDaemonJson();
-    fakeCdp = await startFakeCdp(cdpPort);
-    daemon = spawnDaemon(daemonPort, cdpPort);
-    const info = await waitForDaemonJson();
+    fakeCdp = await startFakeCdp();
+    daemon = spawnDaemon(daemonPort, cdpPortOf(fakeCdp));
+    const info = await waitForDaemonJson(daemon);
     const oldPid = info.pid;
 
     try { process.kill(oldPid as number, "SIGKILL"); } catch {}
@@ -274,14 +313,13 @@ describe("daemon lifecycle (no Chrome needed)", () => {
   });
 
   it("new daemon after kill -9 gets new PID and token", async () => {
-    const ports1 = nextPorts();
-    const ports2 = nextPorts(); // completely separate ports for second daemon
+    const daemonPort1 = await freePort();
     await cleanupDaemonJson();
-    fakeCdp = await startFakeCdp(ports1.cdpPort);
+    fakeCdp = await startFakeCdp();
 
     // First daemon
-    daemon = spawnDaemon(ports1.daemonPort, ports1.cdpPort);
-    const info1 = await waitForDaemonJson();
+    daemon = spawnDaemon(daemonPort1, cdpPortOf(fakeCdp));
+    const info1 = await waitForDaemonJson(daemon);
     const pid1 = info1.pid;
     const token1 = info1.token;
 
@@ -297,18 +335,19 @@ describe("daemon lifecycle (no Chrome needed)", () => {
     await stopFakeCdp(fakeCdp);
     await new Promise((r) => setTimeout(r, 500));
 
-    // Start new fake CDP on different port
-    fakeCdp = await startFakeCdp(ports2.cdpPort);
+    // Start new fake CDP on a fresh port
+    fakeCdp = await startFakeCdp();
 
     // Delete stale daemon.json so waitForDaemonJson detects the NEW one
     await cleanupDaemonJson();
 
     // Second daemon on completely new ports
-    daemon = spawnDaemon(ports2.daemonPort, ports2.cdpPort);
-    const info2 = await waitForDaemonJson();
+    const daemonPort2 = await freePort();
+    daemon = spawnDaemon(daemonPort2, cdpPortOf(fakeCdp));
+    const info2 = await waitForDaemonJson(daemon);
 
     assert.notEqual(info2.pid, pid1, "new daemon should have different PID");
     assert.notEqual(info2.token, token1, "new daemon should have different token");
-    assert.equal(info2.port, ports2.daemonPort);
+    assert.equal(info2.port, daemonPort2);
   });
 });

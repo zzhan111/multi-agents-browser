@@ -85,6 +85,29 @@ export class BrowserPool {
   get lastError(): string | null { return this.primary().lastError; }
   get chromeVersion(): string | null { return this.primary().chromeVersion; }
 
+  /** Aggregate in-flight CDP call stats across all browsers in the pool. */
+  pendingStats(now = Date.now(), owner?: number): { count: number; oldestMethod?: string; oldestAgeMs?: number } {
+    let count = 0;
+    let oldestMethod: string | undefined;
+    let oldestAgeMs: number | undefined;
+    for (const c of this.all()) {
+      const s = c.pendingStats(now, owner);
+      count += s.count;
+      if (s.oldestAgeMs !== undefined && (oldestAgeMs === undefined || s.oldestAgeMs > oldestAgeMs)) {
+        oldestAgeMs = s.oldestAgeMs;
+        oldestMethod = s.oldestMethod;
+      }
+    }
+    return oldestMethod !== undefined ? { count, oldestMethod, oldestAgeMs } : { count: 0 };
+  }
+
+  /** Disconnect all browsers in the pool (for daemon shutdown). */
+  disconnectAll(): void {
+    for (const c of this.all()) {
+      c.disconnect();
+    }
+  }
+
   /** Resolves once any browser is connected. */
   waitUntilReady(): Promise<void> {
     if (this.connected) return Promise.resolve();

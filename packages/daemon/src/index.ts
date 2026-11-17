@@ -21,6 +21,7 @@ import {
   cdpDiscoveryMode,
   discoverCdpEndpoints,
   envCdpAddresses,
+  inspectCdp,
   resolveCdpEndpoint,
   type CdpAddress,
 } from "@ma-browser/shared";
@@ -56,6 +57,8 @@ interface DaemonOptions {
   cdpPort: number;
   /** True when --cdp-port was passed (the CLI passes the endpoint it resolved). */
   cdpExplicit: boolean;
+  /** Only ever connect to cdpPort: no port scan, no managed browser (isolated test runs). */
+  strictCdp: boolean;
   token: string;
 }
 
@@ -81,6 +84,10 @@ function parseOptions(): DaemonOptions {
         type: "string",
         default: String(DEFAULT_CDP_PORT),
       },
+      "strict-cdp": {
+        type: "boolean",
+        default: false,
+      },
       token: {
         type: "string",
         default: "",
@@ -105,6 +112,7 @@ Options:
   -p, --port <port>          HTTP server port (default: ${DAEMON_PORT})
       --cdp-host <host>      Chrome CDP host (default: 127.0.0.1)
       --cdp-port <port>      Chrome CDP port (default: discover, else launch on ${DEFAULT_CDP_PORT})
+      --strict-cdp           Only use --cdp-port: never scan other ports or launch a browser
       --token <token>        Bearer auth token (auto-generated if empty)
   -h, --help                 Show this help message
 
@@ -135,6 +143,7 @@ Endpoints:
     cdpHost: values["cdp-host"] ?? "127.0.0.1",
     cdpPort: parseInt(values["cdp-port"] ?? String(DEFAULT_CDP_PORT), 10),
     cdpExplicit: process.argv.includes("--cdp-port"),
+    strictCdp: values["strict-cdp"] ?? false,
     token,
   };
 }
@@ -211,6 +220,13 @@ async function discoverCdpPort(
   pool: BrowserPool,
   options: DaemonOptions,
 ): Promise<{ host: string; port: number }> {
+  // Strict: a slow or restarting browser must not hand us someone else's.
+  if (options.strictCdp) {
+    const ep = await inspectCdp(options.cdpHost, options.cdpPort);
+    if (ep) return { host: ep.host, port: ep.port };
+    throw new Error(`No Chrome reachable at ${options.cdpHost}:${options.cdpPort} (--strict-cdp)`);
+  }
+
   const launch = !pool.hasLiveExtra();
   const resolved = await resolveCdpEndpoint({
     explicit: explicitEndpoints(options),
@@ -245,8 +261,8 @@ async function discoverCdpPort(
  */
 async function autoAttach(pool: BrowserPool, options: DaemonOptions): Promise<void> {
   const saved = pool.savedAttachments();
-  const targets: CdpAddress[] = [...explicitEndpoints(options), ...saved];
-  if (cdpDiscoveryMode() === "all") targets.push(...(await discoverCdpEndpoints()));
+  const targets: CdpAddress[] = [...(options.strictCdp ? [] : explicitEndpoints(options)), ...saved];
+  if (!options.strictCdp && cdpDiscoveryMode() === "all") targets.push(...(await discoverCdpEndpoints()));
   for (const addr of targets) {
     try {
       await pool.attach(addr);
@@ -295,7 +311,7 @@ async function main(): Promise<void> {
     clearInterval(scratchpadGcTimer);
     clearInterval(journalFlushTimer);
     journalManager.flushAll(); // flush any unflushed entries before exit
-    cdp.disconnect();
+    pool.disconnectAll();
     await httpServer.stop();
     // daemon.json intentionally NOT deleted — a tray-driven restart may already
     // have a replacement daemon running, and WSL agents need the file to
@@ -461,7 +477,9 @@ async function bringUpCdpLoop(
 }
 
 main().catch((error) => {
-  console.error("[Daemon] Fatal error:", error);
+  // Include the stack: the log interceptor stringifies arguments, and
+  // String(error) alone drops everything but the first line.
+  console.error("[Daemon] Fatal error:", error instanceof Error ? (error.stack ?? error.message) : error);
   // Remove daemon.json so a tray-spawned replacement doesn't find a stale
   // entry pointing at this now-dead process. (Graceful shutdown intentionally
   // skips this because a replacement daemon may already have overwritten it.)

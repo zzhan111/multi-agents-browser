@@ -20,6 +20,28 @@
 
 11. Auto-heal only on adapter failures (in-page exception or {error} result); bad args and lease conflicts are not site changes.
 
-12. Some Chromium launchers rewrite /proc/<pid>/cmdline into one space-joined string; split args on " --" too, not only on NUL.
+12. Generated news packages must match tabs by full origin (scheme, host, port); test fixtures share localhost and differ only by port.
 
-13. Keep tests off CDP auto-discovery: the dev machine's real managed browser listens on 19825. Pass explicit ports, or call discoverCdpEndpoints({ ports, processes: false }) against fake servers.
+13. Start isolated E2E daemons with --strict-cdp, or the CDP port scan may attach tests to the user's real browser on 19825.
+
+14. Fallback kill timers in E2E helpers must capture their target process, or they kill the next restarted instance.
+
+15. Daemon screenshots write to os.homedir()/.pinix despite isolated BB_BROWSER_HOME; capture E2E evidence with one-shot headless Chromium.
+
+16. To prove a root cause, revert only the fix, rebuild, and run the focused check with E2E_ONLY=<regex>.
+
+17. Node 22+'s test runner cancels tests pending only on an unref'd timer; keep timers guarding awaited promises referenced.
+
+18. Test HttpServer + CdpConnection without Chrome by serving /json/version plus a ws WebSocketServer (see __tests__/command-timeouts.test.ts).
+
+19. DOM.setFileInputFiles fires input and change once each; arm one-shot listeners and dispatch manually only as a fallback.
+
+20. Command-level private timeouts shorter than the per-action budget hide hangs from the [cdp]/[dispatch] classifier and /status; use commandTimeoutMs.
+
+21. Windows tray PowerShell scripts use UTF-8 with BOM and LF line endings; preserve the BOM when editing.
+
+22. On Windows (Node 24), synchronous process.exit right after undici fetch aborts with UV_HANDLE_CLOSING; set process.exitCode and defer hard exit past the close phase.
+
+23. Some Chromium launchers rewrite /proc/<pid>/cmdline into one space-joined string; split args on " --" too, not only on NUL.
+
+24. Keep tests off CDP auto-discovery: the dev machine's real managed browser listens on 19825. Pass explicit ports, set BB_CDP_DISCOVERY=0, or call discoverCdpEndpoints({ ports, processes: false }) against fake servers.

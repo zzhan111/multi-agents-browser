@@ -4,7 +4,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { CommandScheduler } from "../command-scheduler.js";
+import { CommandScheduler, SchedulerTimeoutError } from "../command-scheduler.js";
 
 /** Drain the microtask + immediate queues so pending acquire() promises settle. */
 function flush(): Promise<void> {
@@ -107,5 +107,29 @@ describe("CommandScheduler", () => {
     release(); // no-op; must not drive counters negative
     assert.equal(s.stats().globalInFlight, 0);
     assert.deepEqual(s.stats().inFlightBySession, {});
+  });
+
+  it("rejects a waiter that exceeds its timeout and drops it from the queue", async () => {
+    const s = new CommandScheduler({ globalLimit: 1, perSessionLimit: 1 });
+    const hold = await s.acquire("a");
+    await assert.rejects(s.acquire("b", 20), (err: unknown) => {
+      assert.ok(err instanceof SchedulerTimeoutError);
+      assert.equal(err.stats.globalInFlight, 1);
+      return true;
+    });
+    assert.equal(s.stats().queueDepth, 0, "timed-out waiter is not admitted later");
+    hold();
+    assert.equal(s.stats().globalInFlight, 0);
+  });
+
+  it("an admitted waiter is not rejected by its timeout", async () => {
+    const s = new CommandScheduler({ globalLimit: 1, perSessionLimit: 1 });
+    const hold = await s.acquire("a");
+    const waiting = s.acquire("b", 50);
+    hold();
+    const release = await waiting;
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(s.stats().globalInFlight, 1);
+    release();
   });
 });

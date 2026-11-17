@@ -220,6 +220,12 @@ const LAUNCH_GRACE_MS = 60_000;
 export async function launchManagedBrowser(
   port: number = DEFAULT_CDP_PORT,
 ): Promise<{ host: string; port: number } | null> {
+  // Opt-out for test suites and other sandboxes: never start a real browser.
+  // Without this, a daemon under test that finds no CDP endpoint launches a
+  // detached Chromium on the default port that outlives the test run.
+  if (process.env.MA_BROWSER_NO_LAUNCH === "1") {
+    return null;
+  }
   const executable = findBrowserExecutable();
   if (!executable) {
     return null;

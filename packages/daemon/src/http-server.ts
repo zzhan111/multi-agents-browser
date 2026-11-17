@@ -12,15 +12,23 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { createWriteStream, mkdirSync, statSync, renameSync, unlinkSync } from "node:fs";
+import { openSync, writeSync, mkdirSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Request } from "@ma-browser/shared";
-import { COMMAND_TIMEOUT, DAEMON_PORT } from "@ma-browser/shared";
-import { dispatchCdpRequest, type BrowserPool } from "./browser-pool.js";
+import {
+  DAEMON_PORT,
+  actionTimeoutEnvName,
+  commandTimeoutMs,
+  type CommandTimeoutInfo,
+  type CommandTimeoutKind,
+} from "@ma-browser/shared";
+import { BrowserPool, dispatchCdpRequest } from "./browser-pool.js";
+import { CdpConnection, cdpCallContext } from "./cdp-connection.js";
+import { CommandHealth, recoveryHint } from "./command-health.js";
 import type { CommandHistory } from "./command-history.js";
-import { CommandScheduler } from "./command-scheduler.js";
+import { CommandScheduler, SchedulerTimeoutError } from "./command-scheduler.js";
 import { SessionManager, expireIdleSessions, type SessionScope } from "./session-state.js";
-import { getCatalog, invalidateCatalog, queryCatalog } from "./site-catalog.js";
+import { invalidateCatalog, queryCatalog } from "./site-catalog.js";
 import type { AgentRegistry } from "./agent-registry.js";
 import type { BindingStore } from "./binding-store.js";
 import type { JournalManager } from "./agent-journal.js";
@@ -49,7 +57,7 @@ export interface HttpServerOptions {
   host?: string;
   port?: number;
   token?: string;
-  cdp: BrowserPool;
+  cdp: BrowserPool | CdpConnection;
   history?: CommandHistory;
   agentRegistry?: AgentRegistry;
   bindingStore?: BindingStore;
@@ -74,13 +82,14 @@ export class HttpServer {
   private readonly runtimeStatus: DaemonRuntimeStatus;
   private readonly sessions = new SessionManager();
   private readonly scheduler: CommandScheduler;
+  private readonly health = new CommandHealth();
   private startTime = 0;
 
   constructor(options: HttpServerOptions) {
     this.host = options.host ?? "127.0.0.1";
     this.port = options.port ?? DAEMON_PORT;
     this.token = options.token ?? null;
-    this.cdp = options.cdp;
+    this.cdp = options.cdp instanceof BrowserPool ? options.cdp : new BrowserPool(options.cdp);
     this.history = options.history ?? null;
     this.agentRegistry = options.agentRegistry ?? null;
     this.bindingStore = options.bindingStore ?? null;
@@ -110,13 +119,16 @@ export class HttpServer {
         this.startTime = Date.now();
         const idleMs = envInt("BB_SESSION_IDLE_HOURS", 24) * 3_600_000;
         setInterval(() => expireIdleSessions(this.sessions, this.cdp.tabManager.allTabs(), idleMs), 600_000).unref();
+        this.health.startLagMonitor();
         resolve();
       });
     });
   }
 
   async stop(): Promise<void> {
+    this.health.stopLagMonitor();
     if (this.server) {
+      this.server.closeIdleConnections?.();
       return new Promise((resolve) => {
         this.server!.close(() => resolve());
       });
@@ -237,29 +249,6 @@ export class HttpServer {
         return;
       }
 
-      // Wait for CDP to be ready (two-phase startup)
-      if (!this.cdp.connected) {
-        try {
-          await Promise.race([
-            this.cdp.waitUntilReady(),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error("CDP connection timeout")), COMMAND_TIMEOUT),
-            ),
-          ]);
-        } catch {
-          const cdpTarget = `${this.cdp.host}:${this.cdp.port}`;
-          const reason = this.cdp.lastError || "unknown";
-          this.sendJson(res, 503, {
-            id: request.id,
-            success: false,
-            error: `Chrome not connected (CDP at ${cdpTarget})`,
-            reason,
-            hint: "Make sure Chrome is running. Try: ma-browser daemon shutdown && ma-browser tab list",
-          });
-          return;
-        }
-      }
-
       // Resolve the calling agent's session (isolates per-session "current tab").
       const sessionId = (req.headers["x-bb-session"] as string | undefined) ?? "default";
       const sessionLabel = req.headers["x-bb-session-label"] as string | undefined;
@@ -275,25 +264,108 @@ export class HttpServer {
       });
       const session = this.sessions.getOrCreate(sessionId, sessionLabel, sessionScope, agentRec?.agentId);
 
+      // One budget (per action, see command-timeouts.ts) covers the CDP-ready
+      // wait, the scheduler queue and the dispatch, so the client — which waits
+      // budget + grace — always gets this structured answer first.
+      const action = request.action ?? "unknown";
+      const budgetMs = commandTimeoutMs(request);
+      const startedAt = Date.now();
+      const remaining = () => Math.max(0, budgetMs - (Date.now() - startedAt));
+      const token = this.health.start(action, session.id);
+      const timeoutInfo = (kind: CommandTimeoutKind, extra: Partial<CommandTimeoutInfo> = {}): CommandTimeoutInfo => ({
+        kind,
+        action,
+        budgetMs,
+        elapsedMs: Date.now() - startedAt,
+        ...extra,
+      });
+
+      // Wait for CDP to be ready (two-phase startup)
+      if (!this.cdp.connected) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let timedOut = false;
+        try {
+          await Promise.race([
+            this.cdp.waitUntilReady(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => {
+                timedOut = true;
+                reject(new Error("CDP connection timeout"));
+              }, remaining());
+            }),
+          ]);
+        } catch (err) {
+          const cdpTarget = `${this.cdp.host}:${this.cdp.port}`;
+          const reason = this.cdp.lastError || "unknown";
+          const error = `Chrome not connected (CDP at ${cdpTarget})`;
+          const timeout = timedOut ? timeoutInfo("cdp_connect") : undefined;
+          if (timeout) this.health.timedOut(token, timeout, error, false);
+          else this.health.finish(token, false, err instanceof Error ? err.message : error);
+          this.sendJson(res, 503, {
+            id: request.id,
+            success: false,
+            error,
+            reason,
+            ...(timeout ? { timeout } : {}),
+            hint: "Make sure Chrome is running. Try: ma-browser daemon shutdown && ma-browser tab list",
+          });
+          return;
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }
+
       // Admission control: bound global + per-session concurrency and serve
       // waiters fairly before touching the shared CDP connection. Acquired
       // AFTER the CDP-ready wait so a stalled browser never consumes slots.
-      const release = await this.scheduler.acquire(session.id);
-
-      // Dispatch with timeout
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Command timeout")), COMMAND_TIMEOUT),
-      );
-      const finish = this.history?.record(request.action ?? "unknown", request, session.id);
+      let release: () => void;
       try {
-        const dispatchCtx: DispatchContext = {
-          bindingStore: this.bindingStore ?? undefined,
-          scratchpadManager: this.scratchpadManager ?? undefined,
-        };
-        const response = await Promise.race([
-          dispatchRequest(this.cdp, request, session, dispatchCtx),
-          timeout,
-        ]);
+        release = await this.scheduler.acquire(session.id, remaining());
+      } catch (err) {
+        if (!(err instanceof SchedulerTimeoutError)) throw err;
+        const timeout = timeoutInfo("queue");
+        const error = this.timeoutMessage(timeout, `waiting for a command slot; ${err.stats.globalInFlight} in flight, ${err.stats.queueDepth} queued`);
+        this.health.timedOut(token, timeout, error, false);
+        this.history?.record(action, request, session.id)?.(false);
+        this.sendJson(res, 504, { id: request.id, success: false, error, timeout });
+        return;
+      }
+
+      const finish = this.history?.record(action, request, session.id);
+      const dispatchCtx: DispatchContext = {
+        bindingStore: this.bindingStore ?? undefined,
+        scratchpadManager: this.scratchpadManager ?? undefined,
+      };
+      // Tag every CDP call made by this dispatch with `token`, so a timeout can
+      // tell "the browser never answered our call" from daemon-side stalls.
+      const dispatch = cdpCallContext.run(token, () => dispatchRequest(this.cdp, request, session, dispatchCtx));
+      dispatch.then(
+        (r) => this.health.finish(token, r.success !== false, r.error),
+        (e) => this.health.finish(token, false, e instanceof Error ? e.message : String(e)),
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<"timeout">((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout("timeout"), remaining());
+      });
+      try {
+        const response = await Promise.race([dispatch, timeout]);
+        if (response === "timeout") {
+          const pending = this.cdp.pendingStats(Date.now(), token);
+          const info = pending.count > 0
+            ? timeoutInfo("cdp", { cdpMethod: pending.oldestMethod, cdpPendingMs: pending.oldestAgeMs })
+            : timeoutInfo("dispatch");
+          const orphans = this.health.orphanedCount();
+          const detail = info.kind === "cdp"
+            ? `browser did not answer ${info.cdpMethod} for ${Math.round((info.cdpPendingMs ?? 0) / 1000)}s`
+            : orphans > 0
+              ? `daemon-side work did not finish — likely queued behind ${orphans} earlier timed-out command(s) still running on the same tab`
+              : "daemon-side work did not finish";
+          const error = this.timeoutMessage(info, detail);
+          this.health.timedOut(token, info, error, true);
+          finish?.(false);
+          this.sendJson(res, 504, { id: request.id, success: false, error, timeout: info });
+          return;
+        }
         finish?.(response.success !== false, response.data?.tab);
         // Write journal after successful dispatch
         if (session.agentId && this.journalManager) {
@@ -306,6 +378,7 @@ export class HttpServer {
         finish?.(false);
         throw err2;
       } finally {
+        if (timer) clearTimeout(timer);
         release();
       }
     } catch (error) {
@@ -314,6 +387,15 @@ export class HttpServer {
         error: error instanceof Error ? error.message : "Invalid request",
       });
     }
+  }
+
+  /** Readable timeout error: what timed out, where, and how to recover. */
+  private timeoutMessage(info: CommandTimeoutInfo, detail: string): string {
+    return (
+      `Command "${info.action}" timed out after ${Math.round(info.budgetMs / 1000)}s [${info.kind}]: ${detail}. ` +
+      recoveryHint("degraded", info.kind) +
+      ` Raise the budget with ${actionTimeoutEnvName(info.action)} if the command is just slow.`
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -343,6 +425,10 @@ export class HttpServer {
       uptime: this.uptime,
       currentSeq: this.cdp.tabManager.currentSeq(),
       scheduler: this.scheduler.stats(),
+      health: this.health.snapshot({
+        cdpConnected: this.cdp.connected,
+        cdpPending: this.cdp.pendingStats(),
+      }),
       sessions: this.sessions.all().map((s) => ({
         id: s.id,
         label: s.label,
@@ -365,6 +451,7 @@ export class HttpServer {
       daemonPort: this.port,
       cdpPort: this.cdp.port,
       cdpConnected: this.cdp.connected,
+      healthState: this.health.snapshot({ cdpConnected: this.cdp.connected }).state,
       tabCount: tabs.length,
       chromeVersion: this.cdp.chromeVersion ?? null,
       browsers: this.cdp.info(),
@@ -401,9 +488,8 @@ export class HttpServer {
     if (parseStringParam(url, "invalidate", "") === "1") invalidateCatalog();
     const q = parseStringParam(url, "q", "");
     const domain = parseStringParam(url, "domain", "");
-    const { adapters, cacheAge } = getCatalog();
-    const results = queryCatalog(adapters, { q: q || undefined, domain: domain || undefined });
-    this.sendJson(res, 200, { adapters: results, total: adapters.length, cacheAge });
+    // Keeps the original {adapters,total,cacheAge} fields and adds install/scan status (#44).
+    this.sendJson(res, 200, queryCatalog({ q: q || undefined, domain: domain || undefined }));
   }
 
   // ---------------------------------------------------------------------------
@@ -640,14 +726,18 @@ function rotateLog(filePath: string, maxSize: number, keep: number): void {
 }
 
 export function installLogInterceptor(logFilePath?: string): void {
-  let fileSink: import("node:fs").WriteStream | null = null;
+  // Synchronous appends (not a WriteStream): a daemon that dies right after
+  // startup — e.g. listen EADDRINUSE followed by process.exit(1) — must still
+  // leave its last words in daemon.log. A stream's queued writes are dropped
+  // by process.exit, which left an empty log with no clue why startup failed.
+  let fileSink: number | null = null;
   if (logFilePath) {
     try {
       mkdirSync(dirname(logFilePath), { recursive: true });
       rotateLog(logFilePath, 10 * 1024 * 1024, 3);
-      const stream = createWriteStream(logFilePath, { flags: "a" });
-      fileSink = stream;
-      stream.write(
+      fileSink = openSync(logFilePath, "a");
+      writeSync(
+        fileSink,
         `\n===== ma-browser daemon started ${new Date().toISOString()} (pid ${process.pid}) =====\n`,
       );
     } catch {
@@ -665,9 +755,9 @@ export function installLogInterceptor(logFilePath?: string): void {
         const level = METHOD_TO_LEVEL[method] ?? "info";
         const entry: LogEntry = { ts: Date.now(), level, msg: trimmed };
         logStore.push(entry);
-        if (fileSink) {
+        if (fileSink !== null) {
           try {
-            fileSink.write(`${new Date(entry.ts).toISOString()} [${level}] ${trimmed}\n`);
+            writeSync(fileSink, `${new Date(entry.ts).toISOString()} [${level}] ${trimmed}\n`);
           } catch {}
         }
       }
@@ -675,12 +765,10 @@ export function installLogInterceptor(logFilePath?: string): void {
     };
   }
 
-  installLogInterceptor.flush = () => {
-    if (fileSink) {
-      try { fileSink.end(); } catch {}
-      fileSink = null;
-    }
-  };
+  // Writes are synchronous, so there is nothing to flush. The fd stays open so
+  // the shutdown path's own log lines still reach the file; the OS closes it
+  // at exit.
+  installLogInterceptor.flush = () => {};
 }
 
 installLogInterceptor.flush = (): void => {};  // placeholder before first call

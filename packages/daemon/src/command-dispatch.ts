@@ -26,13 +26,20 @@ import type { ScratchpadManager } from "./scratchpad-manager.js";
 import {
   listAdapters,
   searchAdapters,
-  findAdapter,
-  fuzzyAdapterNames,
+  lookupAdapter,
   updateAdapters,
 } from "./site-runner.js";
 import { invalidateCatalog } from "./site-catalog.js";
 import { createAutoHealer } from "./site-autoheal.js";
-import { buildAdapterScript, matchTabOrigin, type SiteAdapter } from "@ma-browser/shared";
+import { validateUploadFiles, type FileInputInfo } from "./file-upload.js";
+import {
+  browserFetcher,
+  buildAdapterScript,
+  createTabProbe,
+  matchTabBase,
+  matchTabOrigin,
+  type SiteAdapter,
+} from "@ma-browser/shared";
 
 const autoHealer = createAutoHealer();
 
@@ -99,6 +106,12 @@ function ok(id: string, data?: ExtResponseData): Response {
 
 function fail(id: string, error: unknown): Response {
   return { id, success: false, error: buildRequestError(error).message };
+}
+
+/** Failure carrying a recovery hint and a runnable fix, so clients can show more than an error string. */
+function failWithHint(id: string, error: string, hint: string, action: string): Response {
+  const message = [`${error}.`, hint, action ? `Run: ${action}` : ""].filter(Boolean).join(" ");
+  return { id, success: false, error: message, hint, action };
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +198,16 @@ function convertBuildDomTreeResult(
     return attrs["aria-label"] || attrs.title || attrs.placeholder || attrs.alt || attrs.value || collectTextContent(node, map) || attrs.name || undefined;
   };
 
+  // `[file accept=".pdf" multiple]` so agents can spot upload targets for `upload`.
+  const fileInputTag = (node: RawDomElementNode): string => {
+    const attrs = node.attributes || {};
+    if (node.tagName.toLowerCase() !== "input" || attrs.type?.toLowerCase() !== "file") return "";
+    let tag = " [file";
+    if (attrs.accept) tag += ` accept=${JSON.stringify(attrs.accept)}`;
+    if ("multiple" in attrs) tag += " multiple";
+    return tag + "]";
+  };
+
   const truncateText = (text: string, length = 50): string =>
     text.length <= length ? text : `${text.slice(0, length - 3)}...`;
 
@@ -208,6 +231,7 @@ function convertBuildDomTreeResult(
       if (!matchesSelector(node, role, name)) continue;
       let line = `${role} [ref=${refId}]`;
       if (name) line += ` ${JSON.stringify(truncateText(name))}`;
+      line += fileInputTag(node);
       lines.push(line);
       refs[refId] = { xpath: node.xpath || "", role, name, tagName: node.tagName.toLowerCase() } as RefInfo;
     }
@@ -239,6 +263,7 @@ function convertBuildDomTreeResult(
     let line = `${indent}- ${role}`;
     if (refId) line += ` [ref=${refId}]`;
     if (name) line += ` ${JSON.stringify(truncateText(name, compact ? 50 : 80))}`;
+    line += fileInputTag(el);
     if (!compact) line += ` <${el.tagName.toLowerCase()}>`;
     lines.push(line);
 
@@ -351,6 +376,108 @@ async function parseRef(cdp: BrowserPool, targetId: string, tab: TabState, ref: 
     return backendDOMNodeId;
   }
   throw new Error(`Unknown ref: ${ref}. Run snapshot first.`);
+}
+
+// ---------------------------------------------------------------------------
+// File upload
+// ---------------------------------------------------------------------------
+
+// Runs on the targeted element; returns the file input to use, or a string
+// describing why there is none.
+const FIND_FILE_INPUT_FN = `function() {
+  const isFile = (el) => el instanceof HTMLInputElement && el.type === 'file';
+  if (isFile(this)) return this;
+  if (this instanceof HTMLLabelElement && isFile(this.control)) return this.control;
+  for (const root of [this, this.shadowRoot]) {
+    const inner = root && root.querySelector && root.querySelector('input[type=file]');
+    if (inner) return inner;
+  }
+  return this instanceof Element ? '<' + this.tagName.toLowerCase() + '>' : String(this);
+}`;
+
+// Arms one-shot input/change listeners and reports the input's constraints.
+const ARM_FILE_INPUT_FN = `function() {
+  const seen = { input: false, change: false };
+  this.__maUploadEvents = seen;
+  this.addEventListener('input', () => { seen.input = true; }, { once: true, capture: true });
+  this.addEventListener('change', () => { seen.change = true; }, { once: true, capture: true });
+  return { multiple: this.multiple, accept: this.getAttribute('accept') || '', disabled: this.disabled };
+}`;
+
+// Fires input/change only if Chrome did not, then reports the input's files.
+const FINISH_FILE_INPUT_FN = `function() {
+  const seen = this.__maUploadEvents || { input: false, change: false };
+  const fired = { input: seen.input, change: seen.change };
+  if (!seen.input) this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  if (!seen.change) this.dispatchEvent(new Event('change', { bubbles: true }));
+  delete this.__maUploadEvents;
+  const files = Array.from(this.files || []).map((f) => ({ name: f.name, size: f.size, type: f.type }));
+  return { files, events: fired };
+}`;
+
+async function resolveUploadTarget(
+  cdp: BrowserPool,
+  targetId: string,
+  tab: TabState,
+  request: Request,
+): Promise<{ objectId: string; label: string }> {
+  if (request.ref) {
+    const backendNodeId = await parseRef(cdp, targetId, tab, request.ref);
+    const resolved = await cdp.sessionCommand<{ object: { objectId: string } }>(targetId, "DOM.resolveNode", { backendNodeId });
+    return { objectId: resolved.object.objectId, label: `@${request.ref}` };
+  }
+  const selector = request.selector!;
+  const found = await cdp.sessionCommand<{
+    result: { objectId?: string; subtype?: string };
+    exceptionDetails?: { exception?: { description?: string }; text?: string };
+  }>(targetId, "Runtime.evaluate", {
+    expression: `document.querySelector(${JSON.stringify(selector)})`,
+    returnByValue: false,
+  });
+  if (found.exceptionDetails) {
+    throw new Error(`Invalid selector ${JSON.stringify(selector)}: ${found.exceptionDetails.exception?.description?.split("\n")[0] ?? found.exceptionDetails.text}`);
+  }
+  if (!found.result.objectId || found.result.subtype === "null") {
+    throw new Error(`No element matches selector ${JSON.stringify(selector)}`);
+  }
+  return { objectId: found.result.objectId, label: JSON.stringify(selector) };
+}
+
+async function uploadFiles(
+  cdp: BrowserPool,
+  targetId: string,
+  tab: TabState,
+  request: Request,
+): Promise<{ files: string[]; uploadedFiles: Array<{ name: string; size: number; type: string }>; uploadEvents: { input: boolean; change: boolean } }> {
+  const callOn = async <T>(objectId: string, functionDeclaration: string, returnByValue: boolean) => {
+    const call = await cdp.sessionCommand<{
+      result: { value?: T; objectId?: string; type?: string; subtype?: string };
+      exceptionDetails?: { exception?: { description?: string }; text?: string };
+    }>(targetId, "Runtime.callFunctionOn", { objectId, functionDeclaration, returnByValue });
+    if (call.exceptionDetails) {
+      throw new Error(call.exceptionDetails.exception?.description || call.exceptionDetails.text || "Runtime.callFunctionOn failed");
+    }
+    return call.result;
+  };
+
+  const target = await resolveUploadTarget(cdp, targetId, tab, request);
+  const found = await callOn<string>(target.objectId, FIND_FILE_INPUT_FN, false);
+  if (found.type === "string" || !found.objectId) {
+    throw new Error(
+      `${target.label} (${found.value ?? "element"}) is not a file input and contains none. ` +
+        "Custom upload widgets often hide the real <input type=file>; target it with a selector such as \"input[type=file]\".",
+    );
+  }
+  const inputId = found.objectId;
+  const info = (await callOn<FileInputInfo>(inputId, ARM_FILE_INPUT_FN, true)).value!;
+  const files = validateUploadFiles(request.files, info, { force: request.force });
+  await cdp.sessionCommand(targetId, "DOM.setFileInputFiles", { files, objectId: inputId });
+  const done = (await callOn<{ files: Array<{ name: string; size: number; type: string }>; events: { input: boolean; change: boolean } }>(
+    inputId,
+    FINISH_FILE_INPUT_FN,
+    true,
+  )).value!;
+  return { files, uploadedFiles: done.files, uploadEvents: done.events };
 }
 
 // ---------------------------------------------------------------------------
@@ -597,7 +724,10 @@ async function handleSiteRun(
   const response = await runSiteAdapter(cdp, request, session, outcome);
   // Only failures of the adapter itself (not bad args or busy tabs) can mean the site changed.
   if (response.success || !autoHeal || !outcome.failedAdapter) return response;
-  const healed = await autoHealer.heal(outcome.failedAdapter);
+  const probe = browserProbe(cdp, session, request.browser);
+  const healed = await autoHealer
+    .heal(outcome.failedAdapter, browserFetcher(probe.evaluate))
+    .finally(() => probe.dispose());
   if (!healed) return response;
   if (healed.status === "healed") {
     invalidateCatalog();
@@ -612,6 +742,31 @@ interface SiteRunOutcome {
   failedAdapter?: SiteAdapter;
 }
 
+/** May this session use the tab (not exclusively held by another agent)? */
+function usableBy(cdp: BrowserPool, targetId: string, session?: AgentSession): boolean {
+  const ts = cdp.tabManager.getTab(targetId);
+  return !ts || ts.leaseMode !== "exclusive" || ts.leaseOwner === session?.id;
+}
+
+/**
+ * Probe tabs for auto-heal: the heal's requests run in a tab of each URL's own
+ * origin so the browser's login state applies, like the adapters themselves.
+ * Tabs it opens are closed afterwards; existing tabs are never closed.
+ */
+function browserProbe(cdp: BrowserPool, session?: AgentSession, browser?: string) {
+  return createTabProbe({
+    list: async () => (await cdp.getTargets(browser))
+      .filter((t) => t.type === "page" && usableBy(cdp, t.id, session))
+      .map((t) => ({ id: t.id, url: t.url })),
+    open: (url) => cdp.createTarget(url, browser, session),
+    evaluate: (id, script) => cdp.runOnTab(id, async () => {
+      await cdp.attachAndEnable(id);
+      return cdp.evaluate<unknown>(id, script, true);
+    }),
+    close: (id) => cdp.closeTarget(id),
+  });
+}
+
 async function runSiteAdapter(
   cdp: BrowserPool,
   request: Request,
@@ -620,14 +775,12 @@ async function runSiteAdapter(
 ): Promise<Response> {
   if (!request.name) return fail(request.id, "Missing 'name' parameter for site_run");
 
-  const adapter = findAdapter(request.name);
-  if (!adapter) {
-    const fuzzy = fuzzyAdapterNames(request.name);
-    const hint = fuzzy.length
-      ? ` Did you mean: ${fuzzy.join(", ")}?`
-      : " Run site_list to see available adapters.";
-    return fail(request.id, `Site adapter '${request.name}' not found.${hint}`);
+  const found = lookupAdapter(request.name);
+  if ("notFound" in found) {
+    const { error, hint, action } = found.notFound;
+    return failWithHint(request.id, error, hint, action);
   }
+  const adapter = found.adapter;
 
   const prep = buildAdapterScript(adapter, request.args ?? [], request.namedArgs ?? {});
   if ("error" in prep) return fail(request.id, prep.error);
@@ -638,18 +791,17 @@ async function runSiteAdapter(
     targetId = (await cdp.ensurePageTarget(String(request.tabId), session)).id;
   } else if (adapter.domain) {
     const pages = (await cdp.getTargets(request.browser)).filter((t) => t.type === "page");
+    // Generated packages record their real base (may be http or carry a port):
+    // only a tab of exactly that origin can serve their same-origin fetches.
+    const base = autoHealer.generatedBase(adapter);
     // Skip tabs exclusively held by another session — can't run adapter there.
-    const match = pages.find((t) => {
-      if (!matchTabOrigin(t.url, adapter.domain)) return false;
-      const ts = cdp.tabManager.getTab(t.id);
-      return !ts || ts.leaseMode !== "exclusive" || ts.leaseOwner === session?.id;
-    });
+    const match = pages.find((t) =>
+      (base ? matchTabBase(t.url, base) : matchTabOrigin(t.url, adapter.domain!)) && usableBy(cdp, t.id, session));
     if (match) {
       targetId = match.id;
       await cdp.attachAndEnable(targetId);
     } else {
-      // Generated packages record their real base (may be http or carry a port).
-      const url = autoHealer.generatedBase(adapter) ?? `https://${adapter.domain}`;
+      const url = base ?? `https://${adapter.domain}`;
       targetId = await cdp.createTarget(url, request.browser, session);
       await waitForTabReady(cdp, targetId);
     }
@@ -776,9 +928,12 @@ export async function dispatchRequest(
   }
   if (request.action === "site_info") {
     if (!request.name) return fail(request.id, "Missing 'name' parameter for site_info");
-    const adapter = findAdapter(request.name);
-    if (!adapter) return fail(request.id, `Site adapter '${request.name}' not found`);
-    return ok(request.id, adapter as unknown as ExtResponseData);
+    const found = lookupAdapter(request.name);
+    if ("notFound" in found) {
+      const { error, hint, action } = found.notFound;
+      return failWithHint(request.id, error, hint, action);
+    }
+    return ok(request.id, found.adapter as unknown as ExtResponseData);
   }
   if (request.action === "site_run") {
     return handleSiteRun(cdp, request, session);
@@ -1004,6 +1159,22 @@ export async function dispatchRequest(
         selectedValue: request.value,
         ...(labelResult?.result?.value != null ? { selectedLabel: labelResult.result.value } : {}),
       });
+    }
+
+    case "upload": {
+      if (!request.ref && !request.selector) return fail(request.id, "Missing ref or selector parameter");
+      const seq = tab.recordAction();
+      let result: Awaited<ReturnType<typeof uploadFiles>>;
+      // No private timeout: the per-action budget in http-server classifies a
+      // hung DOM.setFileInputFiles as kind=cdp and feeds /status health.
+      try {
+        result = await uploadFiles(cdp, target.id, tab, request);
+      } catch (error) {
+        // Return a plain error response instead of an HTTP 400 wrapper.
+        return fail(request.id, error);
+      }
+      const ref = request.ref ? tab.refs[request.ref] : undefined;
+      return ok(request.id, { tab: shortId, seq, role: ref?.role, name: ref?.name, ...result });
     }
 
     case "get": {

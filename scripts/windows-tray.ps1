@@ -55,6 +55,45 @@ $tray.ContextMenuStrip = $menu
 $tray.Text = 'ma-browser'
 $tray.Visible = $true
 
+$tray.Add_MouseClick({
+  param($sender, $e)
+  if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-BrowserWindow }
+})
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class MaBrowserWindow {
+  delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+  [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr hWnd);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int cmd);
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  public static IntPtr Find(uint pid) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, l) => {
+      uint owner;
+      GetWindowThreadProcessId(h, out owner);
+      if (owner == pid && IsWindowVisible(h) && GetWindow(h, 4) == IntPtr.Zero && GetWindowTextLength(h) > 0) { found = h; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  public static bool Activate(IntPtr hWnd) {
+    ShowWindow(hWnd, IsIconic(hWnd) ? 9 : 5);
+    return SetForegroundWindow(hWnd);
+  }
+}
+'@
+
+$script:prompting = $false
+$script:frontDeadline = $null
+
 $script:starter = $null
 $script:lastStart = [DateTime]::MinValue
 
@@ -75,6 +114,65 @@ function Show-Balloon([string]$title, [string]$text) {
   $tray.BalloonTipTitle = $title
   $tray.BalloonTipText = if ($text) { $text } else { '未知错误' }
   $tray.ShowBalloonTip(5000)
+}
+
+function Show-TrayError([string]$title, [string]$message) {
+  $tray.BalloonTipTitle = $title
+  $tray.BalloonTipText = $message
+  $tray.ShowBalloonTip(5000)
+}
+
+function Get-BrowserModeName($browser) {
+  if ($browser.CommandLine -match '(?:^|\s)--headless(?:=\S+)?(?:\s|$)') { 'headless' } else { 'headed' }
+}
+
+# 置前受管浏览器窗口；成功返回 $true，窗口尚未出现返回 $false，置前被系统拒绝时抛错。
+function Invoke-BrowserFront($browser) {
+  $hwnd = [MaBrowserWindow]::Find([uint32]$browser.ProcessId)
+  if ($hwnd -eq [IntPtr]::Zero) { return $false }
+  if (-not [MaBrowserWindow]::Activate($hwnd) -and [MaBrowserWindow]::GetForegroundWindow() -ne $hwnd) { throw '系统拒绝将浏览器窗口置前' }
+  return $true
+}
+
+function Show-BrowserWindow {
+  if ($script:prompting) { return }
+  $script:prompting = $true
+  $owner = $null
+  try {
+    $browser = Get-ManagedBrowser
+    if (-not $browser) { Show-TrayError '无法显示 ma-browser 窗口' '未找到受管浏览器，请等待后台启动后重试。'; return }
+    $mode = Get-BrowserModeName $browser
+    $text = if ($mode -eq 'headless') { '当前为无头模式。是否切换为有头并显示窗口？（会重启受管浏览器）' } else { '是否将受管浏览器窗口置于前台？' }
+    $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; Opacity = 0; StartPosition = 'Manual'; Location = New-Object System.Drawing.Point(-32000, -32000) }
+    $owner.Show()
+    $owner.Activate()
+    $answer = [System.Windows.Forms.MessageBox]::Show($owner, $text, '显示 ma-browser 窗口？', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    if ($mode -eq 'headed') {
+      try {
+        if (-not (Invoke-BrowserFront $browser)) { throw '未找到受管浏览器窗口' }
+      } catch { Show-TrayError 'ma-browser 窗口置前失败' $_.Exception.Message }
+      return
+    }
+    $result = Switch-BrowserMode 'headed'
+    if ($result.success) { $script:frontDeadline = (Get-Date).AddSeconds(45) }
+  } finally {
+    if ($owner) { $owner.Dispose() }
+    $script:prompting = $false
+  }
+}
+
+# headless→headed 切换后，等新浏览器窗口出现再置前（由定时器轮询）。
+function Complete-PendingFront {
+  if (-not $script:frontDeadline) { return }
+  try {
+    $browser = Get-ManagedBrowser
+    if ($browser -and (Get-BrowserModeName $browser) -eq 'headed' -and (Invoke-BrowserFront $browser)) { $script:frontDeadline = $null; return }
+    if ((Get-Date) -gt $script:frontDeadline) { throw '等待有头浏览器窗口超时' }
+  } catch {
+    $script:frontDeadline = $null
+    Show-TrayError 'ma-browser 窗口置前失败' $_.Exception.Message
+  }
 }
 
 function Invoke-Cli([string[]]$cliArgs) {
@@ -230,6 +328,7 @@ function Update-Tray {
   # NotifyIcon.Text is capped at 63 characters.
   $tip = "ma-browser - $message"
   $tray.Text = if ($tip.Length -gt 63) { $tip.Substring(0, 63) } else { $tip }
+  Complete-PendingFront
 }
 
 $timer = New-Object System.Windows.Forms.Timer
