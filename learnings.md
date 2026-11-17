@@ -19,3 +19,13 @@
 10. Generated-package adapters must open new tabs at the manifest base URL, not https://<domain>, so http and port fixtures work.
 
 11. Auto-heal only on adapter failures (in-page exception or {error} result); bad args and lease conflicts are not site changes.
+
+12. Generated news packages must match tabs by full origin (scheme, host, port); test fixtures share localhost and differ only by port.
+
+13. Start isolated E2E daemons with --strict-cdp, or the CDP port scan may attach tests to the user's real browser on 19825.
+
+14. Fallback kill timers in E2E helpers must capture their target process, or they kill the next restarted instance.
+
+15. Daemon screenshots write to os.homedir()/.pinix despite isolated BB_BROWSER_HOME; capture E2E evidence with one-shot headless Chromium.
+
+16. To prove a root cause, revert only the fix, rebuild, and run the focused check with E2E_ONLY=<regex>.
