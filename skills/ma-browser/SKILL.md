@@ -60,6 +60,13 @@ ma-browser site arxiv/search "transformer"    # 论文搜索
 
 adapter 自动处理 tab 管理（查找匹配域名的 tab 或新建），自动检测登录错误并提示。
 
+**站点数据任务先查 adapter**：要读某个站点的数据（如 x.com 主页、推文）时，先按域名找 adapter（MCP：`site_search({query:"", domain:"x.com"})`），页面返回 403 或要求登录时也这样做。`site list/search --json` 返回 `{status, adapters, hint, action, sources}`：
+- `ok` / `no_match`：库已安装，结果可信
+- `not_installed` / `empty`：本机没有 adapter 库，先跑 `ma-browser site update`（MCP：`site_update`）再查。**这不代表没有这项能力**
+- `degraded`：部分文件读不了，看 `diagnostics`
+
+adapter 仍需要浏览器里的登录会话，不能绕过访问限制。
+
 详细用法和 36 平台完整列表：参见 [references/site-system.md](references/site-system.md)
 创建自定义 adapter：参见 [references/adapter-development.md](references/adapter-development.md)
 

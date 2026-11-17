@@ -136,6 +136,118 @@ function adapterSource(name: string, step: NewsStep, base: string, feedUrl: stri
   return `/* @meta\n${JSON.stringify(meta, null, 2)}\n*/\nasync function(args) {${RUNTIME}\n  ${body}\n}\n`;
 }
 
+/** Runs `script` in a browser tab whose origin is `origin` and returns its value. */
+export type OriginEvaluator = (origin: string, script: string) => Promise<unknown>;
+
+export const BROWSER_PROBE_TIMEOUT_MS = 15_000;
+
+/**
+ * A Fetcher that issues each request from a page of the URL's own origin in
+ * the user's browser, so login cookies apply exactly as they do when the
+ * generated adapters run. Credentials stay in the browser: only status, final
+ * URL, content type and body come back.
+ *
+ * Failure behaviour:
+ * - an unreachable browser or a request slower than `timeoutMs` throws;
+ * - HTTP errors (401 after a logout, 404 ...) come back as they are, so the
+ *   checks fail and nothing is written;
+ * - only an in-page network error (typically a redirect to another origin that
+ *   CORS blocks during a domain move) goes to `fallback` — a plain Node fetch
+ *   without any login state, used just to discover where the site moved. Pass
+ *   `fallback: null` to throw instead.
+ */
+export function browserFetcher(
+  evaluate: OriginEvaluator,
+  opts: { fallback?: Fetcher | null; timeoutMs?: number } = {},
+): Fetcher {
+  const fallback = opts.fallback === undefined ? fetch : opts.fallback;
+  const timeoutMs = opts.timeoutMs ?? BROWSER_PROBE_TIMEOUT_MS;
+  return async (url, init) => {
+    const target = new URL(url);
+    const script = `(async () => {
+      try {
+        const r = await fetch(${JSON.stringify(target.href)}, { method: ${JSON.stringify(init?.method ?? "GET")}, credentials: "include", signal: AbortSignal.timeout(${timeoutMs}) });
+        return JSON.stringify({ status: r.status, url: r.url, type: r.headers.get("content-type") || "", body: await r.text() });
+      } catch (e) {
+        return JSON.stringify({ error: String(e && e.message || e), name: e && e.name });
+      }
+    })()`;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`browser request to ${target.href} timed out after ${timeoutMs}ms`)), timeoutMs + 1000);
+    });
+    const raw = await Promise.race([evaluate(target.origin, script), timeout]).finally(() => clearTimeout(timer));
+    const got = (typeof raw === "string" ? JSON.parse(raw) : raw) as { error?: string; name?: string; status: number; url: string; type: string; body: string };
+    if (got.error) {
+      if (got.name === "TimeoutError" || got.name === "AbortError") throw new Error(`browser request to ${target.href} timed out after ${timeoutMs}ms`);
+      if (!fallback) throw new Error(`browser request to ${target.href} failed: ${got.error}`);
+      return fallback(url, init);
+    }
+    const empty = [101, 204, 205, 304].includes(got.status);
+    const res = new Response(empty ? null : got.body, { status: got.status, headers: got.type ? { "content-type": got.type } : {} });
+    Object.defineProperty(res, "url", { value: got.url || target.href });
+    return res;
+  };
+}
+
+/** The tab operations a probe needs; the CLI and the daemon each provide them. */
+export interface ProbeTabs {
+  /** Tabs the caller may use (e.g. not exclusively leased by another agent). */
+  list(): Promise<Array<{ id: string; url: string }>>;
+  /** Open a background tab at `url` and return its id. */
+  open(url: string): Promise<string>;
+  evaluate(id: string, script: string): Promise<unknown>;
+  close(id: string): Promise<void>;
+}
+
+/**
+ * An OriginEvaluator over real tabs: reuses an open tab of exactly that origin
+ * (scheme, host and port), otherwise opens one and waits until it is on that
+ * origin. `dispose()` closes only the tabs this probe opened.
+ */
+export function createTabProbe(tabs: ProbeTabs, opts: { readyTimeoutMs?: number; pollMs?: number } = {}): {
+  evaluate: OriginEvaluator;
+  dispose(): Promise<void>;
+} {
+  const readyTimeoutMs = opts.readyTimeoutMs ?? BROWSER_PROBE_TIMEOUT_MS;
+  const pollMs = opts.pollMs ?? 200;
+  const byOrigin = new Map<string, Promise<string>>();
+  const opened: string[] = [];
+  const sameOrigin = (url: string, origin: string) => { try { return new URL(url).origin === origin; } catch { return false; } };
+  const tabFor = (origin: string): Promise<string> => {
+    let tab = byOrigin.get(origin);
+    if (!tab) {
+      tab = (async () => {
+        const existing = (await tabs.list()).find((t) => sameOrigin(t.url, origin));
+        if (existing) return existing.id;
+        const id = await tabs.open(origin + "/");
+        opened.push(id);
+        const deadline = Date.now() + readyTimeoutMs;
+        while (Date.now() < deadline) {
+          const at = await tabs.evaluate(id, "location.origin").catch(() => undefined);
+          if (at === origin) return id;
+          await new Promise((r) => setTimeout(r, pollMs));
+        }
+        throw new Error(`browser tab for ${origin} did not load within ${readyTimeoutMs}ms`);
+      })();
+      byOrigin.set(origin, tab);
+      tab.catch(() => byOrigin.delete(origin));
+    }
+    return tab;
+  };
+  return {
+    evaluate: async (origin, script) => tabs.evaluate(await tabFor(origin), script),
+    async dispose() {
+      for (const id of opened.splice(0)) await tabs.close(id).catch(() => undefined);
+    },
+  };
+}
+
+/** Does a tab belong to a generated package's base (same scheme, host and port)? */
+export function matchTabBase(tabUrl: string, base: string): boolean {
+  try { return new URL(tabUrl).origin === new URL(base).origin; } catch { return false; }
+}
+
 /** Run an adapter source the way buildAdapterScript + Runtime.evaluate would, but in Node. */
 export async function runAdapterSource(source: string, args: Record<string, string>, fetcher: Fetcher = fetch): Promise<any> {
   const body = source.replace(/\/\*\s*@meta[\s\S]*?\*\//, "").trim();

@@ -256,6 +256,23 @@ ma-browser site zhihu/hot --json
 ma-browser site twitter/search "AI" --json
 ```
 
+## 新闻站包生成（零 token）
+
+```bash
+ma-browser site generate ifanr https://www.ifanr.com   # 生成 ifanr/latest + ifanr/article
+ma-browser site heal ifanr                             # 站点搬家/改版后重新生成
+ma-browser site generate members https://news.example.com --browser   # 需登录的站点
+```
+
+- 默认由 CLI 进程直接请求站点，不带任何登录态。
+- `--browser`：探测请求改在浏览器里**完全同源**（协议+主机+端口）的标签页中发出（已打开的优先，否则临时打开、等待就绪，结束后只关闭这些临时页），复用用户已有登录态。先在浏览器里登录，再运行。
+- `site run` 运行生成包时只选与 `_package.json` 的 base 完全同源的标签页（同主机不同端口/协议的页不会被误用），没有就在 base 新开；显式 `--tab` 与独占租约照旧生效。
+- 自动修复：生成包在 `site run` 中失败时，daemon 用浏览器登录态（同样的同源标签页探测）重新探测/生成一次并重试一次；同包并发失败共用一次修复，60s 冷却。
+- 失败行为：浏览器不可达、单请求超过 15s、临时页 15s 内未到达目标 origin 都直接报错；登录失效（401 等）使检查不通过——都不写包、不覆盖原包、不报成功。
+- Node 回退：仅当页内 fetch 网络错误（典型为站点搬家时跨 origin 重定向被 CORS 拦截）才改用 CLI/daemon 进程直接请求，用于发现新地址；该请求不带登录态，需登录的内容在这一步会检查失败。
+- cookie 只留在浏览器中，生成的包和 `_package.json` 只记录 base / feedUrl，不含凭据；生成的 adapter 运行时同样走浏览器登录态。
+- 只能读取当前账户有权访问的内容，不绕过付费墙或验证。
+
 ## 更多信息
 
 - 创建自定义 adapter：参见 [adapter-development.md](adapter-development.md)

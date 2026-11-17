@@ -393,6 +393,10 @@ export interface Response {
   error?: string;
   /** 超时诊断（命令超时时返回，区分 cdp_connect / queue / cdp / dispatch） */
   timeout?: CommandTimeoutInfo;
+  /** 失败时的恢复说明（如 site adapter 未安装） */
+  hint?: string;
+  /** 失败时可直接执行的修复命令（如 "ma-browser site update"） */
+  action?: string;
 }
 
 /** Daemon 状态 */

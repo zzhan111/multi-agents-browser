@@ -25,14 +25,20 @@ import type { ScratchpadManager } from "./scratchpad-manager.js";
 import {
   listAdapters,
   searchAdapters,
-  findAdapter,
-  fuzzyAdapterNames,
+  lookupAdapter,
   updateAdapters,
 } from "./site-runner.js";
 import { invalidateCatalog } from "./site-catalog.js";
 import { createAutoHealer } from "./site-autoheal.js";
 import { validateUploadFiles, type FileInputInfo } from "./file-upload.js";
-import { buildAdapterScript, matchTabOrigin, type SiteAdapter } from "@ma-browser/shared";
+import {
+  browserFetcher,
+  buildAdapterScript,
+  createTabProbe,
+  matchTabBase,
+  matchTabOrigin,
+  type SiteAdapter,
+} from "@ma-browser/shared";
 
 const autoHealer = createAutoHealer();
 
@@ -99,6 +105,12 @@ function ok(id: string, data?: ExtResponseData): Response {
 
 function fail(id: string, error: unknown): Response {
   return { id, success: false, error: buildRequestError(error).message };
+}
+
+/** Failure carrying a recovery hint and a runnable fix, so clients can show more than an error string. */
+function failWithHint(id: string, error: string, hint: string, action: string): Response {
+  const message = [`${error}.`, hint, action ? `Run: ${action}` : ""].filter(Boolean).join(" ");
+  return { id, success: false, error: message, hint, action };
 }
 
 // ---------------------------------------------------------------------------
@@ -711,7 +723,10 @@ async function handleSiteRun(
   const response = await runSiteAdapter(cdp, request, session, outcome);
   // Only failures of the adapter itself (not bad args or busy tabs) can mean the site changed.
   if (response.success || !autoHeal || !outcome.failedAdapter) return response;
-  const healed = await autoHealer.heal(outcome.failedAdapter);
+  const probe = browserProbe(cdp, session);
+  const healed = await autoHealer
+    .heal(outcome.failedAdapter, browserFetcher(probe.evaluate))
+    .finally(() => probe.dispose());
   if (!healed) return response;
   if (healed.status === "healed") {
     invalidateCatalog();
@@ -726,6 +741,35 @@ interface SiteRunOutcome {
   failedAdapter?: SiteAdapter;
 }
 
+/** May this session use the tab (not exclusively held by another agent)? */
+function usableBy(cdp: CdpConnection, targetId: string, session?: AgentSession): boolean {
+  const ts = cdp.tabManager.getTab(targetId);
+  return !ts || ts.leaseMode !== "exclusive" || ts.leaseOwner === session?.id;
+}
+
+/**
+ * Probe tabs for auto-heal: the heal's requests run in a tab of each URL's own
+ * origin so the browser's login state applies, like the adapters themselves.
+ * Tabs it opens are closed afterwards; existing tabs are never closed.
+ */
+function browserProbe(cdp: CdpConnection, session?: AgentSession) {
+  return createTabProbe({
+    list: async () => (await cdp.getTargets())
+      .filter((t) => t.type === "page" && usableBy(cdp, t.id, session))
+      .map((t) => ({ id: t.id, url: t.url })),
+    open: async (url) => {
+      const { targetId } = await cdp.browserCommand<{ targetId: string }>("Target.createTarget", { url, background: true });
+      await cdp.attachAndEnable(targetId);
+      return targetId;
+    },
+    evaluate: (id, script) => cdp.runOnTab(id, async () => {
+      await cdp.attachAndEnable(id);
+      return cdp.evaluate<unknown>(id, script, true);
+    }),
+    close: async (id) => { await cdp.browserCommand("Target.closeTarget", { targetId: id }); },
+  });
+}
+
 async function runSiteAdapter(
   cdp: CdpConnection,
   request: Request,
@@ -734,14 +778,12 @@ async function runSiteAdapter(
 ): Promise<Response> {
   if (!request.name) return fail(request.id, "Missing 'name' parameter for site_run");
 
-  const adapter = findAdapter(request.name);
-  if (!adapter) {
-    const fuzzy = fuzzyAdapterNames(request.name);
-    const hint = fuzzy.length
-      ? ` Did you mean: ${fuzzy.join(", ")}?`
-      : " Run site_list to see available adapters.";
-    return fail(request.id, `Site adapter '${request.name}' not found.${hint}`);
+  const found = lookupAdapter(request.name);
+  if ("notFound" in found) {
+    const { error, hint, action } = found.notFound;
+    return failWithHint(request.id, error, hint, action);
   }
+  const adapter = found.adapter;
 
   const prep = buildAdapterScript(adapter, request.args ?? [], request.namedArgs ?? {});
   if ("error" in prep) return fail(request.id, prep.error);
@@ -752,20 +794,19 @@ async function runSiteAdapter(
     targetId = (await cdp.ensurePageTarget(String(request.tabId), session)).id;
   } else if (adapter.domain) {
     const pages = (await cdp.getTargets()).filter((t) => t.type === "page");
+    // Generated packages record their real base (may be http or carry a port):
+    // only a tab of exactly that origin can serve their same-origin fetches.
+    const base = autoHealer.generatedBase(adapter);
     // Skip tabs exclusively held by another session — can't run adapter there.
-    const match = pages.find((t) => {
-      if (!matchTabOrigin(t.url, adapter.domain)) return false;
-      const ts = cdp.tabManager.getTab(t.id);
-      return !ts || ts.leaseMode !== "exclusive" || ts.leaseOwner === session?.id;
-    });
+    const match = pages.find((t) =>
+      (base ? matchTabBase(t.url, base) : matchTabOrigin(t.url, adapter.domain!)) && usableBy(cdp, t.id, session));
     if (match) {
       targetId = match.id;
       await cdp.attachAndEnable(targetId);
     } else {
       const created = await cdp.browserCommand<{ targetId: string }>(
         "Target.createTarget",
-        // Generated packages record their real base (may be http or carry a port).
-        { url: autoHealer.generatedBase(adapter) ?? `https://${adapter.domain}`, background: true },
+        { url: base ?? `https://${adapter.domain}`, background: true },
       );
       targetId = created.targetId;
       await cdp.attachAndEnable(targetId);
@@ -896,9 +937,12 @@ export async function dispatchRequest(
   }
   if (request.action === "site_info") {
     if (!request.name) return fail(request.id, "Missing 'name' parameter for site_info");
-    const adapter = findAdapter(request.name);
-    if (!adapter) return fail(request.id, `Site adapter '${request.name}' not found`);
-    return ok(request.id, adapter as unknown as ExtResponseData);
+    const found = lookupAdapter(request.name);
+    if ("notFound" in found) {
+      const { error, hint, action } = found.notFound;
+      return failWithHint(request.id, error, hint, action);
+    }
+    return ok(request.id, found.adapter as unknown as ExtResponseData);
   }
   if (request.action === "site_run") {
     return handleSiteRun(cdp, request, session);

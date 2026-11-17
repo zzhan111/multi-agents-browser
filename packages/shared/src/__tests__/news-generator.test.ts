@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { generateNewsPackage, healNewsPackage, readNewsManifest } from "../news-generator.js";
+import { browserFetcher, createTabProbe, generateNewsPackage, healNewsPackage, matchTabBase, readNewsManifest } from "../news-generator.js";
 import { buildAdapterScript, loadAdapters } from "../site-adapters.js";
 
 const BODY = "这是一篇用于验证生成器的新闻正文，内容足够长以通过正文长度检查。".repeat(4);
@@ -221,6 +221,149 @@ test("a malformed feed item does not block a valid fallback feed", async () => {
     assert.equal(mixedGen.ok, true, JSON.stringify(mixedGen.score));
     assert.equal(mixedGen.manifest?.feedUrl, `${base}broken`);
   } finally {
+    rmSync(sitesDir, { recursive: true, force: true });
+  }
+});
+
+test("browserFetcher: a login-only news site generates through the browser session without leaking the cookie", async () => {
+  const SECRET = "sid=secret-session-7f3a";
+  const server = createServer((req, res) => {
+    const origin = `http://${req.headers.host}`;
+    if (req.headers.cookie !== SECRET) { res.writeHead(401); return res.end("login required"); }
+    const send = (type: string, body: string) => { res.writeHead(200, { "content-type": type }); res.end(body); };
+    if (req.url === "/") return send("text/html", `<link rel="alternate" type="application/rss+xml" href="/rss.xml">`);
+    if (req.url === "/rss.xml") return send("application/rss+xml", `<rss><item><title>会员头条</title><link>${origin}/p/1</link></item></rss>`);
+    if (req.url === "/p/1") return send("text/html", `<title>会员头条</title><article><p>${BODY}</p></article>`);
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  const sitesDir = mkdtempSync(join(tmpdir(), "ma-news-auth-"));
+  // Stands in for a logged-in tab: runs the page script with the browser's cookie jar.
+  const origins: string[] = [];
+  const evaluate = async (origin: string, script: string) => {
+    origins.push(origin);
+    const pageFetch = (url: string, init?: RequestInit) => fetch(url, { ...init, headers: { cookie: SECRET } });
+    return new Function("fetch", `return ${script}`)(pageFetch);
+  };
+  try {
+    const anonymous = await generateNewsPackage({ name: "members", base, sitesDir });
+    assert.equal(anonymous.ok, false, "without the browser session the site is not readable");
+
+    const gen = await generateNewsPackage({ name: "members", base, sitesDir, fetcher: browserFetcher(evaluate) });
+    assert.equal(gen.ok, true, JSON.stringify(gen.score));
+    assert.ok(origins.length > 0 && origins.every((o) => o === new URL(base).origin), "every request ran in a same-origin page");
+    for (const file of [...gen.files, join(sitesDir, "members", "_package.json")]) {
+      assert.ok(!readFileSync(file, "utf8").includes("secret-session"), `${file} holds no credentials`);
+    }
+    const healed = await healNewsPackage({ name: "members", sitesDir, fetcher: browserFetcher(evaluate) });
+    assert.equal(healed.status, "healthy");
+  } finally {
+    server.close();
+    rmSync(sitesDir, { recursive: true, force: true });
+  }
+});
+
+test("browserFetcher: browser-side network errors fall back, HTTP errors do not", async () => {
+  const fallbackCalls: string[] = [];
+  const fallback = async (url: string) => { fallbackCalls.push(url); return new Response("from node"); };
+  const fetcher = browserFetcher(async (_origin, script) => new Function("fetch", `return ${script}`)(async (url: string) => {
+    if (url.includes("cors")) throw new TypeError("Failed to fetch");
+    return new Response(url.includes("gone") ? "" : "page", { status: url.includes("gone") ? 410 : 200, headers: { "content-type": "text/html" } });
+  }), { fallback });
+  assert.equal(await (await fetcher("https://a.test/cors")).text(), "from node");
+  const gone = await fetcher("https://a.test/gone");
+  assert.equal(gone.status, 410);
+  assert.equal(gone.url, "https://a.test/gone");
+  assert.deepEqual(fallbackCalls, ["https://a.test/cors"]);
+});
+
+test("browserFetcher: a hung browser or in-page timeout fails instead of falling back", async () => {
+  const fallback = async () => new Response("from node");
+  const hung = browserFetcher(() => new Promise(() => {}), { fallback, timeoutMs: 20 });
+  await assert.rejects(hung("https://a.test/"), /timed out/);
+  const aborted = browserFetcher(async () => JSON.stringify({ error: "signal timed out", name: "TimeoutError" }), { fallback });
+  await assert.rejects(aborted("https://a.test/"), /timed out/);
+  const down = browserFetcher(async () => { throw new Error("daemon not running"); }, { fallback });
+  await assert.rejects(down("https://a.test/"), /daemon not running/);
+  const strict = browserFetcher(async () => JSON.stringify({ error: "Failed to fetch", name: "TypeError" }), { fallback: null });
+  await assert.rejects(strict("https://a.test/"), /Failed to fetch/);
+});
+
+function fakeTabs(initial: Array<{ id: string; url: string }>, opts: { loads?: boolean } = {}) {
+  const tabs = new Map(initial.map((t) => [t.id, t.url]));
+  const log = { opened: [] as string[], closed: [] as string[], evaluatedIn: [] as string[] };
+  let n = 0;
+  return {
+    log,
+    tabs,
+    ops: {
+      list: async () => [...tabs].map(([id, url]) => ({ id, url })),
+      open: async (url: string) => { const id = `new${++n}`; tabs.set(id, opts.loads === false ? "about:blank" : url); log.opened.push(id); return id; },
+      evaluate: async (id: string, script: string) => {
+        if (script === "location.origin") { const u = tabs.get(id)!; return u.startsWith("http") ? new URL(u).origin : "null"; }
+        log.evaluatedIn.push(id);
+        return id;
+      },
+      close: async (id: string) => { tabs.delete(id); log.closed.push(id); },
+    },
+  };
+}
+
+test("createTabProbe: reuses a tab of the exact origin, opens one for another port and closes only that", async () => {
+  const fake = fakeTabs([{ id: "user", url: "http://localhost:1111/old" }, { id: "exact", url: "http://localhost:2222/page" }]);
+  const probe = createTabProbe(fake.ops, { pollMs: 1 });
+  assert.equal(await probe.evaluate("http://localhost:2222", "x"), "exact");
+  assert.equal(await probe.evaluate("http://localhost:3333", "x"), "new1", "same hostname, other port: a new tab");
+  assert.equal(await probe.evaluate("http://localhost:3333", "y"), "new1", "the opened tab is reused");
+  await probe.dispose();
+  assert.deepEqual(fake.log.opened, ["new1"]);
+  assert.deepEqual(fake.log.closed, ["new1"], "existing tabs stay open");
+  assert.ok(fake.tabs.has("user") && fake.tabs.has("exact"));
+});
+
+test("createTabProbe: a tab that never reaches its origin fails within the ready timeout and is cleaned up", async () => {
+  const fake = fakeTabs([], { loads: false });
+  const probe = createTabProbe(fake.ops, { readyTimeoutMs: 30, pollMs: 5 });
+  await assert.rejects(probe.evaluate("https://slow.test", "x"), /did not load within 30ms/);
+  assert.deepEqual(fake.log.evaluatedIn, [], "nothing ran in a page of the wrong origin");
+  await probe.dispose();
+  assert.deepEqual(fake.log.closed, ["new1"]);
+});
+
+test("matchTabBase compares scheme, host and port", () => {
+  assert.equal(matchTabBase("http://localhost:2222/a", "http://localhost:2222/"), true);
+  assert.equal(matchTabBase("http://localhost:1111/a", "http://localhost:2222/"), false);
+  assert.equal(matchTabBase("https://localhost:2222/a", "http://localhost:2222/"), false);
+  assert.equal(matchTabBase("about:blank", "http://localhost:2222/"), false);
+});
+
+test("browserFetcher: a logged-out session (401) fails generation and keeps the existing package", async () => {
+  let loggedIn = true;
+  const server = createServer((req, res) => {
+    const origin = `http://${req.headers.host}`;
+    if (!loggedIn) { res.writeHead(401); return res.end("login required"); }
+    const send = (type: string, body: string) => { res.writeHead(200, { "content-type": type }); res.end(body); };
+    if (req.url === "/") return send("text/html", `<link rel="alternate" type="application/rss+xml" href="/rss.xml">`);
+    if (req.url === "/rss.xml") return send("application/rss+xml", `<rss><item><title>T</title><link>${origin}/p/1</link></item></rss>`);
+    if (req.url === "/p/1") return send("text/html", `<title>T</title><article><p>${BODY}</p></article>`);
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  const sitesDir = mkdtempSync(join(tmpdir(), "ma-news-logout-"));
+  const evaluate = async (_origin: string, script: string) => new Function("fetch", `return ${script}`)(fetch);
+  try {
+    assert.equal((await generateNewsPackage({ name: "m", base, sitesDir, fetcher: browserFetcher(evaluate) })).ok, true);
+    const before = readFileSync(join(sitesDir, "m", "latest.js"), "utf8");
+    loggedIn = false;
+    const healed = await healNewsPackage({ name: "m", sitesDir, fetcher: browserFetcher(evaluate) });
+    assert.equal(healed.status, "broken");
+    assert.equal(readFileSync(join(sitesDir, "m", "latest.js"), "utf8"), before, "the working package is not overwritten");
+  } finally {
+    server.close();
     rmSync(sitesDir, { recursive: true, force: true });
   }
 });

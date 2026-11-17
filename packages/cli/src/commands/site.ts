@@ -9,6 +9,7 @@
  *   ma-browser site update                    更新社区 adapter 库
  *   ma-browser site generate <name> <url>     生成新闻站 adapter 包（零 token）
  *   ma-browser site heal [name]               检查/修复生成的包（站点搬家后重新生成）
+ *   generate/heal 加 --browser：探测请求在浏览器同源标签页里发出，复用登录态
  *
  * 目录：
  *   ~/.bb-browser/sites/       私有 adapter（优先）
@@ -19,19 +20,29 @@ import {
   COMMUNITY_REPO,
   COMMUNITY_SITES_DIR,
   LOCAL_SITES_DIR,
+  browserFetcher,
   buildAdapterScript,
+  createTabProbe,
   generateId,
   generateNewsPackage,
   healNewsPackage,
   httpJson,
   isProcessAlive,
   isWsl,
+  adapterNotFound,
+  catalogBaseStatus,
+  loadAdapterCatalog,
   loadAdapters,
+  queryAdapterCatalog,
   readDaemonJson,
   updateCommunityAdapters,
+  type Fetcher,
+  type HealResult,
   type Request,
+  type AdapterCatalogResult,
   type Response,
   type SiteAdapter,
+  type TabInfo,
 } from "@ma-browser/shared";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -46,6 +57,8 @@ export interface SiteOptions {
   tabId?: string | number;
   days?: number;
   jq?: string;
+  /** generate/heal: probe the site from the user's browser so login state applies */
+  browser?: boolean;
 }
 
 interface HistoryDomain {
@@ -92,30 +105,46 @@ function getAllSites(): SiteMeta[] {
 
 // ── 子命令 ──────────────────────────────────────────────────────
 
-function siteList(options: SiteOptions): void {
-  const sites = getAllSites();
+/** Explain a non-ok catalog in text mode (JSON callers read `status`, `hint`, `action`). */
+function printCatalogStatus(result: AdapterCatalogResult): void {
+  if (result.status === "ok") {
+    if (result.hint) console.log(`\n提示: ${result.hint}`);
+    return;
+  }
+  const label: Record<string, string> = {
+    not_installed: "尚未安装任何 site adapter 库。",
+    empty: "adapter 目录存在，但没有加载到任何 adapter。",
+    degraded: "部分 adapter 文件或目录读取失败，结果可能不完整。",
+    no_match: "已安装的 adapter 中没有匹配项。",
+  };
+  console.log(label[result.status] ?? result.status);
+  if (result.hint) console.log(`  ${result.hint}`);
+  for (const d of result.diagnostics) console.log(`  [${d.code}] ${d.path} — ${d.hint}`);
+  if (result.truncated) console.log("  （诊断已截断）");
+  if (result.action) console.log(`  修复: ${result.action}`);
+  for (const src of result.sources) console.log(`  ${src.source === "local" ? "私有" : "社区"}目录 (${src.status}): ${src.path}`);
+}
 
-  if (sites.length === 0) {
-    if (options.json) {
-      console.log("[]");
-      return;
-    }
-    console.log("未找到任何 site adapter。");
-    console.log("  安装社区 adapter: ma-browser site update");
-    console.log(`  私有 adapter 目录: ${LOCAL_SITES_DIR}`);
+/**
+ * `--json` always prints the catalog object ({adapters, status, hint, action,
+ * sources, ...}), whatever the status, and exits 0: discovery succeeded even
+ * when it found that nothing is installed (#44).
+ */
+function siteList(options: SiteOptions): void {
+  const result = queryAdapterCatalog(loadAdapterCatalog());
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
 
-  if (options.json) {
-    console.log(JSON.stringify(sites.map(s => ({
-      name: s.name, description: s.description, domain: s.domain,
-      args: s.args, source: s.source,
-    })), null, 2));
+  if (result.adapters.length === 0) {
+    printCatalogStatus(result);
     return;
   }
 
   const groups = new Map<string, SiteMeta[]>();
-  for (const s of sites) {
+  for (const s of result.adapters) {
     const platform = s.name.split("/")[0];
     if (!groups.has(platform)) groups.set(platform, []);
     groups.get(platform)!.push(s);
@@ -131,38 +160,29 @@ function siteList(options: SiteOptions): void {
     }
   }
   console.log();
+  if (result.status === "degraded" || result.hint) printCatalogStatus(result);
 }
 
 function siteSearch(query: string, options: SiteOptions): void {
-  const sites = getAllSites();
-  const q = query.toLowerCase();
-  const matches = sites.filter(s =>
-    s.name.toLowerCase().includes(q) ||
-    s.description.toLowerCase().includes(q) ||
-    s.domain.toLowerCase().includes(q)
-  );
-
-  if (matches.length === 0) {
-    if (options.json) {
-      console.log("[]");
-      return;
-    }
-    console.log(`未找到匹配 "${query}" 的 adapter。`);
-    console.log("  查看所有: ma-browser site list");
-    return;
-  }
+  const result = queryAdapterCatalog(loadAdapterCatalog(), { q: query });
 
   if (options.json) {
-    console.log(JSON.stringify(matches.map(s => ({
-      name: s.name, description: s.description, domain: s.domain, source: s.source,
-    })), null, 2));
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
 
-  for (const s of matches) {
+  if (result.adapters.length === 0) {
+    if (result.status === "no_match") console.log(`未找到匹配 "${query}" 的 adapter。`);
+    printCatalogStatus(result);
+    if (result.status === "no_match") console.log("  查看所有: ma-browser site list");
+    return;
+  }
+
+  for (const s of result.adapters) {
     const src = s.source === "local" ? " (local)" : "";
     console.log(`${s.name.padEnd(24)} ${s.description}${src}`);
   }
+  if (result.status === "degraded") printCatalogStatus(result);
 }
 
 function siteUpdate(options: SiteOptions = {}): void {
@@ -195,27 +215,65 @@ async function refreshDaemonCatalog(): Promise<void> {
   }
 }
 
+/**
+ * With `--browser`, run the generator's requests from a tab of each URL's own
+ * origin (an existing one when the user has it open), so cookies of the
+ * logged-in browser apply. Tabs opened here are closed afterwards.
+ */
+async function withProbeFetcher<T>(options: SiteOptions, fn: (fetcher?: Fetcher) => Promise<T>): Promise<T> {
+  if (!options.browser) return fn(undefined);
+  await ensureDaemonRunning();
+  const command = async (request: Omit<Request, "id">): Promise<Response> => {
+    const resp: Response = await sendCommand({ id: generateId(), ...request } as Request);
+    if (!resp.success) throw new Error(`browser ${request.action} failed: ${resp.error}`);
+    return resp;
+  };
+  const probe = createTabProbe({
+    list: async () => ((await command({ action: "tab_list" })).data?.tabs as Array<TabInfo & { lease?: string; owner?: string }> | undefined ?? [])
+      // Tabs another agent holds exclusively are not ours to probe from.
+      .filter((t) => t.lease !== "exclusive" || t.owner === process.env.BB_SESSION_ID)
+      .map((t) => ({ id: String(t.tabId), url: t.url })),
+    open: async (url) => {
+      const tabId = (await command({ action: "tab_new", url })).data?.tabId;
+      if (tabId === undefined) throw new Error(`cannot open ${url}`);
+      return String(tabId);
+    },
+    evaluate: async (tabId, script) => (await command({ action: "eval", script, tabId })).data?.result,
+    close: async (tabId) => { await command({ action: "tab_close", tabId }); },
+  });
+  try {
+    return await fn(browserFetcher(probe.evaluate));
+  } finally {
+    await probe.dispose();
+  }
+}
+
 /** Generate `<LOCAL_SITES_DIR>/<name>/` from a news site's URL; writes only when the whole task flow passes. */
 async function siteGenerate(name: string, url: string, options: SiteOptions): Promise<void> {
   let result;
   try {
-    result = await generateNewsPackage({ name, base: url, sitesDir: LOCAL_SITES_DIR });
+    result = await withProbeFetcher(options, (fetcher) => generateNewsPackage({ name, base: url, sitesDir: LOCAL_SITES_DIR, fetcher }));
     if (result.ok) await refreshDaemonCatalog();
   } catch (e) {
-    if (options.json) exitJsonError(e instanceof Error ? e.message : String(e));
-    console.error(`[error] site generate: ${e instanceof Error ? e.message : e}`);
-    process.exit(1);
+    if (options.json) {
+      console.log(JSON.stringify({ success: false, error: e instanceof Error ? e.message : String(e) }, null, 2));
+    } else {
+      console.error(`[error] site generate: ${e instanceof Error ? e.message : e}`);
+    }
+    process.exitCode = 1;
+    return;
   }
   if (options.json) {
     console.log(JSON.stringify({ success: result.ok, ...result }, null, 2));
-    if (!result.ok) process.exit(1);
+    if (!result.ok) process.exitCode = 1;
     return;
   }
   if (!result.ok) {
     console.error(`[error] site generate ${name}: task flow did not pass (${result.score.passed}/${result.score.total}).`);
     for (const c of result.score.checks) console.error(`  ${c.ok ? "✓" : "✗"} ${c.name}${c.detail ? ` — ${c.detail}` : ""}`);
     for (const t of result.tried) console.error(`  tried ${t.feedUrl} (${t.passed} passed)`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log(`已生成 ${name}（${result.score.passed}/${result.score.total} 检查通过，feed: ${result.manifest!.feedUrl}）`);
   for (const f of result.files) console.log(`  ${f}`);
@@ -234,13 +292,21 @@ function generatedPackageNames(): string[] {
 /** Re-check one or all generated packages; regenerate those whose site moved or changed. */
 async function siteHeal(name: string | undefined, options: SiteOptions): Promise<void> {
   const names = name ? [name] : generatedPackageNames();
-  const results = [];
-  for (const n of names) {
-    try {
-      results.push({ name: n, ...(await healNewsPackage({ name: n, sitesDir: LOCAL_SITES_DIR })) });
-    } catch (e) {
-      results.push({ name: n, status: "broken" as const, reason: e instanceof Error ? e.message : String(e) });
-    }
+  const results: Array<{ name: string } & (HealResult | { status: "broken"; reason: string })> = [];
+  try {
+    await withProbeFetcher(options, async (fetcher) => {
+      for (const n of names) {
+        try {
+          results.push({ name: n, ...(await healNewsPackage({ name: n, sitesDir: LOCAL_SITES_DIR, fetcher })) });
+        } catch (e) {
+          results.push({ name: n, status: "broken" as const, reason: e instanceof Error ? e.message : String(e) });
+        }
+      }
+    });
+  } catch (e) {
+    // The browser itself is unavailable: report every package as unchecked rather than healthy.
+    const reason = e instanceof Error ? e.message : String(e);
+    for (const n of names.slice(results.length)) results.push({ name: n, status: "broken" as const, reason });
   }
   let refreshError: string | undefined;
   if (results.some((r) => r.status !== "broken")) {
@@ -260,22 +326,22 @@ async function siteHeal(name: string | undefined, options: SiteOptions): Promise
     }
   }
   if (refreshError && !options.json) console.error(`[error] site heal: ${refreshError}`);
-  if (failed) process.exit(1);
-}
-
-function findSiteByName(name: string): SiteMeta | undefined {
-  return getAllSites().find((site) => site.name === name);
+  if (failed) process.exitCode = 1;
 }
 
 function siteInfo(name: string, options: SiteOptions): void {
-  const site = findSiteByName(name);
+  const catalog = loadAdapterCatalog();
+  const site = catalog.adapters.find((a) => a.name === name);
 
   if (!site) {
+    const suggestions = catalog.adapters.filter((a) => a.name.includes(name)).slice(0, 5).map((a) => a.name);
+    const miss = adapterNotFound(catalog, name, suggestions);
     if (options.json) {
-      exitJsonError(`adapter "${name}" not found`, { action: "ma-browser site list" });
+      exitJsonError(miss.error, { status: miss.status, hint: miss.hint, action: miss.action });
     }
-    console.error(`[error] site info: adapter "${name}" not found.`);
-    console.error("  Try: ma-browser site list");
+    console.error(`[error] site info: ${miss.error}.`);
+    if (miss.hint) console.error(`  ${miss.hint}`);
+    if (miss.action) console.error(`  修复: ${miss.action}`);
     process.exit(1);
   }
 
@@ -319,7 +385,9 @@ function siteInfo(name: string, options: SiteOptions): void {
 async function siteRecommend(options: SiteOptions): Promise<void> {
   const days = options.days ?? 30;
   const historyDomains: HistoryDomain[] = getHistoryDomains(days);
-  const sites = getAllSites();
+  const catalog = loadAdapterCatalog();
+  const catalogStatus = catalogBaseStatus(catalog);
+  const sites = catalog.adapters;
   const sitesByDomain = new Map<string, SiteMeta[]>();
 
   for (const site of sites) {
@@ -352,10 +420,17 @@ async function siteRecommend(options: SiteOptions): Promise<void> {
     }
   }
 
+  // not_available only means "no installed adapter matches" — say why when the catalog itself is the reason.
+  let catalogInfo: { status: string; hint: string; action: string } | undefined;
+  if (catalogStatus !== "ok") {
+    const { status, hint, action } = queryAdapterCatalog(catalog);
+    catalogInfo = { status, hint, action };
+  }
   const jsonData = {
     days,
     available,
     not_available: notAvailable,
+    ...(catalogInfo ? { catalog: catalogInfo } : {}),
   };
 
   if (options.jq) {
@@ -382,6 +457,12 @@ async function siteRecommend(options: SiteOptions): Promise<void> {
     }
   }
 
+  if (catalogInfo) {
+    console.log(`⚠️ ${catalogInfo.hint}`);
+    if (catalogInfo.action) console.log(`   修复: ${catalogInfo.action}`);
+    console.log();
+  }
+
   console.log("📋 你常用但还没有 adapter：");
   console.log();
   if (notAvailable.length === 0) {
@@ -403,27 +484,23 @@ async function siteRun(
   args: string[],
   options: SiteOptions
 ): Promise<void> {
-  const sites = getAllSites();
-  const site = sites.find(s => s.name === name);
+  const catalog = loadAdapterCatalog();
+  const site = catalog.adapters.find(s => s.name === name);
 
   if (!site) {
-    const fuzzy = sites.filter(s => s.name.includes(name));
+    const suggestions = catalog.adapters.filter(s => s.name.includes(name)).slice(0, 5).map(s => s.name);
+    const miss = adapterNotFound(catalog, name, suggestions);
     if (options.json) {
-      exitJsonError(`site "${name}" not found`, {
-        suggestions: fuzzy.slice(0, 5).map(s => s.name),
-        action: fuzzy.length > 0 ? undefined : "ma-browser site update",
-      });
+      exitJsonError(miss.error, { status: miss.status, suggestions, hint: miss.hint, action: miss.action });
     }
-    console.error(`[error] site: "${name}" not found.`);
-    if (fuzzy.length > 0) {
+    console.error(`[error] site: ${miss.error}.`);
+    if (suggestions.length > 0) {
       console.error("  Did you mean:");
-      for (const s of fuzzy.slice(0, 5)) {
-        console.error(`    ma-browser site ${s.name}`);
-      }
-    } else {
-      console.error("  Try: ma-browser site list");
-      console.error("  Or:  ma-browser site update");
+      for (const s of suggestions) console.error(`    ma-browser site ${s}`);
+    } else if (miss.hint) {
+      console.error(`  ${miss.hint}`);
     }
+    if (miss.action) console.error(`  修复: ${miss.action}`);
     process.exit(1);
   }
 
@@ -500,6 +577,7 @@ export async function siteCommand(
   ma-browser site update                    更新社区 adapter 库 (git clone/pull)
   ma-browser site generate <name> <url>     为新闻站生成 adapter 包（latest → article，零 token）
   ma-browser site heal [name]               检查生成的包，站点搬家/改版后自动重新生成
+    generate/heal --browser                 在已登录浏览器的同源标签页中探测（需登录的站点）
 
 目录:
   ${LOCAL_SITES_DIR}      私有 adapter（优先）

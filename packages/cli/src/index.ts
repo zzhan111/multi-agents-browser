@@ -706,6 +706,7 @@ async function main(): Promise<void> {
           jq: parsed.flags.jq,
           days: parsed.flags.days,
           tabId: globalTabId,
+          browser: process.argv.includes("--browser"),
         });
         break;
       }
@@ -813,8 +814,13 @@ Full guide:        https://github.com/epiral/bb-sites/blob/main/SKILL.md`);
       console.error(`错误：${message}`);
     }
 
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 
-main().then(() => process.exit(0));
+main().finally(() => {
+  // Defer hard exit past the current loop turn so libuv finishes closing async
+  // handles (undici fetch on Windows Node 24 aborts with UV_HANDLE_CLOSING on
+  // synchronous process.exit), while still bounding idle keep-alive sockets.
+  setTimeout(() => process.exit(process.exitCode ?? 0), 25).unref();
+});

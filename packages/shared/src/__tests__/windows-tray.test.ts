@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 // 托盘只能在 Windows 交互桌面上实测（见 README 的手工验证步骤）；这里在任意平台锁定脚本契约。
-const tray = readFileSync(fileURLToPath(new URL("../../../../scripts/windows-tray.ps1", import.meta.url)), "utf8");
+const tray = readFileSync(fileURLToPath(new URL("../../../../scripts/windows-tray.ps1", import.meta.url)), "utf8").replace(/\r\n/g, "\n");
 
 function body(name: string): string {
   const start = tray.search(new RegExp(`\\nfunction ${name}\\b[^\\n]*\\{\\n`));

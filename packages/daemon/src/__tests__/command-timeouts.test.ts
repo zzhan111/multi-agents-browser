@@ -24,7 +24,7 @@ type Json = Record<string, unknown>;
  * "slow" after 1.2s. A `document.querySelector` resolves to a single-file
  * <input type=file> whose DOM.setFileInputFiles never answers (upload, #32).
  */
-function startFakeCdp(): Promise<{ server: Server; port: number }> {
+function startFakeCdp(): Promise<{ server: Server; port: number; close: () => Promise<void> }> {
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
       const { port } = server.address() as AddressInfo;
@@ -65,7 +65,15 @@ function startFakeCdp(): Promise<{ server: Server; port: number }> {
         }
       });
     });
-    server.listen(0, "127.0.0.1", () => resolve({ server, port: (server.address() as AddressInfo).port }));
+    const close = async () => {
+      for (const client of wss.clients) {
+        try { client.terminate(); } catch {}
+      }
+      await new Promise<void>((r) => wss.close(() => r()));
+      server.closeAllConnections?.();
+      await new Promise<void>((r) => server.close(() => r()));
+    };
+    server.listen(0, "127.0.0.1", () => resolve({ server, port: (server.address() as AddressInfo).port, close }));
   });
 }
 
@@ -80,7 +88,7 @@ function freePort(): Promise<number> {
 }
 
 describe("command timeouts + health (issue #30)", () => {
-  let fake: { server: Server; port: number };
+  let fake: { server: Server; port: number; close: () => Promise<void> };
   let cdp: CdpConnection;
   let http: HttpServer;
   let port: number;
@@ -106,8 +114,7 @@ describe("command timeouts + health (issue #30)", () => {
   after(async () => {
     await http.stop();
     cdp.disconnect();
-    fake.server.closeAllConnections?.();
-    await new Promise((r) => fake.server.close(r));
+    await fake.close();
   });
 
   it("a healthy command succeeds and health is ok", async () => {
@@ -179,7 +186,7 @@ describe("command timeouts + health (issue #30)", () => {
 
 // Separate daemon: the hung evals above leave that tab's serial queue blocked.
 describe("upload under the per-action budget (issues #30 + #32)", () => {
-  let fake: { server: Server; port: number };
+  let fake: { server: Server; port: number; close: () => Promise<void> };
   let cdp: CdpConnection;
   let http: HttpServer;
   let port: number;
@@ -198,8 +205,7 @@ describe("upload under the per-action budget (issues #30 + #32)", () => {
   after(async () => {
     await http.stop();
     cdp.disconnect();
-    fake.server.closeAllConnections?.();
-    await new Promise((r) => fake.server.close(r));
+    await fake.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
