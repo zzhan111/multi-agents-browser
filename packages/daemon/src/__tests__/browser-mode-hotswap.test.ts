@@ -13,8 +13,8 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import type { WindowModeDriver } from "@ma-browser/shared";
 import { BrowserPool } from "../browser-pool.js";
@@ -36,6 +36,7 @@ interface FakeCdpHandle {
   targets: FakeTarget[];
   createdUrls: string[];
   browserClosedCount: number;
+  requests: Array<{ method: string; expression?: string; targetId?: string }>;
   close: () => Promise<void>;
 }
 
@@ -46,6 +47,8 @@ function startFakeBrowser(opts: {
   return new Promise((resolve) => {
     const targets: FakeTarget[] = opts.initialTargets.map((t) => ({ ...t }));
     const createdUrls: string[] = [];
+    const requests: FakeCdpHandle["requests"] = [];
+    const sessions = new Map<string, string>();
     let browserClosedCount = 0;
     let nextTargetSeq = 1;
     let nextSessionSeq = 1;
@@ -66,6 +69,11 @@ function startFakeBrowser(opts: {
     wss.on("connection", (ws) => {
       ws.on("message", (raw) => {
         const msg = JSON.parse(raw.toString()) as Json;
+        requests.push({
+          method: String(msg.method),
+          expression: (msg.params as Json)?.expression as string | undefined,
+          targetId: sessions.get(String(msg.sessionId)),
+        });
         const reply = (result: Json) =>
           ws.send(
             JSON.stringify({
@@ -78,8 +86,11 @@ function startFakeBrowser(opts: {
         switch (msg.method) {
           case "Target.getTargets":
             return reply({ targetInfos: targets });
-          case "Target.attachToTarget":
-            return reply({ sessionId: `S_${nextSessionSeq++}` });
+          case "Target.attachToTarget": {
+            const sessionId = `S_${nextSessionSeq++}`;
+            sessions.set(sessionId, String((msg.params as Json).targetId));
+            return reply({ sessionId });
+          }
           case "Target.createTarget": {
             const url = String((msg.params as Json)?.url ?? "about:blank");
             const targetId = `CREATED_${nextTargetSeq++}_${Math.random().toString(16).slice(2, 6).toUpperCase()}`;
@@ -101,7 +112,8 @@ function startFakeBrowser(opts: {
           }
           case "Runtime.evaluate": {
             const expr = String((msg.params as Json)?.expression ?? "");
-            return reply({ result: { type: "string", value: `eval:${expr}` } });
+            const target = targets.find((t) => t.targetId === sessions.get(String(msg.sessionId)));
+            return reply({ result: { type: "string", value: expr === "location.href" ? target?.url : `eval:${expr}` } });
           }
           default:
             return reply({});
@@ -124,11 +136,36 @@ function startFakeBrowser(opts: {
         get targets() { return targets; },
         get createdUrls() { return createdUrls; },
         get browserClosedCount() { return browserClosedCount; },
+        requests,
         close,
       });
     });
   });
 }
+
+function deferred() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+async function eventually(check: () => boolean | Promise<boolean>, message: string): Promise<void> {
+  const deadline = Date.now() + 2500;
+  while (!(await check())) {
+    assert.ok(Date.now() < deadline, message);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function page(targetId: string, url: string): FakeTarget {
+  return { targetId, type: "page", title: url, url };
+}
+
+const windowDriver: WindowModeDriver = {
+  async status() { return { trayRunning: true, windowCount: 1, stealth: false }; },
+  async hide() { return { trayRunning: true, affectedCount: 1 }; },
+  async show() { return { trayRunning: true, affectedCount: 1 }; },
+};
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -147,7 +184,9 @@ describe("Daemon browser_mode: stealth zero-restart & hot-swap continuity", () =
   let testHome = "";
 
   before(() => {
-    testHome = mkdtempSync(join(tmpdir(), "ma-daemon-mode-"));
+    const scratch = resolve(fileURLToPath(new URL("../../../../", import.meta.url)), ".alma");
+    mkdirSync(scratch, { recursive: true });
+    testHome = mkdtempSync(join(scratch, "ma-daemon-mode-"));
     process.env.BB_BROWSER_HOME = testHome;
     process.env.BB_CDP_DISCOVERY = "0";
     process.env.MA_BROWSER_NO_LAUNCH = "1";
@@ -161,6 +200,259 @@ describe("Daemon browser_mode: stealth zero-restart & hot-swap continuity", () =
     if (savedNoLaunch === undefined) delete process.env.MA_BROWSER_NO_LAUNCH;
     else process.env.MA_BROWSER_NO_LAUNCH = savedNoLaunch;
     rmSync(testHome, { recursive: true, force: true });
+  });
+
+  async function fixture(opts: {
+    targets?: FakeTarget[];
+    restored?: FakeTarget[];
+    forceManaged?: boolean;
+    native?: boolean;
+    driver?: WindowModeDriver;
+    launchGate?: ReturnType<typeof deferred>;
+  } = {}) {
+    const browserDir = join(testHome, "browser");
+    mkdirSync(browserDir, { recursive: true });
+    const original = opts.targets ?? [page("OLD_A111", "https://app.example.com/a")];
+    const oldBrowser = await startFakeBrowser({
+      userAgent: opts.native ? "HeadlessChrome/131" : "Chrome/131",
+      initialTargets: original,
+    });
+    writeFileSync(join(browserDir, "browser-pid"), String(process.pid));
+    writeFileSync(join(browserDir, "cdp-port"), String(oldBrowser.port));
+    const replacements: FakeCdpHandle[] = [];
+    const tabManager = new TabStateManager();
+    const cdp = new CdpConnection("127.0.0.1", oldBrowser.port, tabManager);
+    const pool = new BrowserPool(cdp, undefined, {
+      platform: "win32",
+      forceManaged: opts.forceManaged ?? true,
+      windowDriver: opts.driver ?? windowDriver,
+      launcher: async () => {
+        await opts.launchGate?.promise;
+        const replacement = await startFakeBrowser({
+          userAgent: "Chrome/131",
+          initialTargets: opts.restored ?? original.map((t, i) => ({ ...t, targetId: `NEW_${9000 + i}` })),
+        });
+        replacements.push(replacement);
+        writeFileSync(join(browserDir, "cdp-port"), String(replacement.port));
+        return { host: "127.0.0.1", port: replacement.port };
+      },
+    });
+    const port = await freePort();
+    const http = new HttpServer({ host: "127.0.0.1", port, token: "fixture", cdp: pool });
+    await http.start();
+    await cdp.connect();
+    const post = async (body: Json, session = "agent-1") => {
+      const response = await fetch(`http://127.0.0.1:${port}/command`, {
+        method: "POST",
+        headers: { Authorization: "Bearer fixture", "Content-Type": "application/json", "X-BB-Session": session },
+        body: JSON.stringify({ id: `test-${Math.random()}`, ...body }),
+      });
+      return await response.json() as { success: boolean; data?: Json; error?: string };
+    };
+    const scheduler = async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/status`, { headers: { Authorization: "Bearer fixture" } });
+      return (await response.json() as { scheduler: { globalInFlight: number; queueDepth: number } }).scheduler;
+    };
+    return {
+      oldBrowser, replacements, pool, cdp, tabManager, post, scheduler, browserDir,
+      async close() {
+        opts.launchGate?.release();
+        pool.disconnectAll();
+        await http.stop();
+        await oldBrowser.close();
+        for (const replacement of replacements) await replacement.close();
+      },
+    };
+  }
+
+  for (const mismatch of ["different managed port", "remote host with same port"] as const) {
+    it(`Rejects external main with ${mismatch} despite a live managed PID`, async () => {
+      let hideCalls = 0;
+      let showCalls = 0;
+      const f = await fixture({ forceManaged: false, driver: {
+        ...windowDriver,
+        async hide(pid) { hideCalls++; return windowDriver.hide(pid); },
+        async show(pid, focus) { showCalls++; return windowDriver.show(pid, focus); },
+      } });
+      const managedA = await startFakeBrowser({ userAgent: "Chrome/131", initialTargets: [] });
+      try {
+        if (mismatch === "different managed port") {
+          writeFileSync(join(f.browserDir, "cdp-port"), String(managedA.port));
+        } else {
+          // Keep the fake local WebSocket; change only the public endpoint identity.
+          f.cdp.host = "192.0.2.1";
+        }
+        const rejected = await f.post({ action: "browser_mode", modeAction: "headless" });
+        assert.equal(rejected.success, false, JSON.stringify(rejected));
+        const headed = await f.post({ action: "browser_mode", modeAction: "headed", focus: true });
+        assert.equal(headed.success, false, JSON.stringify(headed));
+        assert.equal(hideCalls, 0);
+        assert.equal(showCalls, 0);
+        assert.equal(f.oldBrowser.browserClosedCount, 0);
+        assert.equal(managedA.browserClosedCount, 0);
+        const status = await f.post({ action: "browser_mode", modeAction: "status" });
+        assert.equal(status.success, true);
+        const mode = status.data?.browserMode as Json;
+        assert.equal(mode.mode, null);
+        assert.equal(mode.backend, null);
+      } finally {
+        await f.close();
+        await managedA.close();
+      }
+    });
+  }
+
+  it("Serializes mode requests before asynchronous ownership checks and releases the lock after rejection", async () => {
+    const f = await fixture();
+    const gate = deferred();
+    let calls = 0;
+    // Isolate the private ownership seam so no real process discovery runs.
+    const ownership = f.pool as unknown as { isMainManaged(): Promise<boolean> };
+    const original = ownership.isMainManaged;
+    ownership.isMainManaged = async () => { calls++; await gate.promise; return false; };
+    let first: ReturnType<typeof f.post> | undefined;
+    let second: ReturnType<typeof f.post> | undefined;
+    try {
+      first = f.post({ action: "browser_mode", modeAction: "headless" });
+      await eventually(() => calls === 1, "first request must reach ownership check");
+      let secondResult: Awaited<ReturnType<typeof f.post>> | undefined;
+      second = f.post({ action: "browser_mode", modeAction: "headed" }).then((r) => { secondResult = r; return r; });
+      await eventually(() => secondResult !== undefined, "second request must reject without awaiting ownership gate");
+      assert.equal(secondResult!.success, false);
+      assert.match(secondResult!.error ?? "", /正在执行|切换|in progress/i);
+      assert.equal(calls, 1, "second request must not enter ownership check");
+      gate.release();
+      assert.equal((await first).success, false);
+      ownership.isMainManaged = original;
+      assert.equal((await f.post({ action: "browser_mode", modeAction: "headless" })).success, true);
+      assert.equal(f.oldBrowser.browserClosedCount, 0);
+    } finally {
+      gate.release();
+      await Promise.allSettled([first, second]);
+      ownership.isMainManaged = original;
+      await f.close();
+    }
+  });
+
+  for (const limits of ["tab queue", "session limit 1", "global limit 1"] as const) {
+    it(`HTTP hot-swap drains wait and queued eval, then admits new eval after rebinding (${limits})`, async () => {
+      const savedGlobal = process.env.BB_SCHED_GLOBAL_LIMIT;
+      const savedSession = process.env.BB_SCHED_SESSION_LIMIT;
+      process.env.BB_SCHED_GLOBAL_LIMIT = limits === "global limit 1" ? "1" : "12";
+      process.env.BB_SCHED_SESSION_LIMIT = limits === "session limit 1" ? "1" : "4";
+      const launchGate = deferred();
+      const f = await fixture({ native: true, launchGate });
+      const pending: Array<ReturnType<typeof f.post>> = [];
+      try {
+        assert.equal((await f.post({ action: "tab_select", tabId: "a111" })).success, true);
+        const wait = f.post({ action: "wait", ms: 700, tabId: "a111" });
+        pending.push(wait);
+        await eventually(async () => (await f.scheduler()).globalInFlight === 1, "wait must be admitted");
+        const queued = f.post({ action: "eval", script: "before-swap", tabId: "a111" });
+        pending.push(queued);
+        await eventually(async () => {
+          const stats = await f.scheduler();
+          return limits === "tab queue" ? stats.globalInFlight === 2 : stats.queueDepth === 1;
+        }, "eval must enter the tab or scheduler queue before switching");
+        assert.equal(f.oldBrowser.requests.some((r) => r.expression === "before-swap"), false);
+        const switching = f.post({ action: "browser_mode", modeAction: "headed" }, "mode-agent");
+        pending.push(switching);
+        await eventually(() => f.oldBrowser.browserClosedCount === 1, "switch should close after dispatch drains");
+        let midDone = false;
+        const mid = f.post({ action: "eval", script: "during-swap", tabId: "a111" }, "mid-agent")
+          .then((r) => { midDone = true; return r; });
+        pending.push(mid);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        assert.equal(midDone, false, "mid-swap eval must wait for replacement");
+        launchGate.release();
+        const responses = await Promise.all([wait, queued, switching, mid]);
+        for (const response of responses) assert.equal(response.success, true, JSON.stringify(response));
+        const closeIndex = f.oldBrowser.requests.findIndex((r) => r.method === "Browser.close");
+        const evalIndex = f.oldBrowser.requests.findIndex((r) => r.expression === "before-swap");
+        // Already admitted dispatches must drain on old Chrome; scheduler waiters may run after rebinding.
+        if (limits === "tab queue") assert.ok(evalIndex >= 0 && evalIndex < closeIndex, "queued dispatch must finish before Browser.close");
+        assert.equal(responses[3].data?.tab, "a111");
+        assert.equal(f.oldBrowser.requests.some((r) => r.expression === "during-swap"), false);
+        assert.ok(f.replacements[0].requests.some((r) => r.expression === "during-swap"));
+      } finally {
+        launchGate.release();
+        await Promise.allSettled(pending);
+        await f.close();
+        if (savedGlobal === undefined) delete process.env.BB_SCHED_GLOBAL_LIMIT;
+        else process.env.BB_SCHED_GLOBAL_LIMIT = savedGlobal;
+        if (savedSession === undefined) delete process.env.BB_SCHED_SESSION_LIMIT;
+        else process.env.BB_SCHED_SESSION_LIMIT = savedSession;
+      }
+    });
+  }
+
+  it("HTTP drain timeout rejects only the switch and leaves the running command and browser alive", async () => {
+    const f = await fixture({ native: true });
+    let running: ReturnType<typeof f.post> | undefined;
+    try {
+      assert.equal((await f.post({ action: "tab_select", tabId: "a111" })).success, true);
+      running = f.post({ action: "wait", ms: 3800, tabId: "a111" });
+      await eventually(async () => (await f.scheduler()).globalInFlight === 1, "wait must be running");
+      const switched = await f.post({ action: "browser_mode", modeAction: "headed" }, "mode-agent");
+      assert.equal(switched.success, false, "a command exceeding the 3s drain budget must cancel the switch");
+      assert.equal(f.oldBrowser.browserClosedCount, 0);
+      assert.equal(f.replacements.length, 0);
+      assert.equal((await running).success, true);
+      const next = await f.post({ action: "eval", script: "after-cancel", tabId: "a111" });
+      assert.equal(next.success, true, JSON.stringify(next));
+      assert.equal(next.data?.tab, "a111");
+      assert.ok(f.oldBrowser.requests.some((r) => r.expression === "after-cancel"));
+    } finally {
+      await running;
+      await f.close();
+    }
+  });
+
+  it("Hot-swap preserves duplicate blank tabs, newtab URLs, leases and the selected blank session", async () => {
+    const f = await fixture({
+      native: true,
+      targets: [page("OLD_A111", "https://app.example.com/a"), page("OLD_B222", "about:blank"),
+        page("OLD_C333", "about:blank"), page("OLD_D444", "chrome://newtab")],
+      restored: [page("NEW_9001", "https://app.example.com/a"), page("NEW_9002", "https://unrelated.example.com/")],
+    });
+    try {
+      const expected = new Map<string, { url: string; bbTabId: unknown }>();
+      for (const [shortId, url] of [["a111", "https://app.example.com/a"], ["b222", "about:blank"],
+        ["c333", "about:blank"], ["d444", "chrome://newtab"]]) {
+        const claim = await f.post({ action: "tab_claim", tabId: shortId });
+        assert.equal(claim.success, true);
+        expected.set(shortId, { url, bbTabId: claim.data?.bbTabId });
+      }
+      assert.equal((await f.post({ action: "tab_select", tabId: "c333" })).success, true);
+      const switched = await f.post({ action: "browser_mode", modeAction: "headed" });
+      assert.equal(switched.success, true, JSON.stringify(switched));
+      // Check selection before explicit evals update the session's current tab.
+      const implicit = await f.post({ action: "eval", script: "location.href" });
+      assert.equal(implicit.success, true);
+      assert.equal(implicit.data?.tab, "c333");
+      assert.equal(implicit.data?.result, "about:blank");
+      const targetIds = new Set<string>();
+      for (const [shortId, before] of expected) {
+        const targetId = f.tabManager.resolveShortId(shortId);
+        assert.ok(targetId, `missing old shortId ${shortId}`);
+        targetIds.add(targetId);
+        const state = f.tabManager.getTab(targetId)!;
+        assert.equal(state.bbTabId, before.bbTabId);
+        assert.equal(state.leaseOwner, "agent-1");
+        const readUrl = await f.post({ action: "eval", script: "location.href", tabId: shortId });
+        assert.equal(readUrl.success, true, JSON.stringify(readUrl));
+        assert.equal(readUrl.data?.result, before.url, `${shortId} must retain its own URL`);
+        const intruder = await f.post({ action: "eval", script: "location.href", tabId: shortId }, "agent-2");
+        assert.equal(intruder.success, false);
+        assert.match(intruder.error ?? "", /exclusively held/);
+      }
+      assert.equal(targetIds.size, 4, "duplicate blank pages must remain distinct logical tabs");
+      assert.deepEqual(f.replacements[0].createdUrls.sort(), ["about:blank", "about:blank", "chrome://newtab"].sort());
+      assert.ok(f.replacements[0].targets.some((t) => t.targetId === "NEW_9002" && t.url === "https://unrelated.example.com/"));
+      assert.equal(f.tabManager.allTabs().length, 5, "unrelated restored page must not be consumed as an old blank tab");
+    } finally {
+      await f.close();
+    }
   });
 
   it("Windows stealth mode switches without restarting Chrome or losing tab state", async () => {

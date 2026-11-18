@@ -74,7 +74,10 @@ export class BrowserPool {
 
   private modeSwitchInFlight = false;
   private swapBarrier: Promise<void> | null = null;
+  /** Complete admitted commands, including time spent outside CDP and in tab queues. */
+  private readonly activeCommands = new Set<Promise<void>>();
   private cachedManagedPid: number | null = null;
+  private cachedManagedPort: number | null = null;
   /** Tracks stealth state when running against windowless fake CDP servers in tests. */
   private virtualStealthState: boolean | null = null;
   private stealthSweepTimer: ReturnType<typeof setTimeout> | null = null;
@@ -147,6 +150,41 @@ export class BrowserPool {
     this.main.onPageTargetCreated = null;
     for (const c of this.all()) {
       c.disconnect();
+    }
+  }
+
+  /**
+   * Admit a complete command before it resolves any target IDs. Once a swap
+   * closes admission, new commands wait while already admitted commands drain.
+   * The check and registration deliberately have no intervening await.
+   */
+  async runCommand<T>(fn: () => Promise<T>): Promise<T> {
+    while (this.swapBarrier) {
+      await this.swapBarrier;
+    }
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    this.activeCommands.add(done);
+    try {
+      return await fn();
+    } finally {
+      this.activeCommands.delete(done);
+      finish();
+    }
+  }
+
+  private async drainCommands(timeoutMs: number): Promise<void> {
+    if (this.activeCommands.size === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all([...this.activeCommands]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("仍有浏览器命令执行中，已取消模式切换，请稍后重试。")), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -446,20 +484,32 @@ export class BrowserPool {
   }
 
   private async resolveManagedPid(): Promise<number | null> {
-    const filePid = readManagedPid();
+    const mPort = readManagedPort();
+    if (!isLoopbackHost(this.main.host) || (mPort !== null && mPort !== this.main.port)) {
+      this.cachedManagedPid = null;
+      this.cachedManagedPort = null;
+      return null;
+    }
+
+    // A PID file identifies the managed process, not whichever browser `main`
+    // happens to drive. Only trust it when the recorded endpoint matches.
+    const filePid = mPort === this.main.port ? readManagedPid() : null;
     if (filePid && isProcessAlive(filePid)) {
       this.cachedManagedPid = filePid;
+      this.cachedManagedPort = this.main.port;
       return filePid;
     }
-    if (this.cachedManagedPid && isProcessAlive(this.cachedManagedPid)) {
+    if (this.cachedManagedPort === this.main.port && this.cachedManagedPid && isProcessAlive(this.cachedManagedPid)) {
       return this.cachedManagedPid;
     }
     this.cachedManagedPid = null;
+    this.cachedManagedPort = null;
     if (this.platform === "win32" && this.windowDriver.findManagedPid && this.main.connected) {
       const profileDir = path.join(currentManagedBrowserDir(), "profile");
       const found = await this.windowDriver.findManagedPid(this.main.port, profileDir).catch(() => null);
       if (found && isProcessAlive(found)) {
         this.cachedManagedPid = found;
+        this.cachedManagedPort = this.main.port;
         return found;
       }
     }
@@ -468,13 +518,14 @@ export class BrowserPool {
 
   private async isMainManaged(): Promise<boolean> {
     if (this.forceManaged) return true;
+    if (!isLoopbackHost(this.main.host)) return false;
     const mPort = readManagedPort();
-    if (mPort !== null && mPort === this.main.port) return true;
+    if (mPort !== null) return mPort === this.main.port;
     const pid = await this.resolveManagedPid();
     if (pid !== null) return true;
     try {
       const eps = await discoverCdpEndpoints({ ports: [this.main.port], processes: true, thorough: true });
-      return eps.some((e) => e.port === this.main.port && e.managed);
+      return eps.some((e) => isLoopbackHost(e.host) && e.port === this.main.port && e.managed);
     } catch {
       return false;
     }
@@ -527,6 +578,12 @@ export class BrowserPool {
 
   /** Query the current display mode of the managed browser. */
   async getModeStatus(): Promise<BrowserModeInfo> {
+    if (this.main.connected && !(await this.isMainManaged())) {
+      const trayRunning = this.platform === "win32"
+        ? await this.windowDriver.status(0).then((st) => st.trayRunning).catch(() => false)
+        : false;
+      return { mode: null, backend: null, connected: true, trayRunning };
+    }
     if (this.platform === "win32") {
       if (!this.main.connected) {
         const st = await this.windowDriver.status(0).catch(() => ({ trayRunning: false, windowCount: 0, stealth: false }));
@@ -581,13 +638,15 @@ export class BrowserPool {
     if (!this.main.connected) {
       return fail(request.id, "受管浏览器尚未连接，请稍后重试。");
     }
-    if (!(await this.isMainManaged())) {
-      return fail(request.id, "当前默认浏览器不是 ma-browser 受管浏览器，不支持切换有头/无头模式。");
-    }
-
     this.modeSwitchInFlight = true;
     try {
+      if (!(await this.isMainManaged())) {
+        return fail(request.id, "当前默认浏览器不是 ma-browser 受管浏览器，不支持切换有头/无头模式。");
+      }
       const current = await this.getModeStatus();
+      if (!current.connected || current.mode === null) {
+        return fail(request.id, "受管浏览器连接已变化，请稍后重试。");
+      }
       const wantNative = Boolean(request.nativeHeadless) || this.platform !== "win32";
       const canStealth = this.platform === "win32" && current.backend === "stealth" && !wantNative;
 
@@ -715,13 +774,18 @@ export class BrowserPool {
 
     const savedOnUnexpectedClose = this.main.onUnexpectedClose;
     this.main.onUnexpectedClose = null;
-    this.armStealthPopupGuard(false);
 
     try {
-      // 1. Drain in-flight CDP calls on `main` briefly before closing.
+      // 1. Admission is closed by swapBarrier. Drain complete commands first:
+      // a wait, tab queue or scheduler-admitted dispatch may have no CDP calls.
+      // On timeout, leave the browser running instead of invalidating live work.
       const drainDeadline = Date.now() + 3_000;
+      await this.drainCommands(Math.max(0, drainDeadline - Date.now()));
       while (this.main.pendingStats().count > 0 && Date.now() < drainDeadline) {
         await new Promise((r) => setTimeout(r, 50));
+      }
+      if (this.main.pendingStats().count > 0) {
+        throw new Error("仍有浏览器请求执行中，已取消模式切换，请稍后重试。");
       }
 
       // 2. Snapshot all live page tabs of `main` so none can be lost.
@@ -732,10 +796,12 @@ export class BrowserPool {
 
       // 3. Persist target mode and close old browser while preserving TabState entries.
       writePersistedBrowserMode(targetMode);
+      this.armStealthPopupGuard(false);
       this.main.preservingTabsForSwap = true;
       await this.main.browserCommand("Browser.close").catch(() => {});
       this.main.disconnect();
       this.cachedManagedPid = null;
+      this.cachedManagedPort = null;
 
       if (oldPid && isProcessAlive(oldPid)) {
         const exitDeadline = Date.now() + 5_000;
@@ -803,14 +869,17 @@ export class BrowserPool {
         }
       }
 
-      // Pass 3: pair any blank/newtab snapshots with remaining unclaimed pages.
+      // Pass 3: restore every blank/newtab, without assigning its logical ID or
+      // lease to an unrelated page that happened to be restored by Chrome.
+      const blankKey = (url: string) => (url || "about:blank").replace(/\/$/, "");
       for (const snap of blankSnaps) {
-        const next = unclaimed.shift();
-        if (next) {
-          bindPair(snap.oldTargetId, next.id);
-        } else if (reboundOldIds.size === 0) {
+        const idx = unclaimed.findIndex((t) => isBlankLike(t.url) && blankKey(t.url) === blankKey(snap.url));
+        if (idx >= 0) {
+          const [matched] = unclaimed.splice(idx, 1);
+          bindPair(snap.oldTargetId, matched.id);
+        } else {
           const created = await this.main.browserCommand<{ targetId: string }>("Target.createTarget", {
-            url: "about:blank",
+            url: snap.url || "about:blank",
             background: true,
           });
           await this.main.attachAndEnable(created.targetId);

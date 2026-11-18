@@ -355,9 +355,13 @@ export class HttpServer {
         bindingStore: this.bindingStore ?? undefined,
         scratchpadManager: this.scratchpadManager ?? undefined,
       };
-      // Tag every CDP call made by this dispatch with `token`, so a timeout can
-      // tell "the browser never answered our call" from daemon-side stalls.
-      const dispatch = cdpCallContext.run(token, () => dispatchRequest(this.cdp, request, session, dispatchCtx));
+      // Recheck swap admission AFTER the scheduler wait, before resolving any
+      // targets, and track the complete dispatch (including tab queues/waits).
+      // Keep the CDP owner context across both admission and execution so a
+      // timeout can distinguish browser calls from daemon-side stalls.
+      const dispatch = cdpCallContext.run(token, () => this.cdp.runCommand(
+        () => dispatchRequest(this.cdp, request, session, dispatchCtx),
+      ));
       dispatch.then(
         (r) => this.health.finish(token, r.success !== false, r.error),
         (e) => this.health.finish(token, false, e instanceof Error ? e.message : String(e)),
