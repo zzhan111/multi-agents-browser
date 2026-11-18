@@ -385,6 +385,8 @@ export interface ResolvedCdp extends CdpAddress {
 export interface ResolveOptions {
   /** Explicit endpoints (`--port`, `BB_BROWSER_CDP_URL[S]`, daemon `--cdp-port`), tried first in order. */
   explicit?: CdpAddress[];
+  /** Keep the tray's default connection on its managed browser, even during recovery. */
+  managedOnly?: boolean;
   /** Browser IDs to skip (already held by another connection). */
   exclude?: Set<string>;
   /** Launch the managed browser if nothing else is found. Default true. */
@@ -408,7 +410,8 @@ export async function resolveCdpEndpoint(options: ResolveOptions = {}): Promise<
   const exclude = options.exclude ?? new Set<string>();
   const usable = (host: string, port: number) => !exclude.has(browserIdFor(host, port));
 
-  for (const addr of options.explicit ?? []) {
+  const explicit = options.managedOnly ? [] : options.explicit ?? [];
+  for (const addr of explicit) {
     if (!usable(addr.host, addr.port)) continue;
     const ep = await inspectCdp(addr.host, addr.port);
     if (ep) return { host: ep.host, port: ep.port, source: "explicit" };
@@ -420,7 +423,7 @@ export async function resolveCdpEndpoint(options: ResolveOptions = {}): Promise<
     if (ep) return { host: ep.host, port: ep.port, source: "managed" };
   }
 
-  if (cdpDiscoveryMode() !== "off") {
+  if (!options.managedOnly && cdpDiscoveryMode() !== "off") {
     const found = (await discoverCdpEndpoints(options.discover)).filter((e) => usable(e.host, e.port));
     const pick = found.find((e) => !e.managed) ?? found[0];
     if (pick) return { host: pick.host, port: pick.port, source: "discovered" };
