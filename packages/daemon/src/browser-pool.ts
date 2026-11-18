@@ -11,22 +11,36 @@
  * Calls without a tab go to the caller's current tab's browser, then `main`.
  */
 
+import path from "node:path";
 import {
   browserIdFor,
+  currentManagedBrowserDir,
   discoverCdpEndpoints,
   explainCdpFailure,
   inspectCdp,
   isLoopbackHost,
+  isProcessAlive,
+  launchManagedBrowser,
   parseCdpAddress,
+  readManagedPid,
+  readManagedPort,
+  readPersistedBrowserMode,
+  resolveInitialBrowserMode,
+  windowsStealth,
+  writePersistedBrowserMode,
+  type BrowserDisplayMode,
   type BrowserInfo,
+  type BrowserModeInfo,
   type CdpAddress,
+  type LaunchManagedBrowserOptions,
   type Request,
   type Response,
   type ResponseData,
+  type WindowModeDriver,
 } from "@ma-browser/shared";
 import { CdpConnection, type CdpTargetInfo } from "./cdp-connection.js";
 import type { TabStateManager } from "./tab-state.js";
-import type { AgentSession } from "./session-state.js";
+import type { AgentSession, SessionManager } from "./session-state.js";
 import type { StateStore } from "./state-store.js";
 
 /** Attached browsers, re-attached on the next daemon start (e.g. after a tray mode switch). */
@@ -38,6 +52,14 @@ export interface PoolTarget extends CdpTargetInfo {
   browserId: string;
 }
 
+export interface BrowserPoolOptions {
+  windowDriver?: WindowModeDriver;
+  launcher?: (port: number, opts?: LaunchManagedBrowserOptions) => Promise<{ host: string; port: number } | null>;
+  platform?: NodeJS.Platform;
+  /** Override managed-browser check (for isolated fake-CDP unit tests). */
+  forceManaged?: boolean;
+}
+
 export class BrowserPool {
   readonly main: CdpConnection;
   readonly tabManager: TabStateManager;
@@ -45,10 +67,28 @@ export class BrowserPool {
   private readonly extra = new Map<string, CdpConnection>();
   /** Per-target serial queue: commands on the same tab run one at a time. */
   private tabQueues = new Map<string, Promise<void>>();
+  private readonly windowDriver: WindowModeDriver;
+  private readonly launcher: (port: number, opts?: LaunchManagedBrowserOptions) => Promise<{ host: string; port: number } | null>;
+  private readonly platform: NodeJS.Platform;
+  private readonly forceManaged: boolean;
 
-  constructor(main: CdpConnection, private readonly store?: StateStore) {
+  private modeSwitchInFlight = false;
+  private swapBarrier: Promise<void> | null = null;
+  /** Complete admitted commands, including time spent outside CDP and in tab queues. */
+  private readonly activeCommands = new Set<Promise<void>>();
+  private cachedManagedPid: number | null = null;
+  private cachedManagedPort: number | null = null;
+  /** Tracks stealth state when running against windowless fake CDP servers in tests. */
+  private virtualStealthState: boolean | null = null;
+  private stealthSweepTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(main: CdpConnection, private readonly store?: StateStore, options: BrowserPoolOptions = {}) {
     this.main = main;
     this.tabManager = main.tabManager;
+    this.windowDriver = options.windowDriver ?? windowsStealth;
+    this.launcher = options.launcher ?? launchManagedBrowser;
+    this.platform = options.platform ?? process.platform;
+    this.forceManaged = options.forceManaged ?? false;
   }
 
   /** Browsers attached in a previous daemon run. */
@@ -103,14 +143,69 @@ export class BrowserPool {
 
   /** Disconnect all browsers in the pool (for daemon shutdown). */
   disconnectAll(): void {
+    if (this.stealthSweepTimer) {
+      clearTimeout(this.stealthSweepTimer);
+      this.stealthSweepTimer = null;
+    }
+    this.main.onPageTargetCreated = null;
     for (const c of this.all()) {
       c.disconnect();
     }
   }
 
-  /** Resolves once any browser is connected. */
-  waitUntilReady(): Promise<void> {
-    if (this.connected) return Promise.resolve();
+  /**
+   * Admit a complete command before it resolves any target IDs. Once a swap
+   * closes admission, new commands wait while already admitted commands drain.
+   * The check and registration deliberately have no intervening await.
+   */
+  async runCommand<T>(fn: () => Promise<T>): Promise<T> {
+    while (this.swapBarrier) {
+      await this.swapBarrier;
+    }
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    this.activeCommands.add(done);
+    try {
+      return await fn();
+    } finally {
+      this.activeCommands.delete(done);
+      finish();
+    }
+  }
+
+  private async drainCommands(timeoutMs: number): Promise<void> {
+    if (this.activeCommands.size === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        Promise.all([...this.activeCommands]),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("仍有浏览器命令执行中，已取消模式切换，请稍后重试。")), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** True while `main` is undergoing a fallback hot-swap restart. */
+  isSwapping(): boolean {
+    return this.swapBarrier !== null;
+  }
+
+  /** Wait for an in-flight fallback hot-swap to complete (no-op if none). */
+  async waitForSwap(): Promise<void> {
+    if (this.swapBarrier) {
+      await this.swapBarrier;
+    }
+  }
+
+  /** Resolves once any browser is connected (and any hot-swap has finished). */
+  async waitUntilReady(): Promise<void> {
+    if (this.swapBarrier) {
+      await this.swapBarrier;
+    }
+    if (this.connected) return;
     return Promise.any(this.all().map((c) => c.waitUntilReady())).catch((err: AggregateError) => {
       throw err.errors?.[0] ?? err;
     });
@@ -378,6 +473,472 @@ export class BrowserPool {
         tabs: tabs.filter((t) => t.browserId === c.browserId).length,
         lastError: c.connected ? undefined : c.lastError ?? undefined,
       }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Managed browser mode (Stealth zero-restart + Hot-swap fallback)
+  // ---------------------------------------------------------------------------
+
+  private isNativeHeadlessConnection(): boolean {
+    return /\bHeadlessChrome\b/i.test(this.main.userAgent ?? "");
+  }
+
+  private async resolveManagedPid(): Promise<number | null> {
+    const mPort = readManagedPort();
+    if (!isLoopbackHost(this.main.host) || (mPort !== null && mPort !== this.main.port)) {
+      this.cachedManagedPid = null;
+      this.cachedManagedPort = null;
+      return null;
+    }
+
+    // A PID file identifies the managed process, not whichever browser `main`
+    // happens to drive. Only trust it when the recorded endpoint matches.
+    const filePid = mPort === this.main.port ? readManagedPid() : null;
+    if (filePid && isProcessAlive(filePid)) {
+      this.cachedManagedPid = filePid;
+      this.cachedManagedPort = this.main.port;
+      return filePid;
+    }
+    if (this.cachedManagedPort === this.main.port && this.cachedManagedPid && isProcessAlive(this.cachedManagedPid)) {
+      return this.cachedManagedPid;
+    }
+    this.cachedManagedPid = null;
+    this.cachedManagedPort = null;
+    if (this.platform === "win32" && this.windowDriver.findManagedPid && this.main.connected) {
+      const profileDir = path.join(currentManagedBrowserDir(), "profile");
+      const found = await this.windowDriver.findManagedPid(this.main.port, profileDir).catch(() => null);
+      if (found && isProcessAlive(found)) {
+        this.cachedManagedPid = found;
+        this.cachedManagedPort = this.main.port;
+        return found;
+      }
+    }
+    return null;
+  }
+
+  private async isMainManaged(): Promise<boolean> {
+    if (this.forceManaged) return true;
+    if (!isLoopbackHost(this.main.host)) return false;
+    const mPort = readManagedPort();
+    if (mPort !== null) return mPort === this.main.port;
+    const pid = await this.resolveManagedPid();
+    if (pid !== null) return true;
+    try {
+      const eps = await discoverCdpEndpoints({ ports: [this.main.port], processes: true, thorough: true });
+      return eps.some((e) => isLoopbackHost(e.host) && e.port === this.main.port && e.managed);
+    } catch {
+      return false;
+    }
+  }
+
+  private armStealthPopupGuard(enabled: boolean): void {
+    if (this.stealthSweepTimer) {
+      clearTimeout(this.stealthSweepTimer);
+      this.stealthSweepTimer = null;
+    }
+    if (!enabled || this.platform !== "win32") {
+      this.main.onPageTargetCreated = null;
+      return;
+    }
+    this.main.onPageTargetCreated = () => {
+      if (this.stealthSweepTimer) return;
+      this.stealthSweepTimer = setTimeout(() => {
+        this.stealthSweepTimer = null;
+        void this.resolveManagedPid().then((pid) => {
+          if (pid) void this.windowDriver.hide(pid).catch(() => {});
+        });
+      }, 80);
+      this.stealthSweepTimer.unref?.();
+    };
+  }
+
+  /**
+   * Ensure the managed browser's OS window matches the configured initial mode
+   * immediately after connecting (or reconnecting).
+   */
+  async syncInitialWindowMode(): Promise<void> {
+    if (this.platform !== "win32" || !this.main.connected || this.isNativeHeadlessConnection()) {
+      this.armStealthPopupGuard(false);
+      return;
+    }
+    if (!(await this.isMainManaged())) return;
+    const desired = resolveInitialBrowserMode();
+    if (desired.mode === "headless" && !desired.nativeHeadless) {
+      this.virtualStealthState = true;
+      this.armStealthPopupGuard(true);
+      const pid = await this.resolveManagedPid();
+      if (pid) {
+        await this.windowDriver.hide(pid).catch(() => {});
+      }
+    } else {
+      this.virtualStealthState = false;
+      this.armStealthPopupGuard(false);
+    }
+  }
+
+  /** Query the current display mode of the managed browser. */
+  async getModeStatus(): Promise<BrowserModeInfo> {
+    if (this.main.connected && !(await this.isMainManaged())) {
+      const trayRunning = this.platform === "win32"
+        ? await this.windowDriver.status(0).then((st) => st.trayRunning).catch(() => false)
+        : false;
+      return { mode: null, backend: null, connected: true, trayRunning };
+    }
+    if (this.platform === "win32") {
+      if (!this.main.connected) {
+        const st = await this.windowDriver.status(0).catch(() => ({ trayRunning: false, windowCount: 0, stealth: false }));
+        return { mode: null, backend: null, connected: false, trayRunning: st.trayRunning };
+      }
+      if (this.isNativeHeadlessConnection()) {
+        const st = await this.windowDriver.status(0).catch(() => ({ trayRunning: false, windowCount: 0, stealth: false }));
+        return { mode: "headless", backend: "native", connected: true, trayRunning: st.trayRunning };
+      }
+      const pid = await this.resolveManagedPid();
+      const st = await this.windowDriver.status(pid).catch(() => ({ trayRunning: false, windowCount: 0, stealth: false }));
+      const isStealth = st.windowCount > 0
+        ? st.stealth
+        : (this.virtualStealthState ?? readPersistedBrowserMode() === "headless");
+      return {
+        mode: isStealth ? "headless" : "headed",
+        backend: "stealth",
+        connected: true,
+        trayRunning: st.trayRunning,
+      };
+    }
+
+    if (!this.main.connected) {
+      return { mode: null, backend: null, connected: false, trayRunning: false };
+    }
+    return {
+      mode: this.isNativeHeadlessConnection() ? "headless" : "headed",
+      backend: "native",
+      connected: true,
+      trayRunning: false,
+    };
+  }
+
+  /**
+   * Handle `browser_mode` (`status` | `headed` | `headless`).
+   * On Windows, switches instantaneously via Win32 window virtualization without
+   * restarting Chrome or losing DOM state. Falls back to a daemon-supervised
+   * hot-swap (preserving tabs, leases, and short tab IDs) only when migrating
+   * out of a native `--headless=new` process or on non-Windows platforms.
+   */
+  async handleBrowserMode(request: Request, sessions?: SessionManager): Promise<Response> {
+    const action = request.modeAction ?? "status";
+    if (action === "status") {
+      return ok(request.id, { browserMode: await this.getModeStatus() });
+    }
+    if (action !== "headed" && action !== "headless") {
+      return fail(request.id, `无效的浏览器模式：${String(action)}`);
+    }
+    if (this.modeSwitchInFlight) {
+      return fail(request.id, "已有浏览器模式切换请求正在执行，请稍后重试。");
+    }
+    if (!this.main.connected) {
+      return fail(request.id, "受管浏览器尚未连接，请稍后重试。");
+    }
+    this.modeSwitchInFlight = true;
+    try {
+      if (!(await this.isMainManaged())) {
+        return fail(request.id, "当前默认浏览器不是 ma-browser 受管浏览器，不支持切换有头/无头模式。");
+      }
+      const current = await this.getModeStatus();
+      if (!current.connected || current.mode === null) {
+        return fail(request.id, "受管浏览器连接已变化，请稍后重试。");
+      }
+      const wantNative = Boolean(request.nativeHeadless) || this.platform !== "win32";
+      const canStealth = this.platform === "win32" && current.backend === "stealth" && !wantNative;
+
+      if (canStealth) {
+        const pid = await this.resolveManagedPid();
+        if (current.mode === action) {
+          let windowFocused: boolean | undefined;
+          let trayRunning = current.trayRunning;
+          if (action === "headed" && request.focus && pid) {
+            const pages = (await this.main.getTargets().catch(() => [])).filter((t) => t.type === "page");
+            if (pages.length === 0) {
+              await this.createTarget("about:blank");
+            }
+            const res = await this.windowDriver.show(pid, true);
+            trayRunning = res.trayRunning;
+            windowFocused = Boolean(res.focused);
+          }
+          writePersistedBrowserMode(action);
+          return ok(request.id, {
+            browserMode: {
+              mode: action,
+              backend: "stealth",
+              connected: true,
+              trayRunning,
+              changed: false,
+              restarted: false,
+              ...(windowFocused !== undefined ? { windowFocused } : {}),
+            },
+          });
+        }
+
+        if (action === "headless") {
+          this.armStealthPopupGuard(true);
+          let trayRunning = current.trayRunning;
+          if (pid) {
+            const res = await this.windowDriver.hide(pid);
+            trayRunning = res.trayRunning;
+          }
+          this.virtualStealthState = true;
+          writePersistedBrowserMode("headless");
+          return ok(request.id, {
+            browserMode: {
+              mode: "headless",
+              backend: "stealth",
+              connected: true,
+              trayRunning,
+              changed: true,
+              restarted: false,
+            },
+          });
+        }
+
+        // stealth headless -> headed
+        this.armStealthPopupGuard(false);
+        const pages = (await this.main.getTargets().catch(() => [])).filter((t) => t.type === "page");
+        if (pages.length === 0) {
+          await this.createTarget("about:blank");
+        }
+        let trayRunning = current.trayRunning;
+        let windowFocused: boolean | undefined;
+        if (pid) {
+          const res = await this.windowDriver.show(pid, Boolean(request.focus));
+          trayRunning = res.trayRunning;
+          if (request.focus) windowFocused = Boolean(res.focused);
+        }
+        this.virtualStealthState = false;
+        writePersistedBrowserMode("headed");
+        return ok(request.id, {
+          browserMode: {
+            mode: "headed",
+            backend: "stealth",
+            connected: true,
+            trayRunning,
+            changed: true,
+            restarted: false,
+            ...(windowFocused !== undefined ? { windowFocused } : {}),
+          },
+        });
+      }
+
+      // Fallback path: native `--headless=new` <-> `headed` hot-swap.
+      const targetBackend = wantNative && action === "headless" ? "native" : (this.platform === "win32" ? "stealth" : "native");
+      if (current.mode === action && current.backend === targetBackend) {
+        return ok(request.id, {
+          browserMode: {
+            mode: action,
+            backend: current.backend,
+            connected: true,
+            trayRunning: current.trayRunning,
+            changed: false,
+            restarted: false,
+          },
+        });
+      }
+
+      const swapped = await this.hotSwapMainBrowser(
+        action,
+        targetBackend === "native" && action === "headless",
+        Boolean(request.focus),
+        sessions,
+      );
+      return ok(request.id, { browserMode: swapped });
+    } catch (err) {
+      return fail(request.id, err);
+    } finally {
+      this.modeSwitchInFlight = false;
+    }
+  }
+
+  /**
+   * Restart ONLY the managed browser under the live daemon, snapshotting open
+   * page URLs, backfilling any tabs dropped by Chrome session restore, and
+   * rebinding pre-existing `shortId`s & session cursors to the new targets.
+   */
+  private async hotSwapMainBrowser(
+    targetMode: BrowserDisplayMode,
+    useNativeHeadless: boolean,
+    focus: boolean,
+    sessions?: SessionManager,
+  ): Promise<BrowserModeInfo> {
+    let releaseBarrier!: () => void;
+    this.swapBarrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+
+    const savedOnUnexpectedClose = this.main.onUnexpectedClose;
+    this.main.onUnexpectedClose = null;
+
+    try {
+      // 1. Admission is closed by swapBarrier. Drain complete commands first:
+      // a wait, tab queue or scheduler-admitted dispatch may have no CDP calls.
+      // On timeout, leave the browser running instead of invalidating live work.
+      const drainDeadline = Date.now() + 3_000;
+      await this.drainCommands(Math.max(0, drainDeadline - Date.now()));
+      while (this.main.pendingStats().count > 0 && Date.now() < drainDeadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (this.main.pendingStats().count > 0) {
+        throw new Error("仍有浏览器请求执行中，已取消模式切换，请稍后重试。");
+      }
+
+      // 2. Snapshot all live page tabs of `main` so none can be lost.
+      const beforePages = (await this.main.getTargets().catch(() => [])).filter((t) => t.type === "page");
+      const snapshots = beforePages.map((t) => ({ oldTargetId: t.id, url: t.url }));
+      const oldPid = await this.resolveManagedPid();
+      const previousPort = this.main.port;
+
+      // 3. Persist target mode and close old browser while preserving TabState entries.
+      writePersistedBrowserMode(targetMode);
+      this.armStealthPopupGuard(false);
+      this.main.preservingTabsForSwap = true;
+      await this.main.browserCommand("Browser.close").catch(() => {});
+      this.main.disconnect();
+      this.cachedManagedPid = null;
+      this.cachedManagedPort = null;
+
+      if (oldPid && isProcessAlive(oldPid)) {
+        const exitDeadline = Date.now() + 5_000;
+        while (isProcessAlive(oldPid) && Date.now() < exitDeadline) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+
+      // 4. Launch replacement managed browser and connect `main`.
+      const launched = await this.launcher(previousPort, {
+        mode: targetMode,
+        nativeHeadless: useNativeHeadless,
+        restoreSession: true,
+        bypassGrace: true,
+      });
+      if (!launched) {
+        throw new Error("切换后无法启动受管浏览器。");
+      }
+
+      this.main.repoint(launched.host, launched.port);
+      await this.main.connect();
+
+      // 5. Reconcile restored targets against pre-switch snapshot & rebind shortIds.
+      const afterPages = (await this.main.getTargets().catch(() => [])).filter((t) => t.type === "page");
+      const unclaimed = [...afterPages];
+      const reboundOldIds = new Set<string>();
+
+      const bindPair = (oldId: string, newId: string) => {
+        const rebound = this.tabManager.rebindTab(oldId, newId);
+        if (rebound) {
+          rebound.browserId = this.main.browserId;
+        }
+        sessions?.remapTarget(oldId, newId);
+        reboundOldIds.add(oldId);
+      };
+
+      const isBlankLike = (u: string) => !u || u === "about:blank" || u.startsWith("chrome://newtab");
+
+      // Pass 1: exact URL match for non-blank pages.
+      const remainingSnaps: typeof snapshots = [];
+      for (const snap of snapshots) {
+        if (!isBlankLike(snap.url)) {
+          const idx = unclaimed.findIndex((t) => t.url === snap.url);
+          if (idx >= 0) {
+            const [matched] = unclaimed.splice(idx, 1);
+            bindPair(snap.oldTargetId, matched.id);
+            continue;
+          }
+        }
+        remainingSnaps.push(snap);
+      }
+
+      // Pass 2: backfill any non-blank page that Chrome's session restore missed.
+      const blankSnaps: typeof snapshots = [];
+      for (const snap of remainingSnaps) {
+        if (!isBlankLike(snap.url)) {
+          const created = await this.main.browserCommand<{ targetId: string }>("Target.createTarget", {
+            url: snap.url,
+            background: true,
+          });
+          await this.main.attachAndEnable(created.targetId);
+          bindPair(snap.oldTargetId, created.targetId);
+        } else {
+          blankSnaps.push(snap);
+        }
+      }
+
+      // Pass 3: restore every blank/newtab, without assigning its logical ID or
+      // lease to an unrelated page that happened to be restored by Chrome.
+      const blankKey = (url: string) => (url || "about:blank").replace(/\/$/, "");
+      for (const snap of blankSnaps) {
+        const idx = unclaimed.findIndex((t) => isBlankLike(t.url) && blankKey(t.url) === blankKey(snap.url));
+        if (idx >= 0) {
+          const [matched] = unclaimed.splice(idx, 1);
+          bindPair(snap.oldTargetId, matched.id);
+        } else {
+          const created = await this.main.browserCommand<{ targetId: string }>("Target.createTarget", {
+            url: snap.url || "about:blank",
+            background: true,
+          });
+          await this.main.attachAndEnable(created.targetId);
+          bindPair(snap.oldTargetId, created.targetId);
+        }
+      }
+
+      // Drop any un-rebound stale entries from the previous browser instance.
+      for (const snap of snapshots) {
+        if (!reboundOldIds.has(snap.oldTargetId)) {
+          this.tabManager.removeTab(snap.oldTargetId);
+        }
+      }
+
+      // 6. Apply Windows stealth/foreground state if applicable.
+      let windowFocused: boolean | undefined;
+      let trayRunning = false;
+      if (this.platform === "win32") {
+        const newPid = await this.resolveManagedPid();
+        if (targetMode === "headless" && !useNativeHeadless) {
+          this.virtualStealthState = true;
+          this.armStealthPopupGuard(true);
+          if (newPid) {
+            const res = await this.windowDriver.hide(newPid);
+            trayRunning = res.trayRunning;
+          }
+        } else {
+          this.virtualStealthState = false;
+          this.armStealthPopupGuard(false);
+          if (newPid && targetMode === "headed") {
+            const res = await this.windowDriver.show(newPid, focus);
+            trayRunning = res.trayRunning;
+            if (focus) windowFocused = Boolean(res.focused);
+          } else {
+            const st = await this.windowDriver.status(0).catch(() => ({ trayRunning: false, windowCount: 0, stealth: false }));
+            trayRunning = st.trayRunning;
+          }
+        }
+      }
+
+      const finalBackend = useNativeHeadless ? "native" : (this.platform === "win32" ? "stealth" : "native");
+      return {
+        mode: targetMode,
+        backend: finalBackend,
+        connected: true,
+        trayRunning,
+        changed: true,
+        restarted: true,
+        ...(windowFocused !== undefined ? { windowFocused } : {}),
+      };
+    } finally {
+      this.main.preservingTabsForSwap = false;
+      this.main.onUnexpectedClose = savedOnUnexpectedClose;
+      this.swapBarrier = null;
+      releaseBarrier();
+      if (!this.main.connected && savedOnUnexpectedClose) {
+        savedOnUnexpectedClose();
+      }
+    }
   }
 }
 

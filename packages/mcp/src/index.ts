@@ -386,7 +386,7 @@ const server = new McpServer(
 Your browser is the API. The managed browser can run headed or headless; existing logins remain in its dedicated profile.
 
 Key capabilities:
-- browser_mode: Inspect or switch the shared Windows tray browser between headed and headless modes
+- browser_mode: Inspect or switch the managed browser between headed (visible window for login/verification) and headless (hidden background mode) without losing tabs or tab IDs
 - browser_snapshot: Read page content via accessibility tree (use ref numbers to interact)
 - browser_click/fill/type: Interact with elements by ref from snapshot
 - browser_eval: Run JavaScript in page context (most powerful — full DOM/fetch access)
@@ -625,14 +625,17 @@ for (const cmd of COMMANDS) {
   }
 }
 
-// Windows tray mode is independent of the daemon, which restarts during a switch.
+// Browser mode is owned by the live daemon (zero-restart stealth on Windows, hot-swap fallback elsewhere).
 server.tool(
   "browser_mode",
-  "Query or switch the Windows tray's shared browser mode. Switching restarts the browser, invalidates tab IDs and may lose unsaved page changes. Returns after reconnecting.",
-  { mode: z.enum(["status", "headed", "headless"]).optional().describe("status (default), headed for interactive login, or headless") },
-  async ({ mode }) => {
+  "Query or switch the managed browser mode between headed (visible window for interactive login or verification) and headless (hidden in background). Preserves open tabs, in-page state, and short tab IDs without restarting the daemon.",
+  {
+    mode: z.enum(["status", "headed", "headless"]).optional().describe("status (default) to query current mode, headed to show the browser window, or headless to hide the window in the background"),
+    focus: z.boolean().optional().describe("When mode is headed, bring the browser window to the foreground (default: false)"),
+  },
+  async ({ mode, focus }) => {
     try {
-      return textResult(await browserMode(mode ?? "status", BB_SESSION_ID));
+      return textResult(await browserMode(mode ?? "status", BB_SESSION_ID, focus !== undefined ? { focus } : undefined));
     } catch (error) {
       return errorResult(error instanceof Error ? error.message : String(error));
     }

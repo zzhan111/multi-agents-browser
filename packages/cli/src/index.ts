@@ -66,7 +66,7 @@ ma-browser - AI Agent 浏览器自动化工具
   star                         ⭐ Star ma-browser on GitHub
 
 浏览器操作：
-  mode [status|headed|headless] 查询或切换有头/无头（Windows 托盘；切换会重启浏览器）
+  mode [status|headed|headless] 查询或切换有头/无头模式（无损切换，保留标签页与页面状态）
   open <url> [--tab]           打开 URL
   snapshot [-i] [-c] [-d <n>]  获取页面快照（--highlight 画出编号框）
   click <ref>                  点击元素
@@ -291,14 +291,31 @@ async function main(): Promise<void> {
       case "mode": {
         const action = parsed.args[0] ?? "status";
         if (!["status", "headed", "headless"].includes(action) || parsed.args.length > 1) {
-          throw new Error("用法：ma-browser mode [status|headed|headless]");
+          throw new Error("用法：ma-browser mode [status|headed|headless] [--focus]");
         }
-        const result = await browserMode(action as BrowserModeAction);
+        const focus = process.argv.includes("--focus");
+        const nativeHeadless = process.argv.includes("--native");
+        const result = await browserMode(action as BrowserModeAction, undefined, {
+          ...(focus ? { focus: true } : {}),
+          ...(nativeHeadless ? { nativeHeadless: true } : {}),
+        });
         if (parsed.flags.json) {
           console.log(JSON.stringify(result));
         } else {
-          const label = result.mode === "headed" ? "有头" : result.mode === "headless" ? "无头" : "未连接";
-          console.log(`浏览器模式：${label}；托盘：${result.trayRunning ? "运行中" : "未运行"}`);
+          const label =
+            result.mode === "headed"
+              ? "有头（显示窗口）"
+              : result.mode === "headless"
+                ? "无头（后台隐藏）"
+                : "未连接";
+          if (action === "status") {
+            console.log(`浏览器模式：${label}；托盘：${result.trayRunning ? "运行中" : "未运行"}`);
+          } else {
+            const detail = result.changed
+              ? (result.restarted ? "已完成热切换，标签页已保留" : "已无损切换，标签页与页面状态已保留")
+              : "当前已是该模式";
+            console.log(`浏览器模式：${label}（${detail}）；托盘：${result.trayRunning ? "运行中" : "未运行"}`);
+          }
         }
         break;
       }

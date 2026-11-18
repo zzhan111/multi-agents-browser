@@ -21,6 +21,12 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
 import { DAEMON_DIR } from "./daemon-client.js";
+import {
+  readPersistedBrowserMode,
+  resolveInitialBrowserMode,
+  windowsStealth,
+  type BrowserDisplayMode,
+} from "./windows-stealth.js";
 
 /** Default CDP debugging port (odd chain start). */
 export const DEFAULT_CDP_PORT = 19825;
@@ -41,6 +47,31 @@ export const MANAGED_PID_FILE = path.join(MANAGED_BROWSER_DIR, "browser-pid");
  * theirs. Logins made here persist across runs.
  */
 export const MANAGED_USER_DATA_DIR = path.join(MANAGED_BROWSER_DIR, "profile");
+
+export function currentManagedBrowserDir(): string {
+  const home = process.env.BB_BROWSER_HOME || DAEMON_DIR;
+  return path.join(home, "browser");
+}
+
+export function readManagedPort(): number | null {
+  try {
+    const raw = readFileSync(path.join(currentManagedBrowserDir(), "cdp-port"), "utf8").trim();
+    const port = parseInt(raw, 10);
+    return Number.isInteger(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+export function readManagedPid(): number | null {
+  try {
+    const raw = readFileSync(path.join(currentManagedBrowserDir(), "browser-pid"), "utf8").trim();
+    const pid = parseInt(raw, 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Hosts to probe for a CDP endpoint. Some browsers may bind the debug port on
@@ -137,14 +168,7 @@ export function findBrowserExecutable(): string | null {
  * This prevents zombie processes from interfering with new launches.
  */
 function killPreviousManagedBrowser(): void {
-  let pid: number | null = null;
-  try {
-    const raw = readFileSync(MANAGED_PID_FILE, "utf8").trim();
-    pid = parseInt(raw, 10);
-    if (!Number.isFinite(pid) || pid <= 0) pid = null;
-  } catch {
-    // no PID file — nothing to kill
-  }
+  const pid = readManagedPid();
 
   if (pid !== null) {
     try {
@@ -206,6 +230,17 @@ let _managedLaunchPort = 0;
 /** How long to wait for a freshly-launched browser before giving up and killing it. */
 const LAUNCH_GRACE_MS = 60_000;
 
+export interface LaunchManagedBrowserOptions {
+  /** Target display mode (`headed` or `headless`). Defaults to `resolveInitialBrowserMode()`. */
+  mode?: BrowserDisplayMode;
+  /** Force Chromium `--headless=new` instead of Windows stealth window virtualization. */
+  nativeHeadless?: boolean;
+  /** Pass `--restore-last-session` instead of `about:blank`. */
+  restoreSession?: boolean;
+  /** Ignore the 60s launch grace window (for an intentional hot-swap restart). */
+  bypassGrace?: boolean;
+}
+
 /**
  * Launch a managed Chromium browser on the given CDP port under a dedicated
  * profile and wait until it is reachable. Writes the resolved port to
@@ -219,6 +254,7 @@ const LAUNCH_GRACE_MS = 60_000;
  */
 export async function launchManagedBrowser(
   port: number = DEFAULT_CDP_PORT,
+  options: LaunchManagedBrowserOptions = {},
 ): Promise<{ host: string; port: number } | null> {
   // Opt-out for test suites and other sandboxes: never start a real browser.
   // Without this, a daemon under test that finds no CDP endpoint launches a
@@ -231,27 +267,29 @@ export async function launchManagedBrowser(
     return null;
   }
 
-  // Already debuggable on this port? (Our managed instance from a prior run, or
-  // a browser the user started with --remote-debugging-port.) Nothing to launch.
-  const existing = await probeCdp(port);
-  if (existing) {
-    return { host: existing, port };
-  }
-
-  // If we launched a managed browser recently, give it more time instead of
-  // killing it and starting over — prevents an infinite kill-restart cycle on
-  // slow machines where Chrome takes longer than the 25s poll window to bind.
-  const age = Date.now() - _managedLaunchMs;
-  if (age < LAUNCH_GRACE_MS && _managedLaunchPort > 0) {
-    // The launcher may have chosen a different port than `port` — probe it too.
-    if (_managedLaunchPort !== port) {
-      const h = await probeCdp(_managedLaunchPort);
-      if (h) return { host: h, port: _managedLaunchPort };
+  if (!options.bypassGrace) {
+    // Already debuggable on this port? (Our managed instance from a prior run, or
+    // a browser the user started with --remote-debugging-port.) Nothing to launch.
+    const existing = await probeCdp(port);
+    if (existing) {
+      return { host: existing, port };
     }
-    console.error(
-      `[browser-launcher] managed browser launched ${Math.round(age / 1000)}s ago; still starting up (${Math.round((LAUNCH_GRACE_MS - age) / 1000)}s grace remaining)`,
-    );
-    return null;
+
+    // If we launched a managed browser recently, give it more time instead of
+    // killing it and starting over — prevents an infinite kill-restart cycle on
+    // slow machines where Chrome takes longer than the 25s poll window to bind.
+    const age = Date.now() - _managedLaunchMs;
+    if (age < LAUNCH_GRACE_MS && _managedLaunchPort > 0) {
+      // The launcher may have chosen a different port than `port` — probe it too.
+      if (_managedLaunchPort !== port) {
+        const h = await probeCdp(_managedLaunchPort);
+        if (h) return { host: h, port: _managedLaunchPort };
+      }
+      console.error(
+        `[browser-launcher] managed browser launched ${Math.round(age / 1000)}s ago; still starting up (${Math.round((LAUNCH_GRACE_MS - age) / 1000)}s grace remaining)`,
+      );
+      return null;
+    }
   }
 
   // Kill any previous managed browser + its orphaned child processes before
@@ -268,20 +306,46 @@ export async function launchManagedBrowser(
     console.error(`[browser-launcher] port ${port} is occupied; using ${launchPort} instead`);
   }
 
-  await mkdir(MANAGED_USER_DATA_DIR, { recursive: true });
+  const browserDir = currentManagedBrowserDir();
+  const profileDir = path.join(browserDir, "profile");
+  await mkdir(profileDir, { recursive: true });
 
-  const restoreSession = process.env.MA_BROWSER_RESTORE_SESSION === "1";
+  const initial = resolveInitialBrowserMode();
+  const mode = options.mode ?? initial.mode;
+  const nativeHeadless =
+    options.nativeHeadless ??
+    (mode === "headless" && (process.platform !== "win32" || process.env.MA_BROWSER_NATIVE_HEADLESS === "1"));
+  const useWinStealth = process.platform === "win32" && !nativeHeadless;
+  const restoreSession =
+    options.restoreSession ??
+    (process.env.MA_BROWSER_RESTORE_SESSION === "1" ||
+      (process.env.MA_BROWSER_RESTORE_SESSION !== "0" && readPersistedBrowserMode() !== null));
+
+  const disabledFeatures = useWinStealth
+    ? "Translate,MediaRouter,CalculateNativeWinOcclusion"
+    : "Translate,MediaRouter";
+
   const args = [
-    ...(process.env.MA_BROWSER_HEADLESS === "1" ? ["--headless=new"] : []),
+    ...(nativeHeadless ? ["--headless=new"] : []),
+    ...(useWinStealth && mode === "headless"
+      ? ["--window-position=-32000,-32000", "--window-size=1280,850"]
+      : []),
     ...(restoreSession ? ["--restore-last-session"] : []),
     `--remote-debugging-port=${launchPort}`,
-    `--user-data-dir=${MANAGED_USER_DATA_DIR}`,
+    `--user-data-dir=${profileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-sync",
     "--disable-background-networking",
     "--disable-component-update",
-    "--disable-features=Translate,MediaRouter",
+    `--disable-features=${disabledFeatures}`,
+    ...(useWinStealth
+      ? [
+          "--disable-backgrounding-occluded-windows",
+          "--disable-renderer-backgrounding",
+          "--disable-background-timer-throttling",
+        ]
+      : []),
     "--disable-session-crashed-bubble",
     "--hide-crash-restore-bubble",
     "--use-mock-keychain",
@@ -293,7 +357,10 @@ export async function launchManagedBrowser(
     const child = spawn(executable, args, {
       detached: true,
       stdio: "ignore",
-      windowsHide: true,
+      // Chromium is a GUI-subsystem binary (no console window). Passing windowsHide=true
+      // sets STARTUPINFO.wShowWindow=SW_HIDE, which suppresses Chrome's first HWND from
+      // Aura compositor visibility; off-screen bounds + windowsStealth.hide() handles stealth cleanly.
+      windowsHide: !useWinStealth,
     });
     launchedPid = child.pid;
     child.unref();
@@ -305,18 +372,32 @@ export async function launchManagedBrowser(
   _managedLaunchMs = Date.now();
   _managedLaunchPort = launchPort;
 
-  await mkdir(MANAGED_BROWSER_DIR, { recursive: true });
-  await writeFile(MANAGED_PORT_FILE, String(launchPort), "utf8");
+  await mkdir(browserDir, { recursive: true });
+  await writeFile(path.join(browserDir, "cdp-port"), String(launchPort), "utf8");
   if (launchedPid !== undefined) {
-    await writeFile(MANAGED_PID_FILE, String(launchedPid), "utf8");
+    await writeFile(path.join(browserDir, "browser-pid"), String(launchedPid), "utf8");
   }
 
   // Browsers can take a while to bind the port after launching; poll both
-  // IPv4 and IPv6 for up to ~25s.
+  // IPv4 and IPv6 for up to ~25s. In Windows stealth-headless mode, apply
+  // stealth window attributes as soon as the window appears so session-restored
+  // bounds cannot flash on the desktop or taskbar.
   const deadline = Date.now() + 25000;
+  let stealthApplied = false;
   while (Date.now() < deadline) {
+    if (useWinStealth && mode === "headless" && launchedPid !== undefined && !stealthApplied) {
+      await windowsStealth
+        .hide(launchedPid)
+        .then((r) => {
+          if (r.affectedCount > 0) stealthApplied = true;
+        })
+        .catch(() => {});
+    }
     const host = await probeCdp(launchPort);
     if (host) {
+      if (useWinStealth && mode === "headless" && launchedPid !== undefined) {
+        await windowsStealth.hide(launchedPid).catch(() => {});
+      }
       return { host, port: launchPort };
     }
     await new Promise((resolve) => setTimeout(resolve, 300));

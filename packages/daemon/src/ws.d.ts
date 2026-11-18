@@ -10,6 +10,7 @@ declare module "ws" {
 
     /** Server side, used by tests to fake a CDP endpoint. */
     class WebSocketServer extends EventEmitter {
+      readonly clients: Set<WebSocket>;
       constructor(options: { server?: import("node:http").Server; port?: number });
       on(event: "connection", listener: (socket: WebSocket) => void): this;
       on(event: string | symbol, listener: (...args: unknown[]) => void): this;

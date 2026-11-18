@@ -49,7 +49,7 @@ const TRACE_CAPACITY = (() => {
 export { TRACE_CAPACITY };
 
 export class TabState {
-  readonly targetId: string;
+  targetId: string;
   shortId: string;
   /** Stable logical tab ID, decoupled from the CDP targetId (which changes on browser restart). */
   readonly bbTabId: string = randomUUID();
@@ -391,6 +391,38 @@ export class TabStateManager {
     this.shortToTarget.delete(tab.shortId);
     this.targetToShort.delete(targetId);
     this.tabs.delete(targetId);
+  }
+
+  /**
+   * Rebind an existing logical TabState to a new CDP targetId (e.g. after a
+   * browser hot-swap), preserving its `shortId`, `bbTabId`, lease, `lastActionSeq`,
+   * and event ring buffers while clearing stale DOM `refs` and `activeFrameId`.
+   */
+  rebindTab(oldTargetId: string, newTargetId: string): TabState | undefined {
+    if (oldTargetId === newTargetId) return this.tabs.get(oldTargetId);
+    const tab = this.tabs.get(oldTargetId);
+    if (!tab) return undefined;
+
+    // If CdpConnection.connect() already registered a temporary TabState for
+    // newTargetId, drop that temporary entry so the preserved shortId wins cleanly.
+    const provisional = this.tabs.get(newTargetId);
+    if (provisional && provisional !== tab) {
+      this.shortToTarget.delete(provisional.shortId);
+      this.targetToShort.delete(newTargetId);
+      this.tabs.delete(newTargetId);
+    }
+
+    this.tabs.delete(oldTargetId);
+    this.targetToShort.delete(oldTargetId);
+
+    tab.targetId = newTargetId;
+    tab.refs = {};
+    tab.activeFrameId = null;
+
+    this.tabs.set(newTargetId, tab);
+    this.shortToTarget.set(tab.shortId, newTargetId);
+    this.targetToShort.set(newTargetId, tab.shortId);
+    return tab;
   }
 
 

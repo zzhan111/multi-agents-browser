@@ -50,7 +50,8 @@ export type ActionType =
   | "site_update"
   | "cdp_list"
   | "cdp_attach"
-  | "cdp_detach";
+  | "cdp_detach"
+  | "browser_mode";
 
 /** 请求类型 */
 export interface Request {
@@ -161,6 +162,24 @@ export interface Request {
   all?: boolean;
   /** cdp_attach：允许非 loopback 主机 */
   allowRemote?: boolean;
+  /** browser_mode：查询或切换受管浏览器模式 */
+  modeAction?: "status" | "headed" | "headless";
+  /** browser_mode：切换/确保有头模式时将窗口置于前台 */
+  focus?: boolean;
+  /** browser_mode：强制使用 Chromium 原生 --headless=new 热切换（默认在 Windows 下使用零重启窗口隐身） */
+  nativeHeadless?: boolean;
+}
+
+/** 受管浏览器有头/无头模式状态（browser_mode 返回） */
+export interface BrowserModeInfo {
+  mode: "headed" | "headless" | null;
+  /** stealth = 零重启窗口隐身（Windows 默认）；native = Chromium --headless=new 进程级模式 */
+  backend?: "stealth" | "native" | null;
+  connected: boolean;
+  trayRunning: boolean;
+  changed?: boolean;
+  restarted?: boolean;
+  windowFocused?: boolean;
 }
 
 /** 一个可控浏览器（cdp_list / status 返回） */
@@ -419,6 +438,8 @@ export interface ResponseData {
     visits: number;
     titles: string[];
   }>;
+  /** 受管浏览器有头/无头模式结果（browser_mode 命令返回） */
+  browserMode?: BrowserModeInfo;
 }
 
 /** 响应类型 */
