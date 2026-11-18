@@ -1,6 +1,6 @@
 import { clientCommandTimeoutMs } from "./command-timeouts.js";
-import { DaemonTimeoutError, httpJson, isProcessAlive, readDaemonJson } from "./daemon-client.js";
-import { generateId, type BrowserModeInfo, type Request, type Response } from "./protocol.js";
+import { DaemonTimeoutError, httpJson, readDaemonJson } from "./daemon-client.js";
+import { generateId, type BrowserModeInfo, type BrowserWindowModeInfo, type Request, type Response } from "./protocol.js";
 import { windowsStealth } from "./windows-stealth.js";
 
 export type BrowserModeAction = "status" | "headed" | "headless";
@@ -12,6 +12,8 @@ export interface BrowserModeOptions {
   focus?: boolean;
   /** Force Chromium `--headless=new` hot-swap instead of Windows zero-restart stealth mode. */
   nativeHeadless?: boolean;
+  /** Target a specific browser ID or "all". */
+  browser?: string;
 }
 
 async function detectTrayRunning(): Promise<boolean> {
@@ -32,19 +34,24 @@ async function detectTrayRunning(): Promise<boolean> {
  * through the live daemon (zero-restart stealth window mode on Windows, or
  * hot-swap with logical tab rebinding as a fallback).
  */
-export async function browserMode(
+export interface BrowserModeDetail {
+  browserMode: BrowserModeStatus;
+  browserModes?: BrowserWindowModeInfo[];
+}
+
+export async function browserModeDetail(
   action: BrowserModeAction,
   sessionId = process.env.BB_SESSION_ID ?? "default",
   options?: BrowserModeOptions,
-): Promise<BrowserModeStatus> {
+): Promise<BrowserModeDetail> {
   if (action !== "status" && process.env.BB_SESSION_SCOPE === "read-only") {
     throw new Error("只读会话不能切换浏览器模式。");
   }
 
   const info = await readDaemonJson();
-  if (!info || !isProcessAlive(info.pid)) {
+  if (!info) {
     if (action === "status") {
-      return { mode: null, connected: false, trayRunning: await detectTrayRunning() };
+      return { browserMode: { mode: null, connected: false, trayRunning: await detectTrayRunning() } };
     }
     throw new Error("后台未运行，请先启动 ma-browser 或等待托盘启动后台。");
   }
@@ -55,6 +62,7 @@ export async function browserMode(
     modeAction: action,
     ...(options?.focus !== undefined ? { focus: options.focus } : {}),
     ...(options?.nativeHeadless !== undefined ? { nativeHeadless: options.nativeHeadless } : {}),
+    ...(options?.browser !== undefined ? { browser: options.browser } : {}),
   };
 
   try {
@@ -72,12 +80,15 @@ export async function browserMode(
     if (!resp.success || !resp.data?.browserMode) {
       throw new Error(resp.error || "浏览器模式切换失败。");
     }
-    return resp.data.browserMode;
+    return {
+      browserMode: resp.data.browserMode,
+      ...(resp.data.browserModes ? { browserModes: resp.data.browserModes } : {}),
+    };
   } catch (error) {
     if (action === "status" && !(error instanceof DaemonTimeoutError)) {
       const msg = error instanceof Error ? error.message : "";
       if (/ECONNREFUSED|ECONNRESET|socket hang up/i.test(msg)) {
-        return { mode: null, connected: false, trayRunning: await detectTrayRunning() };
+        return { browserMode: { mode: null, connected: false, trayRunning: await detectTrayRunning() } };
       }
     }
     if (error instanceof DaemonTimeoutError) {
@@ -85,4 +96,12 @@ export async function browserMode(
     }
     throw error;
   }
+}
+
+export async function browserMode(
+  action: BrowserModeAction,
+  sessionId = process.env.BB_SESSION_ID ?? "default",
+  options?: BrowserModeOptions,
+): Promise<BrowserModeStatus> {
+  return (await browserModeDetail(action, sessionId, options)).browserMode;
 }

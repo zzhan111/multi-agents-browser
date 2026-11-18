@@ -84,6 +84,8 @@ export class HttpServer {
   private readonly scheduler: CommandScheduler;
   private readonly health = new CommandHealth();
   private startTime = 0;
+  private sessionGc?: ReturnType<typeof setInterval>;
+  private stopping = false;
 
   constructor(options: HttpServerOptions) {
     this.host = options.host ?? "127.0.0.1";
@@ -118,21 +120,27 @@ export class HttpServer {
       this.server.listen(this.port, this.host, () => {
         this.startTime = Date.now();
         const idleMs = envInt("BB_SESSION_IDLE_HOURS", 24) * 3_600_000;
-        setInterval(() => expireIdleSessions(this.sessions, this.cdp.tabManager.allTabs(), idleMs), 600_000).unref();
+        this.sessionGc = setInterval(() => expireIdleSessions(this.sessions, this.cdp.tabManager.allTabs(), idleMs), 600_000).unref();
         this.health.startLagMonitor();
         resolve();
       });
     });
   }
 
-  async stop(): Promise<void> {
+  async stop(graceMs = 5_000): Promise<void> {
+    this.stopping = true;
     this.health.stopLagMonitor();
-    if (this.server) {
-      this.server.closeIdleConnections?.();
-      return new Promise((resolve) => {
-        this.server!.close(() => resolve());
+    clearInterval(this.sessionGc);
+    const server = this.server;
+    if (!server) return;
+    await new Promise<void>((resolve) => {
+      const deadline = setTimeout(() => server.closeAllConnections(), graceMs);
+      server.close(() => {
+        clearTimeout(deadline);
+        resolve();
       });
-    }
+      server.closeIdleConnections();
+    });
   }
 
   get uptime(): number {
@@ -184,7 +192,14 @@ export class HttpServer {
 
     if (!this.checkAuth(req, res)) return;
 
-    if (req.method === "POST" && url === "/command") {
+    if (this.stopping) {
+      this.sendJson(res, 503, { error: "Daemon is shutting down" });
+      return;
+    }
+    if (req.method === "GET" && url === "/api/tray-status") {
+      const connectedBrowserCount = this.cdp.connectedBrowserCount;
+      this.sendJson(res, 200, { running: true, cdpConnected: connectedBrowserCount > 0, connectedBrowserCount });
+    } else if (req.method === "POST" && url === "/command") {
       this.handleCommand(req, res);
     } else if (req.method === "GET" && url === "/status") {
       this.handleStatus(req, res);
@@ -246,6 +261,13 @@ export class HttpServer {
         const response = await dispatchCdpRequest(this.cdp, request);
         finish?.(response.success);
         this.sendJson(res, 200, response);
+        return;
+      }
+
+      // A status poll observes the browser, not the caller's tab session. Preserve
+      // explicit scope negotiation below when a client supplies a scope header.
+      if (request.action === "browser_mode" && (request.modeAction ?? "status") === "status" && !req.headers["x-bb-session-scope"]) {
+        this.sendJson(res, 200, await this.cdp.handleBrowserMode(request));
         return;
       }
 

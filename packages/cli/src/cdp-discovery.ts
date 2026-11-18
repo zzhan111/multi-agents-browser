@@ -42,6 +42,13 @@ export function preferCdpEndpoint(addr: CdpAddress): void {
  * bring-up loop (see resolveCdpEndpoint): BB_BROWSER_CDP_URL[S] / --port >
  * running managed browser > discovered browser > managed launch.
  */
+export function preferredCdpEndpoint(): CdpAddress | undefined {
+  const explicitPort = Number.parseInt(getArgValue("--port") ?? "", 10);
+  return preferred[0] ?? (Number.isInteger(explicitPort) && explicitPort > 0
+    ? { host: "127.0.0.1", port: explicitPort }
+    : undefined);
+}
+
 export async function discoverCdpPort(): Promise<{ host: string; port: number } | null> {
   const explicit: CdpAddress[] = [...preferred, ...envCdpAddresses()];
   const explicitPort = Number.parseInt(getArgValue("--port") ?? "", 10);

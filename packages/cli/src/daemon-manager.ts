@@ -3,23 +3,20 @@
  */
 
 import { spawn } from "node:child_process";
-import { unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import type { Request, Response } from "@ma-browser/shared";
 import {
-  DAEMON_JSON,
   DaemonTimeoutError,
   clientCommandTimeoutMs,
   commandTimeoutMs,
   describeDaemonTimeout,
   type DaemonInfo,
   readDaemonJson,
-  isProcessAlive,
   httpJson,
 } from "@ma-browser/shared";
-import { discoverCdpPort } from "./cdp-discovery.js";
+import { preferredCdpEndpoint } from "./cdp-discovery.js";
 
 // ---------------------------------------------------------------------------
 // Cached state
@@ -28,15 +25,7 @@ import { discoverCdpPort } from "./cdp-discovery.js";
 let cachedInfo: DaemonInfo | null = null;
 let daemonReady = false;
 
-// ---------------------------------------------------------------------------
-// daemon.json helpers
-// ---------------------------------------------------------------------------
-
-async function deleteDaemonJson(): Promise<void> {
-  try {
-    await unlink(DAEMON_JSON);
-  } catch {}
-}
+let starting: Promise<void> | null = null;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -54,13 +43,15 @@ export function getDaemonPath(): string {
 
 /**
  * Ensure the daemon is running and ready to accept commands.
- * - Reads ~/.bb-browser/daemon.json for pid, host, port, token
- * - Checks if pid is alive via signal 0
- * - If pid dead, deletes stale daemon.json and spawns new daemon
- * - Checks health via GET /status
- * - If not running, spawns daemon process (detached) and waits for health
+ * Probe the advertised HTTP endpoint first, then start a daemon if needed.
+ * Browser discovery and launch are owned by the daemon.
  */
 export async function ensureDaemon(): Promise<void> {
+  if (!starting) starting = startOrConnect().finally(() => { starting = null; });
+  return starting;
+}
+
+async function startOrConnect(): Promise<void> {
   if (daemonReady && cachedInfo) {
     // Quick re-check: is the HTTP server still reachable?
     // We no longer gate on cdpConnected — the daemon may be in a connecting
@@ -77,45 +68,23 @@ export async function ensureDaemon(): Promise<void> {
     cachedInfo = null;
   }
 
-  // Try reading existing daemon.json and checking if daemon is alive
   let info = await readDaemonJson();
   if (info) {
-    // PID liveness check — detect stale daemon.json from crashed daemon
-    if (!isProcessAlive(info.pid)) {
-      await deleteDaemonJson();
-      info = null;
-    } else {
-      try {
-        const status = await httpJson<{ running?: boolean }>("GET", "/status", info, undefined, 2000);
-        if (status.running) {
-          // Accept the daemon whether or not CDP is connected yet.
-          // cdpConnected=false is a transient state managed by the tray or
-          // the daemon's own reconnect loop — killing it here would race with
-          // the tray's supervisor and potentially create two daemon instances.
-          cachedInfo = info;
-          daemonReady = true;
-          return;
-        }
-        // Daemon HTTP is reachable but not reporting running — fall through to spawn.
-      } catch {
-        // Daemon process exists but HTTP not responding — fall through to spawn.
+    try {
+      const status = await httpJson<{ running?: boolean }>("GET", "/status", info, undefined, 2000);
+      if (status.running) {
+        cachedInfo = info;
+        daemonReady = true;
+        return;
       }
-    }
+    } catch {}
   }
 
-  // Discover CDP port (auto-launches Chrome if needed)
-  const cdpInfo = await discoverCdpPort();
-  if (!cdpInfo) {
-    throw new Error(
-      "ma-browser: Cannot find a Chromium-based browser.\n\n" +
-      "Please do one of the following:\n" +
-      "  1. Install Google Chrome, Edge, or Brave\n" +
-      "  2. Start Chrome with: google-chrome --remote-debugging-port=19825\n" +
-      "  3. Set BB_BROWSER_CDP_URL=http://host:port",
-    );
-  }
+  // Only forward an explicit preference; daemon owns discovery and launch.
+  const cdpInfo = preferredCdpEndpoint();
+  const cdpArgs = cdpInfo ? ["--cdp-host", cdpInfo.host, "--cdp-port", String(cdpInfo.port)] : [];
 
-  // Spawn daemon process with discovered CDP endpoint.
+  // Spawn daemon process.
   // Suppress the console window on Windows (the MCP server is windowless).
   const daemonPath = getDaemonPath();
   const spawnOpts: Parameters<typeof spawn>[2] = {
@@ -123,7 +92,8 @@ export async function ensureDaemon(): Promise<void> {
     stdio: "ignore",
     windowsHide: true,
   };
-  const child = spawn(process.execPath, [daemonPath, "--cdp-host", cdpInfo.host, "--cdp-port", String(cdpInfo.port)], spawnOpts);
+  const child = spawn(process.execPath, [daemonPath, ...cdpArgs], spawnOpts);
+  child.on("error", () => {});
   child.unref();
 
   // Wait for daemon to become healthy (up to 10 seconds — includes Chrome launch time)
@@ -147,7 +117,7 @@ export async function ensureDaemon(): Promise<void> {
 
   throw new Error(
     "ma-browser: Daemon did not start in time.\n\n" +
-    "Chrome CDP is reachable, but the daemon process failed to initialize.\n" +
+    "The daemon process did not become reachable.\n" +
     "Try: ma-browser daemon status",
   );
 }

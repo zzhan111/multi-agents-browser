@@ -21,6 +21,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
+import { hintFromArgs, splitCommandLine } from "./process-hints.js";
 
 export type BrowserDisplayMode = "headed" | "headless";
 
@@ -41,11 +42,17 @@ export interface WindowModeApplyResult {
   focused?: boolean;
 }
 
+export interface BrowserProcessMatch {
+  pid: number;
+  userDataDir?: string;
+}
+
 export interface WindowModeDriver {
   status(pid?: number | null, windowClass?: string): Promise<WindowModeStatusResult>;
   hide(pid: number, windowClass?: string): Promise<WindowModeApplyResult>;
   show(pid: number, focus?: boolean, windowClass?: string): Promise<WindowModeApplyResult>;
   findManagedPid?(port: number, profileDir: string): Promise<number | null>;
+  findBrowserProcess?(port: number): Promise<BrowserProcessMatch | null>;
   close?(): void;
 }
 
@@ -447,6 +454,12 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
       } | Select-Object -First 1
       $foundPid = if ($proc) { [int]$proc.ProcessId } else { $null }
       $resp = @{ id = $reqId; ok = $true; pid = $foundPid }
+    } elseif ($op -eq 'findBrowserProcess') {
+      $port = [int]$cmd.port
+      $procs = @(Get-CimInstance Win32_Process -Filter "CommandLine like '%--remote-debugging-port=$port%'" | Where-Object {
+        $_.CommandLine -and $_.CommandLine -notmatch '(?:^|\s)--type='
+      } | ForEach-Object { @{ pid = [int]$_.ProcessId; commandLine = [string]$_.CommandLine } })
+      $resp = @{ id = $reqId; ok = $true; procs = $procs }
     } else {
       throw "Unknown op: $op"
     }
@@ -620,6 +633,25 @@ export class WindowsWindowController implements WindowModeDriver {
       affectedCount: Number(res.affectedCount ?? 0),
       focused: Boolean(res.focused),
     };
+  }
+
+  async findBrowserProcess(port: number): Promise<BrowserProcessMatch | null> {
+    if (process.platform !== "win32") return null;
+    const res = await this.request({ op: "findBrowserProcess", port }, 10_000);
+    const procs = Array.isArray(res.procs)
+      ? res.procs
+      : (res.procs && typeof res.procs === "object" ? [res.procs] : []);
+    for (const item of procs) {
+      if (!item || typeof item !== "object") continue;
+      const pid = Number((item as { pid?: unknown }).pid);
+      const commandLine = String((item as { commandLine?: unknown }).commandLine ?? "");
+      if (!Number.isInteger(pid) || pid <= 0 || !commandLine) continue;
+      const hint = hintFromArgs(splitCommandLine(commandLine), pid);
+      if (hint && hint.port === port) {
+        return { pid: hint.pid, userDataDir: hint.userDataDir };
+      }
+    }
+    return null;
   }
 
   async findManagedPid(port: number, profileDir: string): Promise<number | null> {

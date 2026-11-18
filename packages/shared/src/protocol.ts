@@ -156,7 +156,7 @@ export interface Request {
   query?: string;
   /** 域名过滤（site_search 使用） */
   domain?: string;
-  /** 目标浏览器：端口、host:port 或 URL（tab_list/tab_new/open/site_run 路由，cdp_attach/cdp_detach 目标） */
+  /** 目标浏览器：端口、host:port、URL 或 "all"（tab_list/tab_new/open/site_run 路由，cdp_attach/cdp_detach/browser_mode 目标） */
   browser?: string;
   /** cdp_attach：接管全部已发现的本机 CDP */
   all?: boolean;
@@ -168,6 +168,29 @@ export interface Request {
   focus?: boolean;
   /** browser_mode：强制使用 Chromium 原生 --headless=new 热切换（默认在 Windows 下使用零重启窗口隐身） */
   nativeHeadless?: boolean;
+}
+
+/** 单个浏览器的窗口显隐与可控状态（browser_mode 多浏览器详情） */
+export interface BrowserWindowModeInfo {
+  id: string;
+  host: string;
+  port: number;
+  managed: boolean;
+  label: string;
+  tabs: number;
+  connected: boolean;
+  default: boolean;
+  origin: "auto" | "attached";
+  mode: "headed" | "headless" | null;
+  backend: "stealth" | "native" | null;
+  canStealth: boolean;
+  canToggle: boolean;
+  readonlyReason?: string;
+  userDataDir?: string;
+  pid?: number;
+  changed?: boolean;
+  restarted?: boolean;
+  windowFocused?: boolean;
 }
 
 /** 受管浏览器有头/无头模式状态（browser_mode 返回） */
@@ -440,6 +463,8 @@ export interface ResponseData {
   }>;
   /** 受管浏览器有头/无头模式结果（browser_mode 命令返回） */
   browserMode?: BrowserModeInfo;
+  /** 池内全部浏览器的窗口显隐状态列表（browser_mode 返回） */
+  browserModes?: BrowserWindowModeInfo[];
 }
 
 /** 响应类型 */

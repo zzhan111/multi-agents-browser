@@ -10,7 +10,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { writeFileSync, renameSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
@@ -261,15 +261,15 @@ async function discoverCdpPort(
  * Runs once `main` is up so the default browser is picked first.
  */
 async function autoAttach(pool: BrowserPool, options: DaemonOptions): Promise<void> {
-  const saved = pool.savedAttachments();
-  const targets: CdpAddress[] = [...(options.strictCdp ? [] : explicitEndpoints(options)), ...saved];
-  if (!options.strictCdp && cdpDiscoveryMode() === "all") targets.push(...(await discoverCdpEndpoints()));
+  if (options.strictCdp) return;
+  void pool.restoreAttachments();
+  const targets = explicitEndpoints(options);
+  if (cdpDiscoveryMode() === "all") targets.push(...(await discoverCdpEndpoints()));
   for (const addr of targets) {
     try {
       await pool.attach(addr);
     } catch (err) {
       console.error(`[Daemon] Could not attach ${addr.host}:${addr.port}: ${err instanceof Error ? err.message : String(err)}`);
-      if (saved.includes(addr)) pool.forgetAttachment(addr);
     }
   }
 }
@@ -293,7 +293,7 @@ async function main(): Promise<void> {
   const history = new CommandHistory();
   const cdp = new CdpConnection(options.cdpHost, options.cdpPort, tabManager);
   const stateStore = new StateStore(path.join(DAEMON_DIR, "state"));
-  const pool = new BrowserPool(cdp, stateStore);
+  const pool = new BrowserPool(cdp, stateStore, { strictCdp: options.strictCdp });
   const runtimeStatus: DaemonRuntimeStatus = { needsBrowserConsent: false };
   const agentRegistry = new AgentRegistry(stateStore);
   const bindingStore = new BindingStore(stateStore);
@@ -304,17 +304,28 @@ async function main(): Promise<void> {
   const journalFlushTimer = setInterval(() => journalManager.flushAll(), 2_000);
 
   // Graceful shutdown handler (guarded against double-call)
-  let shuttingDown = false;
+  const lifetime = new AbortController();
   const shutdown = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
+    if (lifetime.signal.aborted) return;
+    lifetime.abort();
+    _bringUpWakeUp?.();
+    cdp.onUnexpectedClose = null;
     console.error("[Daemon] Shutting down...");
     clearInterval(scratchpadGcTimer);
     clearInterval(journalFlushTimer);
-    journalManager.flushAll(); // flush any unflushed entries before exit
-    pool.disconnectAll();
-    windowsStealth.close();
-    await httpServer.stop();
+    try {
+      // Stop accepting commands first. An admitted request journals its result
+      // before sending the response, so the final flush must follow this drain.
+      await httpServer.stop();
+      journalManager.flushAll(true);
+    } finally {
+      await Promise.race([
+        pool.restoreExternalHiddenWindows().catch(() => {}),
+        new Promise((r) => setTimeout(r, 2000)),
+      ]);
+      pool.disconnectAll();
+      windowsStealth.close();
+    }
     // daemon.json intentionally NOT deleted — a tray-driven restart may already
     // have a replacement daemon running, and WSL agents need the file to
     // discover the daemon. The replacement daemon overwrites daemon.json on its
@@ -382,13 +393,16 @@ async function main(): Promise<void> {
   // Runs detached from startup so a failure here never kills the daemon — the
   // HTTP server stays up and /status keeps reporting cdpConnected=false until
   // we succeed. The tray's /status poller renders that as yellow (重连中).
-  void bringUpCdp(pool, options, runtimeStatus).then(() => autoAttach(pool, options));
+  const bringUp = () => bringUpCdp(pool, options, runtimeStatus, lifetime.signal);
+  void bringUp().then(() => {
+    if (!lifetime.signal.aborted) return autoAttach(pool, options);
+  }).catch((err) => console.warn("[Daemon] Browser attachment failed:", err));
 
   // Self-heal: if the established CDP socket drops (e.g. user closed Chrome),
   // restart the bring-up loop so we re-discover/relaunch and return to green.
   cdp.onUnexpectedClose = () => {
     console.error("[Daemon] CDP connection dropped; restarting bring-up loop...");
-    void bringUpCdp(pool, options, runtimeStatus);
+    void bringUp();
   };
 }
 
@@ -410,6 +424,7 @@ async function bringUpCdp(
   pool: BrowserPool,
   options: DaemonOptions,
   runtimeStatus: DaemonRuntimeStatus,
+  signal: AbortSignal,
 ): Promise<void> {
   // Only one bring-up loop at a time. If a reconnect fires while the loop is
   // sleeping in backoff, wake it up so it retries immediately rather than
@@ -420,7 +435,7 @@ async function bringUpCdp(
   }
   bringUpInFlight = true;
   try {
-    await bringUpCdpLoop(pool, options, runtimeStatus);
+    await bringUpCdpLoop(pool, options, runtimeStatus, signal);
   } finally {
     bringUpInFlight = false;
     _bringUpWakeUp = null;
@@ -431,6 +446,7 @@ async function bringUpCdpLoop(
   pool: BrowserPool,
   options: DaemonOptions,
   runtimeStatus: DaemonRuntimeStatus,
+  signal: AbortSignal,
 ): Promise<void> {
   const cdp = pool.main;
   let attempt = 0;
@@ -439,12 +455,13 @@ async function bringUpCdpLoop(
   // lastLoggedMsg guard and would log every single retry).
   const HEARTBEAT_EVERY = 20;
 
-  while (true) {
+  while (!signal.aborted) {
     // If something reconnected us already, stop.
     if (cdp.connected) return;
     attempt += 1;
     try {
       const endpoint = await discoverCdpPort(pool, options);
+      if (signal.aborted) return;
       runtimeStatus.needsBrowserConsent = false;
       cdp.repoint(endpoint.host, endpoint.port);
       console.error(
@@ -483,11 +500,5 @@ main().catch((error) => {
   // Include the stack: the log interceptor stringifies arguments, and
   // String(error) alone drops everything but the first line.
   console.error("[Daemon] Fatal error:", error instanceof Error ? (error.stack ?? error.message) : error);
-  // Remove daemon.json so a tray-spawned replacement doesn't find a stale
-  // entry pointing at this now-dead process. (Graceful shutdown intentionally
-  // skips this because a replacement daemon may already have overwritten it.)
-  try {
-    unlinkSync(DAEMON_JSON);
-  } catch {}
   process.exit(1);
 });

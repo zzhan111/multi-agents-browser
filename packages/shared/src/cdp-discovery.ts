@@ -19,13 +19,20 @@
 import { execFile } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { connect } from "node:net";
-import os from "node:os";
-import path from "node:path";
+import {
+  type ProcessHint,
+  defaultUserDataDirs,
+  hintFromArgs,
+  isDefaultUserDataDir,
+  isIsolatedUserDataDir,
+  readDevToolsActivePort,
+  splitCommandLine,
+} from "./process-hints.js";
+export { splitCommandLine, isDefaultUserDataDir, isIsolatedUserDataDir };
 import {
   DEFAULT_CDP_PORT,
-  MANAGED_PID_FILE,
-  MANAGED_PORT_FILE,
-  MANAGED_USER_DATA_DIR,
+  readManagedPort,
+  isManagedDebugger,
   PROBE_HOSTS,
   launchManagedBrowser,
 } from "./browser-launcher.js";
@@ -190,32 +197,6 @@ export function defaultScanPorts(): number[] {
   return [...new Set(ports)];
 }
 
-interface ProcessHint {
-  port: number;
-  pid: number;
-  userDataDir?: string;
-}
-
-function hintFromArgs(args: string[], pid: number): ProcessHint | null {
-  if (args.some((a) => a.startsWith("--type="))) return null; // renderer/GPU child
-  let port: number | undefined;
-  let userDataDir: string | undefined;
-  for (const a of args) {
-    const p = /^--remote-debugging-port=(\d+)$/.exec(a);
-    if (p) port = Number(p[1]);
-    const d = /^--user-data-dir=(.+)$/.exec(a);
-    if (d) userDataDir = d[1].replace(/^"|"$/g, "");
-  }
-  if (port === undefined) return null;
-  if (port === 0 && userDataDir) port = readDevToolsActivePort(userDataDir) ?? 0;
-  return port > 0 ? { port, pid, userDataDir } : null;
-}
-
-/** Split a command line on spaces outside double quotes, dropping the quotes. */
-export function splitCommandLine(line: string): string[] {
-  return (line.match(/(?:[^\s"]+|"[^"]*")+/g) ?? []).map((t) => t.replace(/"/g, ""));
-}
-
 function linuxProcessHints(): ProcessHint[] {
   const out: ProcessHint[] = [];
   let pids: string[] = [];
@@ -283,52 +264,6 @@ export async function processHints(thorough: boolean): Promise<ProcessHint[]> {
   return [];
 }
 
-function readDevToolsActivePort(userDataDir: string): number | null {
-  try {
-    const port = Number(readFileSync(path.join(userDataDir, "DevToolsActivePort"), "utf8").split("\n")[0].trim());
-    return Number.isInteger(port) && port > 0 ? port : null;
-  } catch {
-    return null;
-  }
-}
-
-function defaultUserDataDirs(): string[] {
-  const home = os.homedir();
-  if (process.platform === "darwin") {
-    const base = path.join(home, "Library", "Application Support");
-    return ["Google/Chrome", "Google/Chrome Beta", "Google/Chrome Canary", "Chromium", "Microsoft Edge", "BraveSoftware/Brave-Browser"].map((d) => path.join(base, d));
-  }
-  if (process.platform === "win32") {
-    const base = process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
-    return ["Google/Chrome/User Data", "Google/Chrome Beta/User Data", "Google/Chrome SxS/User Data", "Chromium/User Data", "Microsoft/Edge/User Data", "BraveSoftware/Brave-Browser/User Data"].map((d) => path.join(base, d));
-  }
-  const base = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config");
-  return ["google-chrome", "google-chrome-beta", "google-chrome-unstable", "chromium", "microsoft-edge", "BraveSoftware/Brave-Browser"].map((d) => path.join(base, d));
-}
-
-function managedPort(): number | null {
-  try {
-    const port = Number(readFileSync(MANAGED_PORT_FILE, "utf8").trim());
-    return Number.isInteger(port) && port > 0 ? port : null;
-  } catch {
-    return null;
-  }
-}
-
-function managedPid(): number | null {
-  try {
-    const pid = Number(readFileSync(MANAGED_PID_FILE, "utf8").trim());
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-function samePath(a: string, b: string): boolean {
-  const norm = (p: string) => path.resolve(p).replace(/[\\/]+$/, "");
-  return process.platform === "win32" ? norm(a).toLowerCase() === norm(b).toLowerCase() : norm(a) === norm(b);
-}
-
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
@@ -346,7 +281,7 @@ export interface DiscoverOptions {
 export async function discoverCdpEndpoints(options: DiscoverOptions = {}): Promise<CdpEndpoint[]> {
   const useProcesses = options.processes !== false;
   const hints = useProcesses ? await processHints(options.thorough ?? false) : [];
-  const mPort = managedPort();
+  const mPort = readManagedPort();
   const ports = new Set<number>(options.ports ?? defaultScanPorts());
   if (mPort && useProcesses) ports.add(mPort);
   for (const h of hints) ports.add(h.port);
@@ -359,7 +294,6 @@ export async function discoverCdpEndpoints(options: DiscoverOptions = {}): Promi
     (e): e is CdpEndpoint => e !== null,
   );
 
-  const mPid = managedPid();
   const seen = new Set<string>();
   const out: CdpEndpoint[] = [];
   for (const ep of found.sort((a, b) => a.port - b.port)) {
@@ -370,9 +304,7 @@ export async function discoverCdpEndpoints(options: DiscoverOptions = {}): Promi
       ep.pid = hint.pid;
       ep.userDataDir = hint.userDataDir;
     }
-    ep.managed = ep.userDataDir
-      ? samePath(ep.userDataDir, MANAGED_USER_DATA_DIR)
-      : ep.port === mPort || (mPid !== null && ep.pid === mPid);
+    ep.managed = isManagedDebugger(ep.host, ep.port, ep.webSocketDebuggerUrl);
     out.push(ep);
   }
   return out;
@@ -414,10 +346,12 @@ export async function resolveCdpEndpoint(options: ResolveOptions = {}): Promise<
     if (ep) return { host: ep.host, port: ep.port, source: "explicit" };
   }
 
-  const mPort = managedPort();
+  const mPort = readManagedPort();
   if (mPort && usable("127.0.0.1", mPort)) {
     const ep = await inspectCdp("127.0.0.1", mPort);
-    if (ep) return { host: ep.host, port: ep.port, source: "managed" };
+    if (ep && isManagedDebugger(ep.host, ep.port, ep.webSocketDebuggerUrl)) {
+      return { host: ep.host, port: ep.port, source: "managed" };
+    }
   }
 
   if (cdpDiscoveryMode() !== "off") {

@@ -73,6 +73,30 @@ describe("JournalManager", () => {
     assert.equal(entries[1].action, "click");
   });
 
+  it("backs off a failed journal independently and retries it during final flush", (t) => {
+    const { store, manager, dir } = makeManager();
+    dirs.push(dir);
+    const write = store.write.bind(store);
+    let failedWrites = 0;
+    let writable = false;
+    t.mock.method(store, "write", (file: string, value: unknown) => {
+      if (file === "journal-one.json" && !writable) {
+        failedWrites++;
+        throw new Error("simulated disk full");
+      }
+      write(file, value);
+    });
+    manager.record("one", "click");
+    manager.record("two", "wait");
+    manager.flushAll();
+    manager.flushAll();
+    assert.equal(failedWrites, 1);
+    assert.equal(new JournalManager(store).getRecent("two")[0].action, "wait");
+    writable = true;
+    manager.flushAll(true);
+    assert.equal(new JournalManager(store).getRecent("one")[0].action, "click");
+  });
+
   it("seq numbers are monotonically increasing", () => {
     const { manager, dir } = makeManager();
     dirs.push(dir);

@@ -15,9 +15,11 @@ import path from "node:path";
 import {
   browserIdFor,
   currentManagedBrowserDir,
+  isManagedDebugger,
   discoverCdpEndpoints,
   explainCdpFailure,
   inspectCdp,
+  isIsolatedUserDataDir,
   isLoopbackHost,
   isProcessAlive,
   launchManagedBrowser,
@@ -31,6 +33,7 @@ import {
   type BrowserDisplayMode,
   type BrowserInfo,
   type BrowserModeInfo,
+  type BrowserWindowModeInfo,
   type CdpAddress,
   type LaunchManagedBrowserOptions,
   type Request,
@@ -46,6 +49,13 @@ import type { StateStore } from "./state-store.js";
 /** Attached browsers, re-attached on the next daemon start (e.g. after a tray mode switch). */
 const ATTACHED_FILE = "attached-browsers.json";
 
+type AttachmentResult = { id: string; already: boolean };
+interface Attaching {
+  controller: AbortController;
+  conn?: CdpConnection;
+  result: Promise<AttachmentResult>;
+}
+
 type JsonObject = Record<string, unknown>;
 
 export interface PoolTarget extends CdpTargetInfo {
@@ -56,7 +66,9 @@ export interface BrowserPoolOptions {
   windowDriver?: WindowModeDriver;
   launcher?: (port: number, opts?: LaunchManagedBrowserOptions) => Promise<{ host: string; port: number } | null>;
   platform?: NodeJS.Platform;
-  /** Override managed-browser check (for isolated fake-CDP unit tests). */
+  /** Do not load, persist or restore other runs' attachments in a pinned daemon. */
+  strictCdp?: boolean;
+  /** Force `main` to be treated as managed (tests). */
   forceManaged?: boolean;
 }
 
@@ -70,17 +82,25 @@ export class BrowserPool {
   private readonly windowDriver: WindowModeDriver;
   private readonly launcher: (port: number, opts?: LaunchManagedBrowserOptions) => Promise<{ host: string; port: number } | null>;
   private readonly platform: NodeJS.Platform;
+  private readonly strictCdp: boolean;
   private readonly forceManaged: boolean;
+  private readonly desired = new Map<string, CdpAddress>();
+  private readonly attaching = new Map<string, Attaching>();
+  private readonly retries = new Map<string, ReturnType<typeof setTimeout>>();
+  private stopped = false;
 
   private modeSwitchInFlight = false;
   private swapBarrier: Promise<void> | null = null;
   /** Complete admitted commands, including time spent outside CDP and in tab queues. */
   private readonly activeCommands = new Set<Promise<void>>();
+  private guardEpoch = 0;
+  private stealthSweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly stealthSweepTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private virtualStealthState: boolean | null = null;
+  private readonly virtualStealthStates = new Map<string, boolean>();
   private cachedManagedPid: number | null = null;
   private cachedManagedPort: number | null = null;
-  /** Tracks stealth state when running against windowless fake CDP servers in tests. */
-  private virtualStealthState: boolean | null = null;
-  private stealthSweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly browserProcessCache = new Map<string, { debuggerUrl: string | null; pid: number | null; userDataDir?: string }>();
 
   constructor(main: CdpConnection, private readonly store?: StateStore, options: BrowserPoolOptions = {}) {
     this.main = main;
@@ -88,22 +108,28 @@ export class BrowserPool {
     this.windowDriver = options.windowDriver ?? windowsStealth;
     this.launcher = options.launcher ?? launchManagedBrowser;
     this.platform = options.platform ?? process.platform;
+    this.strictCdp = options.strictCdp ?? false;
     this.forceManaged = options.forceManaged ?? false;
+    const saved = this.strictCdp ? [] : store?.read<CdpAddress[]>(ATTACHED_FILE);
+    if (Array.isArray(saved)) {
+      for (const addr of saved) {
+        if (addr && typeof addr.host === "string" && Number.isInteger(addr.port) && addr.port > 0 && addr.port <= 65535) {
+          this.desired.set(browserIdFor(addr.host, addr.port), addr);
+        }
+      }
+    }
   }
 
-  /** Browsers attached in a previous daemon run. */
-  savedAttachments(): CdpAddress[] {
-    return this.store?.read<CdpAddress[]>(ATTACHED_FILE) ?? [];
+  /** Try each desired endpoint once now. Offline entries keep retrying until detached. */
+  async restoreAttachments(): Promise<void> {
+    if (this.strictCdp || this.stopped) return;
+    await Promise.all([...this.desired].map(async ([id, addr]) => {
+      try { await this.attach(addr); } catch { this.scheduleRetry(id, 0); }
+    }));
   }
 
   private saveAttachments(): void {
-    this.store?.write(ATTACHED_FILE, [...this.extra.values()].map((c) => ({ host: c.host, port: c.port })));
-  }
-
-  /** Drop a saved attachment that could not be restored. */
-  forgetAttachment(addr: CdpAddress): void {
-    const id = browserIdFor(addr.host, addr.port);
-    this.store?.write(ATTACHED_FILE, this.savedAttachments().filter((a) => browserIdFor(a.host, a.port) !== id));
+    if (!this.strictCdp) this.store?.write(ATTACHED_FILE, [...this.desired.values()]);
   }
 
   private all(): CdpConnection[] {
@@ -114,6 +140,12 @@ export class BrowserPool {
   primary(): CdpConnection {
     if (this.main.connected) return this.main;
     return [...this.extra.values()].find((c) => c.connected) ?? this.main;
+  }
+
+  get connectedBrowserCount(): number {
+    let count = this.main.connected ? 1 : 0;
+    for (const conn of this.extra.values()) if (conn.connected) count++;
+    return count;
   }
 
   get connected(): boolean {
@@ -147,8 +179,10 @@ export class BrowserPool {
       clearTimeout(this.stealthSweepTimer);
       this.stealthSweepTimer = null;
     }
-    this.main.onPageTargetCreated = null;
+    for (const timer of this.stealthSweepTimers.values()) clearTimeout(timer);
+    this.stealthSweepTimers.clear();
     for (const c of this.all()) {
+      c.onPageTargetCreated = null;
       c.disconnect();
     }
   }
@@ -433,6 +467,9 @@ export class BrowserPool {
       throw new Error(`Browser ${conn.browserId} is the daemon's default browser and can't be detached; stop the daemon instead`);
     }
     const id = conn.browserId;
+    this.armStealthPopupGuardFor(conn, 0, false);
+    this.virtualStealthStates.delete(id);
+    this.browserProcessCache.delete(id);
     this.extra.delete(id);
     this.saveAttachments();
     conn.disconnect();
@@ -443,6 +480,44 @@ export class BrowserPool {
     return id;
   }
 
+  /** Restore a stealth-hidden external browser before detaching so it never becomes a lost ghost window. */
+  async detachAndRestore(ref: string): Promise<string> {
+    const conn = this.find(ref);
+    if (!conn) throw new Error(`Browser not attached: ${ref}`);
+    if (conn === this.main) {
+      throw new Error(`Browser ${conn.browserId} is the daemon's default browser and can't be detached; stop the daemon instead`);
+    }
+    await this.restoreExternalConnectionIfHidden(conn);
+    return this.detach(ref);
+  }
+
+  /** Restore any stealth-hidden external (non-managed) browser windows on daemon shutdown. */
+  async restoreExternalHiddenWindows(): Promise<void> {
+    if (this.platform !== "win32") return;
+    const candidates = [this.main, ...this.extra.values()];
+    await Promise.all(candidates.map(async (conn) => {
+      if (!conn.connected) return;
+      if (conn === this.main && (await this.isMainManaged())) return;
+      await this.restoreExternalConnectionIfHidden(conn);
+    }));
+  }
+
+  private async restoreExternalConnectionIfHidden(conn: CdpConnection): Promise<void> {
+    if (this.platform !== "win32" || !conn.connected || !isLoopbackHost(conn.host)) return;
+    if (await this.isConnectionManaged(conn)) return;
+    const proc = await this.resolveExtraProcess(conn);
+    if (!proc.pid || !isProcessAlive(proc.pid) || !isIsolatedUserDataDir(proc.userDataDir)) return;
+    const trackedHidden = this.virtualStealthStates.get(conn.browserId) === true;
+    const winHidden = trackedHidden
+      ? true
+      : await this.windowDriver.status(proc.pid).then((s) => s.windowCount > 0 && s.stealth).catch(() => false);
+    if (winHidden) {
+      this.armStealthPopupGuardFor(conn, 0, false);
+      await this.windowDriver.show(proc.pid, false).catch(() => {});
+      this.virtualStealthStates.set(conn.browserId, false);
+    }
+  }
+
   /** Reconnect a dropped attached browser with capped backoff until it returns or is detached. */
   private async reconnect(id: string, conn: CdpConnection): Promise<void> {
     console.error(`[Daemon] Attached browser ${id} dropped; reconnecting in the background...`);
@@ -451,6 +526,7 @@ export class BrowserPool {
       if (this.extra.get(id) !== conn) return;
       try {
         await conn.connect();
+        this.browserProcessCache.delete(id);
         console.error(`[Daemon] Attached browser ${id} reconnected`);
         return;
       } catch {}
@@ -531,6 +607,47 @@ export class BrowserPool {
     }
   }
 
+  private isNativeHeadless(conn: CdpConnection): boolean {
+    return /\bHeadlessChrome\b/i.test(conn.userAgent ?? "");
+  }
+
+  private async isConnectionManaged(conn: CdpConnection): Promise<boolean> {
+    if (conn === this.main) return this.isMainManaged();
+    return isLoopbackHost(conn.host) && isManagedDebugger(conn.host, conn.port, conn.debuggerUrl);
+  }
+
+  private async resolveExtraProcess(conn: CdpConnection): Promise<{ pid: number | null; userDataDir?: string }> {
+    if (!conn.connected || !isLoopbackHost(conn.host) || this.platform !== "win32") {
+      return { pid: null };
+    }
+    const cached = this.browserProcessCache.get(conn.browserId);
+    if (cached && cached.debuggerUrl === conn.debuggerUrl && cached.pid && isProcessAlive(cached.pid)) {
+      return { pid: cached.pid, userDataDir: cached.userDataDir };
+    }
+    if (!this.windowDriver.findBrowserProcess) {
+      return { pid: null };
+    }
+    const match = await this.windowDriver.findBrowserProcess(conn.port).catch(() => null);
+    const result = match && isProcessAlive(match.pid)
+      ? { pid: match.pid, userDataDir: match.userDataDir }
+      : { pid: null };
+    this.browserProcessCache.set(conn.browserId, {
+      debuggerUrl: conn.debuggerUrl,
+      pid: result.pid,
+      userDataDir: result.userDataDir,
+    });
+    return result;
+  }
+
+  private buildBrowserLabel(managed: boolean, userDataDir?: string, origin?: "auto" | "attached"): string {
+    if (managed) return "受管";
+    if (userDataDir) {
+      const base = path.basename(userDataDir.replace(/(?:\|\/)+$/, ""));
+      if (base) return base;
+    }
+    return origin === "auto" ? "外部默认" : "用户";
+  }
+
   private armStealthPopupGuard(enabled: boolean): void {
     if (this.stealthSweepTimer) {
       clearTimeout(this.stealthSweepTimer);
@@ -552,6 +669,35 @@ export class BrowserPool {
     };
   }
 
+  private armStealthPopupGuardFor(conn: CdpConnection, pid: number, enabled: boolean): void {
+    if (conn === this.main) {
+      this.armStealthPopupGuard(enabled);
+      return;
+    }
+    const existing = this.stealthSweepTimers.get(conn.browserId);
+    if (existing) {
+      clearTimeout(existing);
+      this.stealthSweepTimers.delete(conn.browserId);
+    }
+    if (!enabled || this.platform !== "win32" || !pid) {
+      conn.onPageTargetCreated = null;
+      return;
+    }
+    conn.onPageTargetCreated = () => {
+      if (this.stealthSweepTimers.has(conn.browserId)) return;
+      const timer = setTimeout(() => {
+        this.stealthSweepTimers.delete(conn.browserId);
+        void this.resolveExtraProcess(conn).then((proc) => {
+          if (proc.pid && isProcessAlive(proc.pid)) {
+            void this.windowDriver.hide(proc.pid).catch(() => {});
+          }
+        });
+      }, 80);
+      timer.unref?.();
+      this.stealthSweepTimers.set(conn.browserId, timer);
+    };
+  }
+
   /**
    * Ensure the managed browser's OS window matches the configured initial mode
    * immediately after connecting (or reconnecting).
@@ -565,6 +711,7 @@ export class BrowserPool {
     const desired = resolveInitialBrowserMode();
     if (desired.mode === "headless" && !desired.nativeHeadless) {
       this.virtualStealthState = true;
+      this.virtualStealthStates.set(this.main.browserId, true);
       this.armStealthPopupGuard(true);
       const pid = await this.resolveManagedPid();
       if (pid) {
@@ -572,6 +719,7 @@ export class BrowserPool {
       }
     } else {
       this.virtualStealthState = false;
+      this.virtualStealthStates.set(this.main.browserId, false);
       this.armStealthPopupGuard(false);
     }
   }
@@ -617,138 +765,440 @@ export class BrowserPool {
     };
   }
 
+  private async inspectAllBrowserModes(knownTrayRunning?: boolean): Promise<{
+    modes: BrowserWindowModeInfo[];
+    conns: Map<string, CdpConnection>;
+    pids: Map<string, number>;
+    trayRunning: boolean;
+  }> {
+    const primary = this.primary();
+    const tabs = this.tabManager.allTabs();
+    const list = this.all().filter((c) => c !== this.main || c.connected || this.extra.size === 0);
+    const conns = new Map<string, CdpConnection>();
+    const pids = new Map<string, number>();
+
+    let trayRunning = knownTrayRunning ?? false;
+    if (knownTrayRunning === undefined && this.platform === "win32") {
+      trayRunning = await this.windowDriver.status(0).then((s) => s.trayRunning).catch(() => false);
+    }
+
+    const meta = await Promise.all(list.map(async (conn) => {
+      conns.set(conn.browserId, conn);
+      const managed = conn.connected ? await this.isConnectionManaged(conn) : false;
+      let pid: number | null = null;
+      let userDataDir: string | undefined;
+      if (conn.connected && this.platform === "win32" && isLoopbackHost(conn.host) && !this.isNativeHeadless(conn)) {
+        if (conn === this.main && managed) {
+          pid = await this.resolveManagedPid();
+        } else {
+          const proc = await this.resolveExtraProcess(conn);
+          pid = proc.pid;
+          userDataDir = proc.userDataDir;
+        }
+      }
+      return { conn, managed, pid, userDataDir };
+    }));
+
+    const pidCounts = new Map<number, number>();
+    for (const item of meta) {
+      if (item.pid && isProcessAlive(item.pid)) {
+        pidCounts.set(item.pid, (pidCounts.get(item.pid) ?? 0) + 1);
+      }
+    }
+
+    const modes = await Promise.all(meta.map(async ({ conn, managed, pid, userDataDir }): Promise<BrowserWindowModeInfo> => {
+      const origin: "auto" | "attached" = conn === this.main ? "auto" : "attached";
+      const tabCount = tabs.filter((t) => t.browserId === conn.browserId).length;
+      const base = {
+        id: conn.browserId,
+        host: conn.host,
+        port: conn.port,
+        managed,
+        label: this.buildBrowserLabel(managed, userDataDir, origin),
+        tabs: tabCount,
+        connected: conn.connected,
+        default: conn === primary,
+        origin,
+        ...(userDataDir ? { userDataDir } : {}),
+        ...(pid ? { pid } : {}),
+      };
+
+      if (!conn.connected) {
+        return { ...base, mode: null, backend: null, canStealth: false, canToggle: false, readonlyReason: "重连中" };
+      }
+      if (!isLoopbackHost(conn.host)) {
+        const native = this.isNativeHeadless(conn);
+        return {
+          ...base,
+          mode: native ? "headless" : "headed",
+          backend: native ? "native" : null,
+          canStealth: false,
+          canToggle: false,
+          readonlyReason: "远程浏览器不支持窗口隐身",
+        };
+      }
+      if (this.isNativeHeadless(conn)) {
+        const canToggle = conn === this.main && managed;
+        return {
+          ...base,
+          mode: "headless",
+          backend: "native",
+          canStealth: false,
+          canToggle,
+          ...(canToggle ? {} : { readonlyReason: "原生无头实例不支持窗口显隐" }),
+        };
+      }
+      if (this.platform !== "win32") {
+        const canToggle = conn === this.main && managed;
+        return {
+          ...base,
+          mode: "headed",
+          backend: "native",
+          canStealth: false,
+          canToggle,
+          ...(canToggle ? {} : { readonlyReason: "非 Windows 平台不支持接管窗口隐身" }),
+        };
+      }
+
+      if (conn === this.main && managed) {
+        const st = await this.windowDriver.status(pid).catch(() => ({ trayRunning: false, windowCount: 0, stealth: false }));
+        trayRunning = trayRunning || st.trayRunning;
+        const isStealth = st.windowCount > 0
+          ? st.stealth
+          : (this.virtualStealthState ?? readPersistedBrowserMode() === "headless");
+        if (pid) pids.set(conn.browserId, pid);
+        return {
+          ...base,
+          mode: isStealth ? "headless" : "headed",
+          backend: "stealth",
+          canStealth: true,
+          canToggle: true,
+        };
+      }
+
+      if (!pid || !isProcessAlive(pid)) {
+        return {
+          ...base,
+          mode: "headed",
+          backend: null,
+          canStealth: false,
+          canToggle: false,
+          readonlyReason: "未定位到独立本机浏览器进程，仅支持查看",
+        };
+      }
+      if (!isIsolatedUserDataDir(userDataDir)) {
+        return {
+          ...base,
+          mode: "headed",
+          backend: null,
+          canStealth: false,
+          canToggle: false,
+          readonlyReason: "与日常浏览器共用配置目录，仅支持查看，禁止隐藏以免误藏主窗口",
+        };
+      }
+      if ((pidCounts.get(pid) ?? 0) > 1) {
+        return {
+          ...base,
+          mode: "headed",
+          backend: null,
+          canStealth: false,
+          canToggle: false,
+          readonlyReason: "与其他窗口共用浏览器进程，仅支持查看",
+        };
+      }
+
+      const st = await this.windowDriver.status(pid).catch(() => ({ trayRunning: false, windowCount: 0, stealth: false }));
+      trayRunning = trayRunning || st.trayRunning;
+      const isStealth = st.windowCount > 0
+        ? st.stealth
+        : (this.virtualStealthStates.get(conn.browserId) ?? false);
+      this.virtualStealthStates.set(conn.browserId, isStealth);
+      pids.set(conn.browserId, pid);
+      return {
+        ...base,
+        mode: isStealth ? "headless" : "headed",
+        backend: "stealth",
+        canStealth: true,
+        canToggle: true,
+      };
+    }));
+
+    return { modes, conns, pids, trayRunning };
+  }
+
+  private async applyStealthToConnection(
+    conn: CdpConnection,
+    pid: number | null,
+    managed: boolean,
+    currentMode: "headed" | "headless" | null,
+    action: BrowserDisplayMode,
+    focus: boolean,
+    knownTrayRunning: boolean,
+  ): Promise<BrowserModeInfo> {
+    if (currentMode === action) {
+      let windowFocused: boolean | undefined;
+      let trayRunning = knownTrayRunning;
+      if (action === "headed" && focus && pid) {
+        const pages = (await conn.getTargets().catch(() => [])).filter((t) => t.type === "page");
+        if (pages.length === 0) {
+          const created = await conn.browserCommand<{ targetId: string }>("Target.createTarget", { url: "about:blank", background: true });
+          await conn.attachAndEnable(created.targetId);
+        }
+        const res = await this.windowDriver.show(pid, true);
+        trayRunning = res.trayRunning;
+        windowFocused = Boolean(res.focused);
+      }
+      if (conn === this.main && managed) {
+        writePersistedBrowserMode(action);
+      }
+      return {
+        mode: action,
+        backend: "stealth",
+        connected: true,
+        trayRunning,
+        changed: false,
+        restarted: false,
+        ...(windowFocused !== undefined ? { windowFocused } : {}),
+      };
+    }
+
+    if (action === "headless") {
+      this.armStealthPopupGuardFor(conn, pid ?? 0, true);
+      let trayRunning = knownTrayRunning;
+      if (pid) {
+        const res = await this.windowDriver.hide(pid);
+        trayRunning = res.trayRunning;
+      }
+      this.virtualStealthStates.set(conn.browserId, true);
+      if (conn === this.main && managed) {
+        this.virtualStealthState = true;
+        writePersistedBrowserMode("headless");
+      }
+      return {
+        mode: "headless",
+        backend: "stealth",
+        connected: true,
+        trayRunning,
+        changed: true,
+        restarted: false,
+      };
+    }
+
+    // stealth headless -> headed
+    this.armStealthPopupGuardFor(conn, pid ?? 0, false);
+    const pages = (await conn.getTargets().catch(() => [])).filter((t) => t.type === "page");
+    if (pages.length === 0) {
+      const created = await conn.browserCommand<{ targetId: string }>("Target.createTarget", { url: "about:blank", background: true });
+      await conn.attachAndEnable(created.targetId);
+    }
+    let trayRunning = knownTrayRunning;
+    let windowFocused: boolean | undefined;
+    if (pid) {
+      const res = await this.windowDriver.show(pid, focus);
+      trayRunning = res.trayRunning;
+      if (focus) windowFocused = Boolean(res.focused);
+    }
+    this.virtualStealthStates.set(conn.browserId, false);
+    if (conn === this.main && managed) {
+      this.virtualStealthState = false;
+      writePersistedBrowserMode("headed");
+    }
+    return {
+      mode: "headed",
+      backend: "stealth",
+      connected: true,
+      trayRunning,
+      changed: true,
+      restarted: false,
+      ...(windowFocused !== undefined ? { windowFocused } : {}),
+    };
+  }
+
+  private async switchManagedMain(
+    action: BrowserDisplayMode,
+    wantNative: boolean,
+    focus: boolean,
+    sessions?: SessionManager,
+  ): Promise<BrowserModeInfo> {
+    const current = await this.getModeStatus();
+    if (!current.connected || current.mode === null) {
+      throw new Error("受管浏览器连接已变化，请稍后重试。");
+    }
+    const canStealth = this.platform === "win32" && current.backend === "stealth" && !(wantNative || this.platform !== "win32");
+    if (canStealth) {
+      const pid = await this.resolveManagedPid();
+      return this.applyStealthToConnection(this.main, pid, true, current.mode, action, focus, current.trayRunning);
+    }
+
+    const targetBackend = (wantNative || this.platform !== "win32") && action === "headless"
+      ? "native"
+      : (this.platform === "win32" ? "stealth" : "native");
+    if (current.mode === action && current.backend === targetBackend) {
+      return {
+        mode: action,
+        backend: current.backend,
+        connected: true,
+        trayRunning: current.trayRunning,
+        changed: false,
+        restarted: false,
+      };
+    }
+    return this.hotSwapMainBrowser(
+      action,
+      targetBackend === "native" && action === "headless",
+      focus,
+      sessions,
+    );
+  }
+
   /**
-   * Handle `browser_mode` (`status` | `headed` | `headless`).
-   * On Windows, switches instantaneously via Win32 window virtualization without
-   * restarting Chrome or losing DOM state. Falls back to a daemon-supervised
-   * hot-swap (preserving tabs, leases, and short tab IDs) only when migrating
-   * out of a native `--headless=new` process or on non-Windows platforms.
+   * Handle `browser_mode` (`status` | `headed` | `headless`), targeting either
+   * the managed `main` browser (default), a specific browser ID (`request.browser`),
+   * or `"all"` controllable local browsers.
    */
   async handleBrowserMode(request: Request, sessions?: SessionManager): Promise<Response> {
     const action = request.modeAction ?? "status";
+    const targetRef = request.browser?.trim();
+
     if (action === "status") {
-      return ok(request.id, { browserMode: await this.getModeStatus() });
+      const mainStatus = await this.getModeStatus();
+      const { modes } = await this.inspectAllBrowserModes(mainStatus.trayRunning);
+      if (targetRef && targetRef !== "all") {
+        const resolved = this.find(targetRef)?.browserId ?? targetRef;
+        const entry = modes.find((m) => m.id === resolved);
+        const browserMode: BrowserModeInfo = entry
+          ? {
+              mode: entry.mode,
+              backend: entry.backend,
+              connected: entry.connected,
+              trayRunning: mainStatus.trayRunning,
+            }
+          : { mode: null, backend: null, connected: false, trayRunning: mainStatus.trayRunning };
+        return ok(request.id, { browserMode, browserModes: modes });
+      }
+      return ok(request.id, { browserMode: mainStatus, browserModes: modes });
     }
+
     if (action !== "headed" && action !== "headless") {
       return fail(request.id, `无效的浏览器模式：${String(action)}`);
     }
     if (this.modeSwitchInFlight) {
       return fail(request.id, "已有浏览器模式切换请求正在执行，请稍后重试。");
     }
-    if (!this.main.connected) {
+    if (!targetRef && !this.main.connected) {
       return fail(request.id, "受管浏览器尚未连接，请稍后重试。");
     }
+
     this.modeSwitchInFlight = true;
     try {
-      if (!(await this.isMainManaged())) {
-        return fail(request.id, "当前默认浏览器不是 ma-browser 受管浏览器，不支持切换有头/无头模式。");
+      if (!targetRef) {
+        if (!(await this.isMainManaged())) {
+          return fail(request.id, "当前默认浏览器不是 ma-browser 受管浏览器，不支持切换有头/无头模式。");
+        }
+        const browserMode = await this.switchManagedMain(
+          action,
+          Boolean(request.nativeHeadless),
+          Boolean(request.focus),
+          sessions,
+        );
+        const { modes } = await this.inspectAllBrowserModes(browserMode.trayRunning);
+        return ok(request.id, { browserMode, browserModes: modes });
       }
-      const current = await this.getModeStatus();
-      if (!current.connected || current.mode === null) {
-        return fail(request.id, "受管浏览器连接已变化，请稍后重试。");
-      }
-      const wantNative = Boolean(request.nativeHeadless) || this.platform !== "win32";
-      const canStealth = this.platform === "win32" && current.backend === "stealth" && !wantNative;
 
-      if (canStealth) {
-        const pid = await this.resolveManagedPid();
-        if (current.mode === action) {
-          let windowFocused: boolean | undefined;
-          let trayRunning = current.trayRunning;
-          if (action === "headed" && request.focus && pid) {
-            const pages = (await this.main.getTargets().catch(() => [])).filter((t) => t.type === "page");
-            if (pages.length === 0) {
-              await this.createTarget("about:blank");
-            }
-            const res = await this.windowDriver.show(pid, true);
-            trayRunning = res.trayRunning;
-            windowFocused = Boolean(res.focused);
-          }
-          writePersistedBrowserMode(action);
-          return ok(request.id, {
-            browserMode: {
-              mode: action,
-              backend: "stealth",
-              connected: true,
-              trayRunning,
-              changed: false,
-              restarted: false,
-              ...(windowFocused !== undefined ? { windowFocused } : {}),
-            },
-          });
+      if (targetRef === "all") {
+        const { modes, conns, pids, trayRunning: initTray } = await this.inspectAllBrowserModes();
+        const controllable = modes.filter((m) => m.connected && m.canToggle);
+        if (controllable.length === 0) {
+          return fail(request.id, "当前没有可切换窗口显隐的已连接浏览器。");
         }
-
-        if (action === "headless") {
-          this.armStealthPopupGuard(true);
-          let trayRunning = current.trayRunning;
-          if (pid) {
-            const res = await this.windowDriver.hide(pid);
-            trayRunning = res.trayRunning;
-          }
-          this.virtualStealthState = true;
-          writePersistedBrowserMode("headless");
-          return ok(request.id, {
-            browserMode: {
-              mode: "headless",
-              backend: "stealth",
-              connected: true,
-              trayRunning,
-              changed: true,
-              restarted: false,
-            },
-          });
-        }
-
-        // stealth headless -> headed
-        this.armStealthPopupGuard(false);
-        const pages = (await this.main.getTargets().catch(() => [])).filter((t) => t.type === "page");
-        if (pages.length === 0) {
-          await this.createTarget("about:blank");
-        }
-        let trayRunning = current.trayRunning;
+        const focusTarget = controllable.find((m) => m.default)?.id ?? controllable[controllable.length - 1].id;
+        let changed = false;
+        let restarted = false;
+        let trayRunning = initTray;
         let windowFocused: boolean | undefined;
-        if (pid) {
-          const res = await this.windowDriver.show(pid, Boolean(request.focus));
-          trayRunning = res.trayRunning;
-          if (request.focus) windowFocused = Boolean(res.focused);
+        let anySucceeded = false;
+        const failures: string[] = [];
+
+        for (const entry of controllable) {
+          const shouldFocus = Boolean(request.focus) && action === "headed" && entry.id === focusTarget;
+          try {
+            let res: BrowserModeInfo;
+            if (entry.id === this.main.browserId && entry.managed) {
+              res = await this.switchManagedMain(action, Boolean(request.nativeHeadless), shouldFocus, sessions);
+            } else {
+              const conn = conns.get(entry.id);
+              const pid = pids.get(entry.id) ?? null;
+              if (!conn || !pid) throw new Error(`未定位到浏览器 ${entry.id} 的进程`);
+              res = await this.applyStealthToConnection(conn, pid, entry.managed, entry.mode, action, shouldFocus, trayRunning);
+            }
+            anySucceeded = true;
+            changed = changed || Boolean(res.changed);
+            restarted = restarted || Boolean(res.restarted);
+            trayRunning = trayRunning || res.trayRunning;
+            if (res.windowFocused !== undefined) {
+              windowFocused = Boolean(windowFocused) || res.windowFocused;
+            }
+          } catch (err) {
+            failures.push(`${entry.id}: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
-        this.virtualStealthState = false;
-        writePersistedBrowserMode("headed");
-        return ok(request.id, {
-          browserMode: {
-            mode: "headed",
-            backend: "stealth",
-            connected: true,
-            trayRunning,
-            changed: true,
-            restarted: false,
-            ...(windowFocused !== undefined ? { windowFocused } : {}),
-          },
-        });
+
+        if (!anySucceeded) {
+          return fail(request.id, failures.join("；") || "切换全部浏览器窗口失败。");
+        }
+        const { modes: updatedModes } = await this.inspectAllBrowserModes(trayRunning);
+        if (failures.length > 0) {
+          return fail(request.id, `部分浏览器切换失败：${failures.join("；")}`);
+        }
+        const browserMode: BrowserModeInfo = {
+          mode: action,
+          backend: "stealth",
+          connected: true,
+          trayRunning,
+          changed,
+          restarted,
+          ...(windowFocused !== undefined ? { windowFocused } : {}),
+        };
+        return ok(request.id, { browserMode, browserModes: updatedModes });
       }
 
-      // Fallback path: native `--headless=new` <-> `headed` hot-swap.
-      const targetBackend = wantNative && action === "headless" ? "native" : (this.platform === "win32" ? "stealth" : "native");
-      if (current.mode === action && current.backend === targetBackend) {
-        return ok(request.id, {
-          browserMode: {
-            mode: action,
-            backend: current.backend,
-            connected: true,
-            trayRunning: current.trayRunning,
-            changed: false,
-            restarted: false,
-          },
-        });
+      // Specific browser target
+      const conn = this.find(targetRef);
+      if (!conn) {
+        return fail(request.id, `未找到浏览器：${targetRef}`);
+      }
+      if (!conn.connected) {
+        return fail(request.id, `浏览器 ${conn.browserId} 尚未连接，请稍后重试。`);
+      }
+      const managed = await this.isConnectionManaged(conn);
+      if (conn === this.main && managed) {
+        const browserMode = await this.switchManagedMain(
+          action,
+          Boolean(request.nativeHeadless),
+          Boolean(request.focus),
+          sessions,
+        );
+        const { modes } = await this.inspectAllBrowserModes(browserMode.trayRunning);
+        return ok(request.id, { browserMode, browserModes: modes });
       }
 
-      const swapped = await this.hotSwapMainBrowser(
+      const { modes, pids, trayRunning } = await this.inspectAllBrowserModes();
+      const entry = modes.find((m) => m.id === conn.browserId);
+      if (!entry || !entry.canStealth) {
+        return fail(request.id, entry?.readonlyReason ?? `浏览器 ${conn.browserId} 不支持窗口显隐控制。`);
+      }
+      const pid = pids.get(conn.browserId) ?? null;
+      const browserMode = await this.applyStealthToConnection(
+        conn,
+        pid,
+        managed,
+        entry.mode,
         action,
-        targetBackend === "native" && action === "headless",
         Boolean(request.focus),
-        sessions,
+        trayRunning,
       );
-      return ok(request.id, { browserMode: swapped });
+      const { modes: updatedModes } = await this.inspectAllBrowserModes(browserMode.trayRunning);
+      return ok(request.id, { browserMode, browserModes: updatedModes });
     } catch (err) {
       return fail(request.id, err);
     } finally {
@@ -1021,7 +1471,7 @@ export async function dispatchCdpRequest(pool: BrowserPool, request: Request): P
 
     if (request.action === "cdp_detach") {
       if (!request.browser) return fail(request.id, "Missing browser to detach");
-      const id = pool.detach(request.browser);
+      const id = await pool.detachAndRestore(request.browser);
       return ok(request.id, { detached: id, browsers: pool.info() });
     }
 

@@ -12,6 +12,7 @@
     "dist",
     "scripts/windows-mode.ps1",
     "scripts/windows-tray.ps1",
+    "scripts/windows-tray-worker.ps1",
     "packages/shared/buildDomTree.js",
     "README.md",
     "LICENSE"
