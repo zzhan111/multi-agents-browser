@@ -56,9 +56,15 @@ async function closedPort(): Promise<number> {
 
 function setManagedPort(port: number | null): void {
   const file = path.join(home, "browser", "cdp-port");
-  if (port === null) return rmSync(file, { force: true });
+  const urlFile = path.join(home, "browser", "debugger-url");
+  if (port === null) {
+    rmSync(file, { force: true });
+    rmSync(urlFile, { force: true });
+    return;
+  }
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, String(port));
+  writeFileSync(urlFile, "ws://127.0.0.1:" + port + "/devtools/browser/fake-" + port);
 }
 
 const isolated = (ports: number[]) => ({ ports, processes: false });

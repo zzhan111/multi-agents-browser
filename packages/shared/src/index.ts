@@ -7,6 +7,7 @@ export {
   type ActionType,
   type BrowserInfo,
   type BrowserModeInfo,
+  type BrowserWindowModeInfo,
   type ConsoleMessageInfo,
   type DaemonStatus,
   type JSErrorInfo,
@@ -74,6 +75,7 @@ export {
   type LaunchManagedBrowserOptions,
   currentManagedBrowserDir,
   findBrowserExecutable,
+  isManagedDebugger,
   launchManagedBrowser,
   probeCdp,
   readManagedPid,
@@ -91,6 +93,8 @@ export {
   envCdpAddresses,
   explainCdpFailure,
   inspectCdp,
+  isDefaultUserDataDir,
+  isIsolatedUserDataDir,
   isLoopbackHost,
   parseCdpAddress,
   resolveCdpEndpoint,
@@ -131,6 +135,8 @@ export {
 
 export {
   browserMode,
+  browserModeDetail,
+  type BrowserModeDetail,
   type BrowserModeAction,
   type BrowserModeOptions,
   type BrowserModeStatus,
@@ -147,6 +153,7 @@ export {
   type PersistedBrowserMode,
   type WindowModeApplyResult,
   type WindowModeDriver,
+  type BrowserProcessMatch,
   type WindowModeStatusResult,
 } from "./windows-stealth.js";
 

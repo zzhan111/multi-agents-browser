@@ -34,7 +34,7 @@ import { historyCommand } from "./commands/history.js";
 import { shutdownCommand, startCommand, statusCommand } from "./commands/daemon.js";
 import { getDaemonPath } from "./daemon-manager.js";
 import { setJqExpression } from "./client.js";
-import { browserMode, type BrowserModeAction } from "@ma-browser/shared";
+import { browserModeDetail, type BrowserModeAction } from "@ma-browser/shared";
 
 declare const __BB_BROWSER_VERSION__: string;
 
@@ -66,7 +66,7 @@ ma-browser - AI Agent 浏览器自动化工具
   star                         ⭐ Star ma-browser on GitHub
 
 浏览器操作：
-  mode [status|headed|headless] 查询或切换有头/无头模式（无损切换，保留标签页与页面状态）
+  mode [status|headed|headless] 查询或切换有头/无头模式（支持 --browser <id|all>）
   open <url> [--tab]           打开 URL
   snapshot [-i] [-c] [-d <n>]  获取页面快照（--highlight 画出编号框）
   click <ref>                  点击元素
@@ -291,16 +291,24 @@ async function main(): Promise<void> {
       case "mode": {
         const action = parsed.args[0] ?? "status";
         if (!["status", "headed", "headless"].includes(action) || parsed.args.length > 1) {
-          throw new Error("用法：ma-browser mode [status|headed|headless] [--focus]");
+          throw new Error("用法：ma-browser mode [status|headed|headless] [--browser <id|all>] [--focus]");
         }
         const focus = process.argv.includes("--focus");
         const nativeHeadless = process.argv.includes("--native");
-        const result = await browserMode(action as BrowserModeAction, undefined, {
+        const browserIdx = process.argv.indexOf("--browser");
+        const browser = browserIdx >= 0 ? process.argv[browserIdx + 1] : undefined;
+        const detailResult = await browserModeDetail(action as BrowserModeAction, undefined, {
           ...(focus ? { focus: true } : {}),
           ...(nativeHeadless ? { nativeHeadless: true } : {}),
+          ...(browser !== undefined ? { browser } : {}),
         });
+        const result = detailResult.browserMode;
         if (parsed.flags.json) {
-          console.log(JSON.stringify(result));
+          console.log(JSON.stringify(
+            detailResult.browserModes
+              ? { ...result, browsers: detailResult.browserModes }
+              : result,
+          ));
         } else {
           const label =
             result.mode === "headed"
@@ -315,6 +323,18 @@ async function main(): Promise<void> {
               ? (result.restarted ? "已完成热切换，标签页已保留" : "已无损切换，标签页与页面状态已保留")
               : "当前已是该模式";
             console.log(`浏览器模式：${label}（${detail}）；托盘：${result.trayRunning ? "运行中" : "未运行"}`);
+          }
+          if (detailResult.browserModes && detailResult.browserModes.length > 0) {
+            for (const b of detailResult.browserModes) {
+              const state = !b.connected
+                ? "重连中"
+                : !b.canToggle
+                  ? `仅查看（${b.readonlyReason ?? "不支持隐藏"}）`
+                  : b.mode === "headless"
+                    ? "后台隐藏"
+                    : "显示中";
+              console.log(`  ${b.id.padEnd(6)} ${b.label} · ${b.tabs} 页 [${state}]`);
+            }
           }
         }
         break;

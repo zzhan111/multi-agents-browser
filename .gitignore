@@ -45,3 +45,4 @@ temp_*.json
 # Local agent configs
 .claude/
 .reasonix/
+.alma-snapshots

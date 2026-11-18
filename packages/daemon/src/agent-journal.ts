@@ -85,10 +85,20 @@ export class JournalManager {
     return this.getOrCreate(agentId).getRecent(limit);
   }
 
-  /** Flush all dirty journals to disk. Call periodically and before shutdown. */
-  flushAll(): void {
+  private readonly retryAfter = new Map<string, number>();
+
+  /** Failures stay dirty. Back off per journal so other agents can still persist. */
+  flushAll(finalAttempt = false): void {
+    const now = Date.now();
     for (const journal of this.journals.values()) {
-      journal.flush();
+      if (!finalAttempt && now < (this.retryAfter.get(journal.agentId) ?? 0)) continue;
+      try {
+        journal.flush();
+        this.retryAfter.delete(journal.agentId);
+      } catch (err) {
+        this.retryAfter.set(journal.agentId, now + 30_000);
+        console.warn(`[Daemon] Journal flush failed for ${journal.agentId}:`, err instanceof Error ? err.message : String(err));
+      }
     }
   }
 

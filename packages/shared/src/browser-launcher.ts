@@ -17,14 +17,14 @@
 
 import { execSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import path from "node:path";
 import { DAEMON_DIR } from "./daemon-client.js";
 import {
   readPersistedBrowserMode,
   resolveInitialBrowserMode,
-  windowsStealth,
   type BrowserDisplayMode,
 } from "./windows-stealth.js";
 
@@ -163,39 +163,15 @@ export function findBrowserExecutable(): string | null {
   return null;
 }
 
-/**
- * Kill any previously-launched managed browser and all its child processes.
- * This prevents zombie processes from interfering with new launches.
- */
-function killPreviousManagedBrowser(): void {
-  const pid = readManagedPid();
-
-  if (pid !== null) {
-    try {
-      if (process.platform === "win32") {
-        execSync(`taskkill /F /PID ${pid} /T`, { stdio: "ignore" });
-      } else {
-        process.kill(-pid, "SIGKILL");
-      }
-    } catch {
-      // best-effort: process may already be gone
-    }
-  }
-
-  // Sweep any orphaned renderer/GPU children that share our managed profile
-  // path — they accumulate when the browser process crashes without cleaning up.
-  // Match by command line only (no name filter) so Chrome, Edge, Brave, etc.
-  // are all covered.
-  if (process.platform === "win32") {
-    try {
-      execSync(
-        `wmic process where "commandline like '%ma-browser%profile%'" call terminate`,
-        { stdio: "ignore" },
-      );
-    } catch {
-      // best-effort
-    }
-  }
+/** Only the browser socket announced by a managed child identifies its launch.
+ * Legacy PID/port files remain discovery hints. Neither grants ownership. */
+export function isManagedDebugger(host: string, port: number, debuggerUrl: string | null): boolean {
+  if (!debuggerUrl || !PROBE_HOSTS.includes(host)) return false;
+  try {
+    const url = new URL(debuggerUrl);
+    if (url.origin !== `ws://${host}:${port}` || !/^\/devtools\/browser\/[\w-]+$/.test(url.pathname)) return false;
+    return readFileSync(path.join(currentManagedBrowserDir(), "debugger-url"), "utf8").trim() === debuggerUrl;
+  } catch { return false; }
 }
 
 /**
@@ -292,10 +268,6 @@ export async function launchManagedBrowser(
     }
   }
 
-  // Kill any previous managed browser + its orphaned child processes before
-  // launching a new one to ensure a clean startup.
-  killPreviousManagedBrowser();
-
   // The port passed in was free when the Rust tray checked it, but may have been
   // taken by the time we reach here (TOCTOU, or Windows port-exclusion zones that
   // only reject a bind from Chrome's all-interfaces listener). Verify at the Node
@@ -352,16 +324,31 @@ export async function launchManagedBrowser(
     ...(restoreSession ? [] : ["about:blank"]),
   ];
 
+  let announcedUrl = "";
+  let childExited = false;
   let launchedPid: number | undefined;
   try {
     const child = spawn(executable, args, {
       detached: true,
-      stdio: "ignore",
-      // Chromium is a GUI-subsystem binary (no console window). Passing windowsHide=true
-      // sets STARTUPINFO.wShowWindow=SW_HIDE, which suppresses Chrome's first HWND from
-      // Aura compositor visibility; off-screen bounds + windowsStealth.hide() handles stealth cleanly.
+      stdio: ["ignore", "ignore", "pipe"],
       windowsHide: !useWinStealth,
     });
+    // Only the new child's own stderr can establish provenance. A listener
+    // racing our bind, or a profile handoff to an existing Chromium, cannot.
+    let partial = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (announcedUrl) return;
+      const lines = (partial + chunk).split("\n");
+      partial = (lines.pop() ?? "").slice(-2048);
+      for (const line of lines) {
+        const match = /^DevTools listening on (ws:\/\/\S+)\s*$/.exec(line);
+        if (match) announcedUrl = match[1];
+      }
+    });
+    (child.stderr as typeof child.stderr & { unref?(): void }).unref?.();
+    child.once("error", () => { childExited = true; });
+    child.once("exit", () => { childExited = true; });
     launchedPid = child.pid;
     child.unref();
   } catch {
@@ -378,27 +365,25 @@ export async function launchManagedBrowser(
     await writeFile(path.join(browserDir, "browser-pid"), String(launchedPid), "utf8");
   }
 
-  // Browsers can take a while to bind the port after launching; poll both
-  // IPv4 and IPv6 for up to ~25s. In Windows stealth-headless mode, apply
-  // stealth window attributes as soon as the window appears so session-restored
-  // bounds cannot flash on the desktop or taskbar.
+  // Authenticate the listening endpoint against the child's announcement before
+  // publishing its identity. Windows applies stealth on verified daemon connect.
   const deadline = Date.now() + 25000;
-  let stealthApplied = false;
-  while (Date.now() < deadline) {
-    if (useWinStealth && mode === "headless" && launchedPid !== undefined && !stealthApplied) {
-      await windowsStealth
-        .hide(launchedPid)
-        .then((r) => {
-          if (r.affectedCount > 0) stealthApplied = true;
-        })
-        .catch(() => {});
-    }
-    const host = await probeCdp(launchPort);
-    if (host) {
-      if (useWinStealth && mode === "headless" && launchedPid !== undefined) {
-        await windowsStealth.hide(launchedPid).catch(() => {});
+  while (Date.now() < deadline && !childExited) {
+    if (announcedUrl) {
+      const url = new URL(announcedUrl);
+      if (PROBE_HOSTS.includes(url.hostname) && Number(url.port) === launchPort &&
+          /^\/devtools\/browser\/[\w-]+$/.test(url.pathname)) {
+        const version = await fetch(`http://${url.host}/json/version`, {
+          redirect: "error", signal: AbortSignal.timeout(1200),
+        }).then(r => r.ok ? (r.json() as Promise<{ webSocketDebuggerUrl?: unknown }>) : null).catch(() => null);
+        if (version?.webSocketDebuggerUrl === announcedUrl && !childExited) {
+          const file = path.join(browserDir, "debugger-url");
+          const tmp = `${file}.${randomUUID()}.tmp`;
+          await writeFile(tmp, announcedUrl, { mode: 0o600 });
+          await rename(tmp, file);
+          return { host: url.hostname, port: launchPort };
+        }
       }
-      return { host, port: launchPort };
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
   }

@@ -97,7 +97,8 @@ test("browserMode delegates to daemon browser_mode, enforces read-only scope, an
     const daemonPort = (daemon.address() as { port: number }).port;
     writeFileSync(
       join(home, "daemon.json"),
-      JSON.stringify({ pid: process.pid, host: "127.0.0.1", port: daemonPort, token: "test" }),
+      // The advertised PID may belong to another host or PID namespace.
+      JSON.stringify({ pid: 2147483647, host: "127.0.0.1", port: daemonPort, token: "test" }),
     );
 
     assert.equal((await browserMode("status")).mode, "headless");

@@ -115,7 +115,11 @@ export class TabState {
   addNetworkRequest(requestId: string, info: Omit<NetworkRequestInfo, "requestId">): void {
     const seq = this.nextSeq();
     const entry: SeqNetworkRequest = { ...info, requestId, seq };
-    this.networkRequests.push(entry);
+    const evicted = this.networkRequests.push(entry);
+    // A redirect can reuse an ID while a newer entry for it is still in the ring.
+    if (evicted && this.networkByRequestId.get(evicted.requestId) === evicted) {
+      this.networkByRequestId.delete(evicted.requestId);
+    }
     this.networkByRequestId.set(requestId, entry);
   }
 

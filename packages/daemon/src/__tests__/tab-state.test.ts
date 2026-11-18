@@ -34,6 +34,19 @@ function addNetworkRequest(
 // ---------------------------------------------------------------------------
 
 describe("TabStateManager", () => {
+  it("evicts network index entries with the ring while preserving reused request IDs", () => {
+    const tab = makeTab(makeManager());
+    for (let i = 0; i < 5_000; i++) addNetworkRequest(tab, { requestId: `req-${i}` });
+    const cap = tab.networkRequests.capacity;
+    assert.equal(tab.networkRequests.size, cap);
+    assert.equal(tab["networkByRequestId"].size, cap);
+    tab.clearNetwork();
+    addNetworkRequest(tab, { requestId: "redirect" });
+    addNetworkRequest(tab, { requestId: "redirect" });
+    for (let i = 1; i < cap; i++) addNetworkRequest(tab, { requestId: `next-${i}` });
+    tab.updateNetworkResponse("redirect", { status: 201 });
+    assert.equal(tab.networkRequests.toArray()[0].status, 201);
+  });
   describe("addTab short ID generation", () => {
     it("generates 4-char short ID from last 4 chars of targetId", () => {
       const mgr = makeManager();

@@ -61,9 +61,9 @@ export interface CdpTargetInfo {
 // CDP helpers
 // ---------------------------------------------------------------------------
 
-function fetchJson(url: string): Promise<unknown> {
+function fetchJson(url: string, signal: AbortSignal): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const req = httpRequest(url, { method: "GET" }, (res) => {
+    const req = httpRequest(url, { method: "GET", signal }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
       res.on("end", () => {
@@ -84,11 +84,15 @@ function fetchJson(url: string): Promise<unknown> {
   });
 }
 
-function connectWebSocket(url: string): Promise<WebSocket> {
+function connectWebSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
     const ws = new WebSocket(url);
-    ws.once("open", () => resolve(ws));
-    ws.once("error", reject);
+    const abort = () => { ws.terminate(); reject(signal.reason); };
+    signal.addEventListener("abort", abort, { once: true });
+    ws.once("open", () => { signal.removeEventListener("abort", abort); resolve(ws); });
+    ws.once("error", (err) => { signal.removeEventListener("abort", abort); reject(err); });
+    ws.once("close", () => { signal.removeEventListener("abort", abort); reject(new Error("CDP WebSocket closed during handshake")); });
   });
 }
 
@@ -119,6 +123,12 @@ export class CdpConnection {
 
   private connectionPromise: Promise<void> | null = null;
   private _connected = false;
+  private attempt: AbortController | null = null;
+  private ownedTargets = new Set<string>();
+  /** Browser-level debugger URL of the currently ready connection. */
+  get debuggerUrl(): string | null {
+    return this.connected ? this.socket!.url : null;
+  }
 
   /** Last connection error (for diagnostics in 503 responses). */
   lastError: string | null = null;
@@ -149,7 +159,7 @@ export class CdpConnection {
   /** True once `disconnect()` was called, to suppress reconnect on shutdown. */
   private intentionallyClosed = false;
 
-  constructor(host: string, port: number, tabManager: TabStateManager) {
+  constructor(host: string, port: number, tabManager: TabStateManager, private readonly connectTimeoutMs = 15_000) {
     this.host = host;
     this.port = port;
     this.tabManager = tabManager;
@@ -184,33 +194,44 @@ export class CdpConnection {
    * Idempotent — returns immediately if already connected.
    */
   async connect(): Promise<void> {
-    if (this._connected) return;
+    if (this.connected) return;
     if (this.connectionPromise) return this.connectionPromise;
 
-    // A fresh connect attempt clears the intentional-close guard so a later
-    // unexpected drop will trigger self-heal again.
     this.intentionallyClosed = false;
-    this.connectionPromise = this.doConnect();
-    try {
-      await this.connectionPromise;
-      this.lastError = null;
-    } catch (err) {
-      this.lastError = err instanceof Error ? err.message : String(err);
-      const connErr = new Error(this.lastError);
-      for (const waiter of this.readyWaiters) {
-        waiter.reject(connErr);
+    this.lastError = null;
+    const attempt = new AbortController();
+    this.attempt = attempt;
+    const timer = setTimeout(() => attempt.abort(new Error(`CDP connection timed out after ${this.connectTimeoutMs}ms`)), this.connectTimeoutMs);
+    const aborted = new Promise<never>((_, reject) => {
+      attempt.signal.addEventListener("abort", () => reject(attempt.signal.reason), { once: true });
+    });
+    const promise = (async () => {
+      try {
+        await Promise.race([this.doConnect(attempt.signal), aborted]);
+        if (attempt.signal.aborted) throw attempt.signal.reason;
+        this.lastError = null;
+      } catch (err) {
+        if (this.attempt === attempt) {
+          this.lastError = err instanceof Error ? err.message : String(err);
+          this.cleanup(new Error(this.lastError));
+        }
+        throw err;
+      } finally {
+        clearTimeout(timer);
+        if (this.attempt === attempt) this.attempt = null;
       }
-      this.readyWaiters = [];
-      throw err;
-    } finally {
-      this.connectionPromise = null;
+    })();
+    this.connectionPromise = promise;
+    try { await promise; } finally {
+      if (this.connectionPromise === promise) this.connectionPromise = null;
     }
   }
 
-  private async doConnect(): Promise<void> {
+  private async doConnect(signal: AbortSignal): Promise<void> {
     const versionData = (await fetchJson(
-      `http://${this.host}:${this.port}/json/version`,
+      `http://${this.host}:${this.port}/json/version`, signal,
     )) as JsonObject;
+    signal.throwIfAborted();
     const wsUrl = versionData.webSocketDebuggerUrl;
     if (typeof wsUrl !== "string" || !wsUrl) {
       throw new Error("CDP endpoint missing webSocketDebuggerUrl");
@@ -225,9 +246,9 @@ export class CdpConnection {
     const ua = versionData["User-Agent"] ?? versionData.userAgent;
     this.userAgent = typeof ua === "string" ? ua : (typeof browser === "string" ? browser : null);
 
-    const ws = await connectWebSocket(wsUrl);
+    const ws = await connectWebSocket(wsUrl, signal);
+    if (signal.aborted) { ws.terminate(); throw signal.reason; }
     this.socket = ws;
-    this._connected = true;
     this.setupListeners(ws);
 
     // Discover + auto-attach existing page targets
@@ -236,10 +257,23 @@ export class CdpConnection {
       targetInfos: Array<{ targetId: string; type: string; title: string; url: string }>;
     }>("Target.getTargets");
 
+    signal.throwIfAborted();
     const pages = (result.targetInfos || []).filter((t) => t.type === "page");
+    const liveTargets = new Set(pages.map((page) => page.targetId));
+    if (!this.preservingTabsForSwap) {
+      for (const targetId of this.ownedTargets) {
+        if (!liveTargets.has(targetId) && !this.sessions.has(targetId)) {
+          this.tabManager.removeTab(targetId);
+          this.ownedTargets.delete(targetId);
+        }
+      }
+    }
     for (const page of pages) {
       await this.attachAndEnable(page.targetId).catch(() => {});
+      signal.throwIfAborted();
     }
+    if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) throw new Error("CDP connection closed during initialization");
+    this._connected = true;
 
     // Notify any waiters that CDP is ready
     for (const waiter of this.readyWaiters) {
@@ -250,7 +284,7 @@ export class CdpConnection {
 
   /** Wait until CDP connection is established (for two-phase startup). */
   waitUntilReady(): Promise<void> {
-    if (this._connected) return Promise.resolve();
+    if (this.connected) return Promise.resolve();
     if (this.lastError) return Promise.reject(new Error(this.lastError));
     return new Promise<void>((resolve, reject) => {
       this.readyWaiters.push({ resolve, reject });
@@ -261,24 +295,28 @@ export class CdpConnection {
   disconnect(): void {
     // Mark intentional so the ws "close" handler does not trigger self-heal.
     this.intentionallyClosed = true;
-    if (this.socket) {
-      try {
-        this.socket.close();
-      } catch {}
-    }
+    const error = new Error("CDP connection closed");
+    this.attempt?.abort(error);
+    this.attempt = null;
+    this.connectionPromise = null;
+    this.cleanup(error);
+  }
+
+  private cleanup(error: Error): void {
+    const socket = this.socket;
     this.socket = null;
     this._connected = false;
-
+    if (socket) {
+      try { socket.terminate(); } catch {}
+    }
     for (const p of this.pending.values()) {
       clearTimeout(p.timer);
-      p.reject(new Error("CDP connection closed"));
+      p.reject(error);
     }
     this.pending.clear();
-
-    // Reject any waiters
-    for (const waiter of this.readyWaiters) {
-      waiter.reject(new Error("CDP connection closed before ready"));
-    }
+    this.sessions.clear();
+    this.attachedTargets.clear();
+    for (const waiter of this.readyWaiters) waiter.reject(error);
     this.readyWaiters = [];
   }
 
@@ -288,6 +326,7 @@ export class CdpConnection {
 
   private setupListeners(ws: WebSocket): void {
     ws.on("message", (raw) => {
+      if (this.socket !== ws) return;
       const message = JSON.parse(raw.toString()) as JsonObject;
 
       // Response to a browser-level command
@@ -331,6 +370,7 @@ export class CdpConnection {
             this.attachedTargets.delete(sessionId);
             if (!this.preservingTabsForSwap) {
               this.tabManager.removeTab(targetId);
+              this.ownedTargets.delete(targetId);
             }
           }
         }
@@ -359,6 +399,7 @@ export class CdpConnection {
           }
           if (!this.preservingTabsForSwap) {
             this.tabManager.removeTab(targetId);
+            this.ownedTargets.delete(targetId);
           }
         }
         return;
@@ -374,31 +415,13 @@ export class CdpConnection {
     });
 
     ws.on("close", () => {
-      this._connected = false;
-      this.socket = null;
+      if (this.socket !== ws) return;
+      const wasReady = this._connected;
       this.lastError = "CDP WebSocket closed unexpectedly";
-      for (const p of this.pending.values()) {
-        clearTimeout(p.timer);
-        p.reject(new Error("CDP connection closed"));
-      }
-      this.pending.clear();
-
-      const closeErr = new Error(this.lastError);
-      for (const waiter of this.readyWaiters) {
-        waiter.reject(closeErr);
-      }
-      this.readyWaiters = [];
-
-      // Reset per-connection target/session state so a reconnect starts clean.
-      this.sessions.clear();
-      this.attachedTargets.clear();
-
-      // Self-heal: unless we closed on purpose (shutdown), ask the owner to
-      // restart the CDP bring-up loop. This re-discovers/relaunches Chrome,
-      // so the tray returns to green after the browser is reopened.
-      if (!this.intentionallyClosed && this.onUnexpectedClose) {
-        this.onUnexpectedClose();
-      }
+      const error = new Error(this.lastError);
+      this.attempt?.abort(error);
+      this.cleanup(error);
+      if (wasReady && !this.intentionallyClosed) this.onUnexpectedClose?.();
     });
 
     ws.on("error", () => {});
@@ -613,14 +636,18 @@ export class CdpConnection {
   async attachAndEnable(targetId: string): Promise<string> {
     if (this.sessions.has(targetId)) {
       // Already attached — register tab state if not present
+      this.ownedTargets.add(targetId);
       this.tabManager.addTab(targetId).browserId = this.browserId;
       return this.sessions.get(targetId)!;
     }
 
+    const socket = this.socket;
     const result = await this.browserCommand<{ sessionId: string }>(
       "Target.attachToTarget",
       { targetId, flatten: true },
     );
+    if (!socket || this.socket !== socket) throw new Error("CDP connection closed");
+    this.ownedTargets.add(targetId);
     this.sessions.set(targetId, result.sessionId);
     this.attachedTargets.set(result.sessionId, targetId);
 
@@ -628,15 +655,16 @@ export class CdpConnection {
     this.tabManager.addTab(targetId).browserId = this.browserId;
 
     // Enable domains
-    await this.sessionCommand(targetId, "Page.enable").catch(() => {});
-    await this.sessionCommand(targetId, "Runtime.enable").catch(() => {});
-    // Bound the response bodies Chrome keeps for `network --with-body`;
-    // unbounded, six API-heavy tabs held ~155MB more renderer memory.
-    await this.sessionCommand(targetId, "Network.enable", { maxTotalBufferSize: 10_000_000, maxResourceBufferSize: 5_000_000 }).catch(() => {});
-    await this.sessionCommand(targetId, "DOM.enable").catch(() => {});
-    // Agent tabs are opened in the background; without focus emulation the
-    // first synthetic mouse event on a hidden tab blocks for ~5s.
-    await this.sessionCommand(targetId, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
+    const domains: Array<[string, JsonObject?]> = [
+      ["Page.enable"], ["Runtime.enable"],
+      ["Network.enable", { maxTotalBufferSize: 10_000_000, maxResourceBufferSize: 5_000_000 }],
+      ["DOM.enable"], ["Emulation.setFocusEmulationEnabled", { enabled: true }],
+    ];
+    for (const [method, params] of domains) {
+      if (this.socket !== socket) throw new Error("CDP connection closed");
+      await this.sessionCommand(targetId, method, params).catch(() => {});
+    }
+    if (this.socket !== socket) throw new Error("CDP connection closed");
 
     return result.sessionId;
   }
@@ -712,7 +740,17 @@ export class CdpConnection {
         timer,
         owner: cdpCallContext.getStore(),
       });
-      socket.send(payload);
+      try {
+        socket.send(payload, (err) => {
+          if (!err || !this.pending.delete(id)) return;
+          clearTimeout(timer);
+          reject(err);
+        });
+      } catch (err) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(err);
+      }
     });
   }
 

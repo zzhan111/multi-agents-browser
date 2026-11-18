@@ -4,7 +4,6 @@ import {
   COMMANDS,
   generateId,
   readDaemonJson,
-  DAEMON_DIR,
   browserMode,
   clientCommandTimeoutMs,
   commandTimeoutMs,
@@ -13,10 +12,8 @@ import {
 import type { AdapterCatalogResult, CatalogQuery, CommandDef, Request, Response, DaemonInfo } from "@ma-browser/shared";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import path from "node:path";
 import { z } from "zod";
 import { discoverSiteCatalog } from "./site-discovery.js";
 
@@ -106,7 +103,14 @@ async function isDaemonRunning(): Promise<boolean> {
   } catch { return false; }
 }
 
+let daemonStarting: Promise<void> | null = null;
+
 async function ensureDaemon(): Promise<void> {
+  if (!daemonStarting) daemonStarting = startOrConnectDaemon().finally(() => { daemonStarting = null; });
+  return daemonStarting;
+}
+
+async function startOrConnectDaemon(): Promise<void> {
   if (await isDaemonRunning()) return;
 
   // Connect-only: defer daemon ownership to the tray. Don't spawn — a
@@ -120,30 +124,12 @@ async function ensureDaemon(): Promise<void> {
   // Invalidate cache — daemon is not running so cached info is stale
   cachedDaemonInfo = null;
 
-  // Discover CDP port first (auto-launches Chrome if needed)
-  let cdpArgs: string[] = [];
-  try {
-    const cliPath = getCliPath();
-    await new Promise<string>((resolve, reject) => {
-      execFile(process.execPath, [cliPath, "daemon", "status", "--json"], { timeout: 15000 }, (err, stdout) => {
-        if (err) reject(err); else resolve(stdout);
-      });
-    });
-    // If CLI daemon status succeeded, daemon is already running
-    if (await isDaemonRunning()) return;
-  } catch {
-    // CLI failed — daemon not running, try spawning with CDP discovery
-    try {
-      const portFile = path.join(DAEMON_DIR, "browser", "cdp-port");
-      const port = (await readFile(portFile, "utf8")).trim();
-      if (port) cdpArgs = ["--cdp-port", port];
-    } catch {}
-  }
-
-  const child = spawn(process.execPath, [getDaemonPath(), ...cdpArgs], {
+  // The daemon alone discovers and starts browsers.
+  const child = spawn(process.execPath, [getDaemonPath()], {
     detached: true, stdio: "ignore", env: { ...process.env },
     windowsHide: true,  // suppress console window when MCP spawns a daemon
   });
+  child.on("error", () => {});
   child.unref();
   // wait up to 10s — re-read daemon.json each iteration (daemon writes it on startup)
   for (let i = 0; i < 50; i++) {
