@@ -26,6 +26,7 @@ if (-not (Test-Path -LiteralPath $modeFile)) {
 Remove-Item Env:\MA_BROWSER_HEADLESS -ErrorAction SilentlyContinue
 $env:MA_BROWSER_DEFAULT_MODE = 'headless'
 $env:MA_BROWSER_RESTORE_SESSION = '1'
+$env:MA_BROWSER_TRAY_MANAGED = '1'
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $statusItem = $menu.Items.Add('正在启动')

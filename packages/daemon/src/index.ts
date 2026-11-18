@@ -214,8 +214,8 @@ function explicitEndpoints(options: DaemonOptions): CdpAddress[] {
 /**
  * Endpoint for the default browser, via the policy shared with the CLI
  * (resolveCdpEndpoint): explicit > running managed > discovered > launch.
- * Browsers already attached through cdp_attach are skipped, and while one of
- * them is live no managed browser is launched — commands go there instead.
+ * A standalone daemon can use live attached browsers without launching Chrome.
+ * The Windows tray keeps a managed default so its window controls stay available.
  */
 async function discoverCdpPort(
   pool: BrowserPool,
@@ -228,9 +228,11 @@ async function discoverCdpPort(
     throw new Error(`No Chrome reachable at ${options.cdpHost}:${options.cdpPort} (--strict-cdp)`);
   }
 
-  const launch = !pool.hasLiveExtra();
+  const managedOnly = process.env.MA_BROWSER_TRAY_MANAGED === "1";
+  const launch = managedOnly || !pool.hasLiveExtra();
   const resolved = await resolveCdpEndpoint({
     explicit: explicitEndpoints(options),
+    managedOnly,
     exclude: pool.extraIds(),
     launch,
     launchPort: options.cdpPort,

@@ -48,6 +48,9 @@ export async function discoverCdpPort(): Promise<{ host: string; port: number } 
   if (Number.isInteger(explicitPort) && explicitPort > 0) {
     explicit.push({ host: "127.0.0.1", port: explicitPort });
   }
-  const resolved = await resolveCdpEndpoint({ explicit });
+  const resolved = await resolveCdpEndpoint({
+    explicit,
+    managedOnly: process.env.MA_BROWSER_TRAY_MANAGED === "1",
+  });
   return resolved ? { host: resolved.host, port: resolved.port } : null;
 }

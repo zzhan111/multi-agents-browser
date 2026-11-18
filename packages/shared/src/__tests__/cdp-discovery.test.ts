@@ -130,6 +130,25 @@ test("resolve priority: explicit > running managed > discovered > launch", async
   }
 });
 
+test("tray resolution never substitutes another Chrome for its managed browser", async () => {
+  const managed = await fakeCdp();
+  const other = await fakeCdp();
+  const options = {
+    explicit: [{ host: "127.0.0.1", port: other }],
+    discover: isolated([other]),
+    managedOnly: true,
+    launch: false,
+  };
+  setManagedPort(managed);
+  try {
+    assert.deepEqual(await resolveCdpEndpoint(options), { host: "127.0.0.1", port: managed, source: "managed" });
+    setManagedPort(await closedPort());
+    assert.equal(await resolveCdpEndpoint(options), null);
+  } finally {
+    setManagedPort(null);
+  }
+});
+
 test("resolve skips unreachable explicit endpoints and excluded browsers", async () => {
   const user = await fakeCdp();
   const other = await fakeCdp();
