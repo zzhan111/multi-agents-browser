@@ -75,7 +75,9 @@ Agents can call `ma-browser mode status|headed|headless [--focus] --json` or the
 
 To verify the left-click flow by hand: with the tray in headless mode, start `.\scripts\check-windows-tray.ps1 -Mode headed -ExpectForeground -DelaySeconds 10`, then left-click the tray icon once; the window pops up immediately and the check passes once it is in the foreground. Cover the window with another app and repeat with `-DelaySeconds 10`.
 
-To start the tray at Windows sign-in, run this from the repository directory:
+Right-click → **开机自启** toggles Windows sign-in auto-start (`HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\ma-browser-tray`). Right-click → **隐藏托盘图标（Ctrl+Alt+Shift+M 恢复）** enters hidden mode (hides the tray icon while keeping the daemon and browser running); press **Ctrl+Alt+Shift+M** (or re-run `windows-tray.ps1`) to restore resident tray mode.
+
+To start the tray at Windows sign-in from PowerShell, run this from the repository directory:
 
 ```powershell
 $trayScript = (Resolve-Path .\scripts\windows-tray.ps1).Path

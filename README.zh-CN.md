@@ -75,7 +75,9 @@ Agent 可调用 `ma-browser mode status|headed|headless [--focus] --json` 或 MC
 
 手工验证左键流程：托盘处于无头模式时，先运行 `.\scripts\check-windows-tray.ps1 -Mode headed -ExpectForeground -DelaySeconds 10`，再左键点击托盘图标，窗口即时弹出置前后检查通过。用其他程序盖住窗口后以 `-DelaySeconds 10` 重复一次。
 
-需要在 Windows 登录后自动启动时，在仓库目录运行：
+右键 →「开机自启」可直接切换 Windows 登录自启（写入 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\ma-browser-tray`）。右键 →「隐藏托盘图标（Ctrl+Alt+Shift+M 恢复）」可进入隐藏模式（隐藏任务栏托盘图标，后台和浏览器继续运行）；按全局快捷键 **Ctrl+Alt+Shift+M**（或再次运行 `windows-tray.ps1`）即可恢复为任务栏常驻模式。
+
+也可以直接在仓库目录用 PowerShell 配置 Windows 登录自启：
 
 ```powershell
 $trayScript = (Resolve-Path .\scripts\windows-tray.ps1).Path
