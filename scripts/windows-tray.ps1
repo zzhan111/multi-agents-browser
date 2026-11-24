@@ -3,7 +3,15 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $mutex = New-Object System.Threading.Mutex($false, 'Local\ma-browser-tray')
-if (-not $mutex.WaitOne(0)) { return }
+if (-not $mutex.WaitOne(0)) {
+  try {
+    $restoreSignal = [System.Threading.EventWaitHandle]::OpenExisting('Local\ma-browser-tray-restore')
+    $restoreSignal.Set() | Out-Null
+    $restoreSignal.Dispose()
+  } catch { }
+  $mutex.Dispose()
+  return
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 $cli = Join-Path $root 'dist\cli.js'
@@ -42,12 +50,19 @@ $modeItem.Add_Click({
     }
   }
 })
-$menu.Add_Opening({ Update-ModeMenu })
+$menu.Add_Opening({
+  Update-ModeMenu
+  $autostartItem.Checked = Test-TrayAutostart
+})
 # Discover / attach browsers that already expose remote debugging (same `cdp` CLI semantics).
 $cdpMenu = New-Object System.Windows.Forms.ToolStripMenuItem('发现并接管已有 Chrome')
 $cdpMenu.DropDownItems.Add('正在扫描…') | Out-Null
 $cdpMenu.Add_DropDownOpening({ Update-CdpMenu })
 $menu.Items.Add($cdpMenu) | Out-Null
+$autostartItem = $menu.Items.Add('开机自启')
+$autostartItem.Add_Click({ Toggle-TrayAutostart })
+$hideTrayItem = $menu.Items.Add('隐藏托盘图标（Ctrl+Alt+Shift+M 恢复）')
+$hideTrayItem.Add_Click({ Enter-HiddenMode })
 $logItem = $menu.Items.Add('打开日志目录')
 $logItem.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$logDir`"" })
 $exitItem = $menu.Items.Add('退出托盘（后台继续运行）')
@@ -135,13 +150,134 @@ public static class MaBrowserWindow {
     return GetForegroundWindow() == hWnd;
   }
 }
-'@
+
+public sealed class MaTrayHotkeyWindow : System.Windows.Forms.NativeWindow, IDisposable {
+  public const int WM_HOTKEY = 0x0312;
+  public const int HOTKEY_ID = 0x4D41;
+  public const uint MOD_ALT = 0x0001;
+  public const uint MOD_CONTROL = 0x0002;
+  public const uint MOD_SHIFT = 0x0004;
+  public const uint MOD_NOREPEAT = 0x4000;
+  public const uint VK_M = 0x4D;
+
+  [DllImport("user32.dll", SetLastError = true)]
+  static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+  [DllImport("user32.dll", SetLastError = true)]
+  static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+  public event EventHandler HotkeyPressed;
+  public bool IsRegistered { get; private set; }
+
+  public MaTrayHotkeyWindow() {
+    CreateHandle(new System.Windows.Forms.CreateParams());
+  }
+
+  public bool Register(uint modifiers, uint vk) {
+    Unregister();
+    if (Handle == IntPtr.Zero) return false;
+    IsRegistered = RegisterHotKey(Handle, HOTKEY_ID, modifiers, vk);
+    return IsRegistered;
+  }
+
+  public void Unregister() {
+    if (IsRegistered && Handle != IntPtr.Zero) {
+      UnregisterHotKey(Handle, HOTKEY_ID);
+      IsRegistered = false;
+    }
+  }
+
+  protected override void WndProc(ref System.Windows.Forms.Message m) {
+    if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == HOTKEY_ID) {
+      EventHandler handler = HotkeyPressed;
+      if (handler != null) handler(this, EventArgs.Empty);
+    }
+    base.WndProc(ref m);
+  }
+
+  public void Dispose() {
+    Unregister();
+    if (Handle != IntPtr.Zero) DestroyHandle();
+  }
+}
+'@ -ReferencedAssemblies System.Windows.Forms
 
 $script:showing = $false
 $script:frontDeadline = $null
 $script:starter = $null
 $script:lastStart = [DateTime]::MinValue
 $script:cachedMode = $null
+$script:trayHidden = $false
+$script:autostartRegPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$script:autostartRegName = 'ma-browser-tray'
+$script:hotkeyModifiers = [MaTrayHotkeyWindow]::MOD_CONTROL -bor [MaTrayHotkeyWindow]::MOD_ALT -bor [MaTrayHotkeyWindow]::MOD_SHIFT -bor [MaTrayHotkeyWindow]::MOD_NOREPEAT
+$script:hotkeyKey = [MaTrayHotkeyWindow]::VK_M
+
+function Get-TrayAutostartCommand {
+  $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { Join-Path $PSScriptRoot 'windows-tray.ps1' }
+  return "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+}
+
+function Test-TrayAutostart {
+  try {
+    $props = Get-ItemProperty -Path $script:autostartRegPath -Name $script:autostartRegName -ErrorAction SilentlyContinue
+    if (-not $props) { return $false }
+    $val = [string]$props.($script:autostartRegName)
+    return (-not [string]::IsNullOrWhiteSpace($val)) -and ($val -match 'windows-tray\.ps1')
+  } catch { return $false }
+}
+
+function Set-TrayAutostart([bool]$enable) {
+  if ($enable) {
+    if (-not (Test-Path -LiteralPath $script:autostartRegPath)) {
+      New-Item -Path $script:autostartRegPath -Force | Out-Null
+    }
+    Set-ItemProperty -Path $script:autostartRegPath -Name $script:autostartRegName -Value (Get-TrayAutostartCommand)
+  } else {
+    Remove-ItemProperty -Path $script:autostartRegPath -Name $script:autostartRegName -ErrorAction SilentlyContinue
+  }
+}
+
+function Toggle-TrayAutostart {
+  $target = -not (Test-TrayAutostart)
+  try {
+    Set-TrayAutostart $target
+    $autostartItem.Checked = Test-TrayAutostart
+    if ($autostartItem.Checked) {
+      Show-Balloon 'ma-browser 开机自启已开启' 'Windows 登录后将自动在任务栏常驻。'
+    } else {
+      Show-Balloon 'ma-browser 开机自启已关闭' '下次登录将不会自动启动托盘。'
+    }
+  } catch {
+    Show-TrayError '无法更新开机自启设置' $_.Exception.Message
+  }
+}
+
+function Ensure-RestoreHotkey {
+  if (-not $script:hotkeyWindow) { return $false }
+  if ($script:hotkeyWindow.IsRegistered) { return $true }
+  return [bool]$script:hotkeyWindow.Register($script:hotkeyModifiers, $script:hotkeyKey)
+}
+
+function Enter-HiddenMode {
+  if (-not (Ensure-RestoreHotkey)) {
+    Show-TrayError '无法进入隐藏模式' '全局快捷键 Ctrl+Alt+Shift+M 已被其他程序占用，为避免无法恢复，已取消隐藏托盘图标。'
+    return
+  }
+  $script:trayHidden = $true
+  $tray.Visible = $false
+  if ($restorePollTimer) { $restorePollTimer.Start() }
+}
+
+function Restore-TrayIcon {
+  $wasHidden = $script:trayHidden
+  $script:trayHidden = $false
+  if ($restorePollTimer) { $restorePollTimer.Stop() }
+  if (-not $tray.Visible) { $tray.Visible = $true }
+  if ($wasHidden) {
+    Show-Balloon 'ma-browser 已恢复常驻' '托盘图标已恢复显示（右键可再次进入隐藏模式）。'
+  }
+}
 
 function Get-ManagedBrowserPid {
   try {
@@ -388,6 +524,17 @@ function Update-Tray {
   Complete-PendingFront
 }
 
+$restoreEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Local\ma-browser-tray-restore')
+$restorePollTimer = New-Object System.Windows.Forms.Timer
+$restorePollTimer.Interval = 300
+$restorePollTimer.Add_Tick({
+  if ($restoreEvent.WaitOne(0)) { Restore-TrayIcon }
+})
+
+$script:hotkeyWindow = New-Object MaTrayHotkeyWindow
+$script:hotkeyWindow.Add_HotkeyPressed({ Restore-TrayIcon })
+Ensure-RestoreHotkey | Out-Null
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
 $timer.Add_Tick({ Update-Tray })
@@ -397,6 +544,10 @@ try {
   [System.Windows.Forms.Application]::Run()
 } finally {
   $timer.Stop()
+  $restorePollTimer.Stop()
+  if ($script:hotkeyWindow) { $script:hotkeyWindow.Dispose() }
+  if ($restoreEvent) { $restoreEvent.Dispose() }
+  $restorePollTimer.Dispose()
   $tray.Visible = $false
   $tray.Dispose()
   $timer.Dispose()
